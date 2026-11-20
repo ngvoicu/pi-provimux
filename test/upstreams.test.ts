@@ -9,7 +9,9 @@ import {
 	type ModelAccounts,
 	REQUEST_EVENT,
 	routeOf,
+	statedUpstream,
 	UPSTREAMS_EVENT,
+	type Upstream,
 	UpstreamsAnnouncer,
 	upstreamOf,
 } from "../extensions/upstreams.ts";
@@ -146,65 +148,65 @@ describe("a model's route", () => {
 		expect(answeredUpstreams("other", "oauth", accounts)).toBeUndefined();
 	});
 
-	it("what answered, when CLIProxyAPI names the provider: that credential, whatever its priority", () => {
-		const devin: Account = { provider: "devin", kind: "oauth", priority: -15 };
-		const both = listed({ "claude-opus-5-5": [login, devin, key] });
-		// The kind alone can't tell a Claude login from a Devin login at the same priority.
-		expect(answeredUpstreams("claude-opus-5-5", "oauth", both)).toEqual([
-			{ provider: "anthropic", subscription: true },
-			{ provider: "devin", subscription: true },
-		]);
-		expect(answeredUpstreams("claude-opus-5-5", "oauth", both, { provider: "claude" })).toEqual([
-			{ provider: "anthropic", subscription: true },
-		]);
-		expect(answeredUpstreams("claude-opus-5-5", "oauth", both, { provider: "devin" })).toEqual([
-			{ provider: "devin", subscription: true },
-		]);
-		// Not narrowed by priority: a fallback that answered is what answered.
-		const fallback = listed({ "claude-opus-5-5": [login, { ...devin, priority: -40 }] });
-		expect(answeredUpstreams("claude-opus-5-5", "oauth", fallback, { provider: "devin" })).toEqual([
-			{ provider: "devin", subscription: true },
-		]);
+	it("what answered, when CLIProxyAPI names the provider: that credential, from the response alone", () => {
+		expect(statedUpstream("claude-opus-5-5", { provider: "claude", kind: "oauth" })).toEqual({
+			provider: "anthropic",
+			subscription: true,
+		});
+		expect(statedUpstream("claude-opus-5-5", { provider: "devin", kind: "oauth" })).toEqual({
+			provider: "devin",
+			subscription: true,
+		});
+		// No host: the credential has none, so a Claude key is Anthropic's own; with one, it goes by the host.
+		expect(statedUpstream("claude-opus-5-5", { provider: "claude", kind: "apikey" })).toEqual({
+			provider: "anthropic",
+			subscription: false,
+		});
+		expect(statedUpstream("claude-opus-5-5", { provider: "claude", kind: "apikey", host: "OpenRouter.ai" })).toEqual({
+			provider: "openrouter",
+			subscription: false,
+		});
+		// A prefix the proxy puts before a credential's models is left out, as for the routes.
+		expect(statedUpstream("devin/swe-2", { provider: "devin", kind: "oauth" })).toEqual({
+			provider: "devin",
+			model: "swe-2",
+			subscription: true,
+		});
 	});
 
-	it("the one listed credential that matches fills in what the response does not say", () => {
-		const mine = { ...at("openrouter.ai"), priority: -30 };
-		const accounts = listed({ "openai/gpt-6.1-sol": [at("llm.example.com", "openai-compatible-other"), mine] });
-		// No host in the response: the listed entry's host says it is OpenRouter.
-		expect(
-			answeredUpstreams("openai/gpt-6.1-sol", "apikey", accounts, { provider: "openai-compatible-mine" }),
-		).toEqual([{ provider: "openrouter", subscription: false }]);
-		expect(
-			answeredUpstreams("openai/gpt-6.1-sol", "apikey", accounts, {
-				provider: "openai-compatible-mine",
-				host: "openrouter.ai",
-			}),
-		).toEqual([{ provider: "openrouter", subscription: false }]);
+	it("a named provider is matched without regard to letter case", () => {
+		expect(statedUpstream("claude-opus-5-5", { provider: "DeViN", kind: "oauth" })).toEqual({
+			provider: "devin",
+			subscription: true,
+		});
+		expect(statedUpstream("gpt-6.1-sol", { provider: "Codex", kind: "apikey" })).toEqual({
+			provider: "openai",
+			subscription: false,
+		});
 	});
 
-	it("a credential the list does not have (older than the proxy's state): what the response says stands alone", () => {
-		const accounts = listed({ "claude-opus-5-5": [login], "openai/gpt-6.1-sol": [at("llm.example.com")] });
-		expect(answeredUpstreams("claude-opus-5-5", "oauth", accounts, { provider: "devin" })).toEqual([
-			{ provider: "devin", subscription: true },
-		]);
-		expect(answeredUpstreams("claude-opus-5-5", "apikey", accounts, { provider: "claude" })).toEqual([
-			{ provider: "anthropic", subscription: false },
-		]);
-		// A model not listed at all, and a listed entry now sent to another host.
-		expect(answeredUpstreams("devin/swe-2", "oauth", accounts, { provider: "devin" })).toEqual([
-			{ provider: "devin", model: "swe-2", subscription: true },
-		]);
+	it("a named credential that leads to a service not known is still named: by its host, else its provider", () => {
 		expect(
-			answeredUpstreams("openai/gpt-6.1-sol", "apikey", accounts, {
-				provider: "openai-compatible-mine",
-				host: "openrouter.ai",
+			statedUpstream("claude-opus-5-5", {
+				provider: "openai-compatible-lab",
+				kind: "apikey",
+				host: "api.example.test",
 			}),
-		).toEqual([{ provider: "openrouter", subscription: false }]);
-		// Named, but leading somewhere not known: not known, and no guess from the kind.
-		expect(answeredUpstreams("claude-opus-5-5", "oauth", accounts, { provider: "something-new" })).toBeUndefined();
+		).toEqual({ provider: "api.example.test", subscription: false });
 		expect(
-			answeredUpstreams("openai/gpt-6.1-sol", "apikey", accounts, { provider: "openai-compatible-mine" }),
-		).toBeUndefined();
+			statedUpstream("claude-opus-5-5", { provider: "claude", kind: "apikey", host: "LLM.Example.com" }),
+		).toEqual({
+			provider: "llm.example.com",
+			subscription: false,
+		});
+		expect(statedUpstream("claude-opus-5-5", { provider: "openai-compatible-mine", kind: "apikey" })).toEqual({
+			provider: "openai-compatible-mine",
+			subscription: false,
+		});
+		expect(statedUpstream("muse-ember-1.0", { provider: "SomeLab", kind: "oauth" })).toEqual({
+			provider: "SomeLab",
+			subscription: true,
+		});
 	});
 });
 
@@ -260,6 +262,35 @@ describe("the events", () => {
 		return { pi, handlers, listeners, emitted };
 	}
 	const accounts = listed({ "claude-opus-5-5": [login, key] }, { "claude-opus-5-5": "anthropic" });
+	const answered = (upstreams: Upstream[]) => [
+		ANSWERED_EVENT,
+		{ provider: "cliproxyapi", model: "claude-opus-5-5", upstreams },
+	];
+	/** An announcer an extension asked for routes, with what its lookup gives; `settle`: wait for the lookup. */
+	async function asked(fetchAccounts: () => Promise<ModelAccounts>, settle = true) {
+		const { pi, handlers, listeners, emitted } = fakePi();
+		const announcer = new UpstreamsAnnouncer(
+			pi,
+			"cliproxyapi",
+			() => ({ baseUrlInput: "x", apiKey: "k" }),
+			fetchAccounts,
+		);
+		announcer.register();
+		listeners.get(REQUEST_EVENT)!({});
+		if (settle) await announcer.announce();
+		emitted.length = 0;
+		const respond = (headers: Record<string, string>) =>
+			handlers.get("after_provider_response")!(
+				{ status: 200, headers },
+				{ model: { provider: "cliproxyapi", id: "claude-opus-5-5" } },
+			);
+		const streamEvent = (data: unknown) =>
+			handlers.get("provider_stream_event")!(
+				{ type: "provider_stream_event", provider: "cliproxyapi", api: "x", model: "claude-opus-5-5", data },
+				{},
+			);
+		return { announcer, emitted, respond, streamEvent };
+	}
 
 	it("every model's route when an extension asks, again after a refresh, and what answered a request", async () => {
 		const { pi, handlers, listeners, emitted } = fakePi();
@@ -425,6 +456,107 @@ describe("the events", () => {
 		]);
 	});
 
+	it("a named response is built from the response alone, never from a list older than the proxy", async () => {
+		// The list still has a Claude key sent to OpenRouter; the proxy now answers with one on Anthropic's own address.
+		const hosted = listed(
+			{ "claude-opus-5-5": [{ provider: "claude", kind: "apikey", priority: 10, host: "openrouter.ai" }] },
+			{ "claude-opus-5-5": "anthropic" },
+		);
+		const { emitted, respond, streamEvent } = await asked(async () => hosted);
+		respond({ "X-Cpa-Auth-Kind": "apikey", "X-Cpa-Auth-Provider": "claude" });
+		streamEvent({
+			type: "response.created",
+			response: { id: "r" },
+			cpa_auth_kind: "apikey",
+			cpa_auth_provider: "claude",
+		});
+		streamEvent({
+			type: "response.created",
+			cpa_auth_kind: "apikey",
+			cpa_auth_provider: "claude",
+			cpa_auth_host: "",
+		});
+		// And the other way round: a host the list does not have.
+		respond({ "X-Cpa-Auth-Kind": "apikey", "X-Cpa-Auth-Provider": "claude", "X-Cpa-Auth-Host": "api.anthropic.com" });
+		const native = [{ provider: "anthropic", subscription: false }];
+		expect(emitted).toEqual([answered(native), answered(native), answered(native), answered(native)]);
+
+		const { emitted: again, respond: respondAgain } = await asked(async () => accounts);
+		respondAgain({
+			"X-Cpa-Auth-Kind": "apikey",
+			"X-Cpa-Auth-Provider": "claude",
+			"X-Cpa-Auth-Host": "openrouter.ai",
+		});
+		expect(again).toEqual([answered([{ provider: "openrouter", subscription: false }])]);
+	});
+
+	it("a named response does not wait for the credential list, but only once an extension asked", async () => {
+		const devinFrame = { type: "response.created", cpa_auth_kind: "oauth", cpa_auth_provider: "devin" };
+		const devinHeaders = { "x-cpa-auth-kind": "oauth", "x-cpa-auth-provider": "devin" };
+		const devin = answered([{ provider: "devin", subscription: true }]);
+
+		// Nobody asked: nothing.
+		const quiet = fakePi();
+		new UpstreamsAnnouncer(
+			quiet.pi,
+			"cliproxyapi",
+			() => ({ baseUrlInput: "x", apiKey: "k" }),
+			async () => accounts,
+		).register();
+		quiet.handlers.get("after_provider_response")!(
+			{ status: 200, headers: devinHeaders },
+			{ model: { provider: "cliproxyapi", id: "claude-opus-5-5" } },
+		);
+		expect(quiet.emitted).toEqual([]);
+
+		// The lookup still pending: the named answer is said, the kind alone still waits for the list.
+		let release: (value: ModelAccounts) => void = () => {};
+		const pending = await asked(() => new Promise<ModelAccounts>((resolve) => (release = resolve)), false);
+		pending.streamEvent(devinFrame);
+		pending.respond(devinHeaders);
+		pending.respond({ "x-cpa-auth-kind": "oauth" });
+		expect(pending.emitted).toEqual([devin, devin]);
+		release(accounts);
+		await pending.announcer.announce();
+		pending.emitted.length = 0;
+		pending.streamEvent(devinFrame);
+		expect(pending.emitted).toEqual([devin]);
+
+		// The lookup failed: the same.
+		const failed = await asked(async () => {
+			throw new Error("503");
+		});
+		failed.respond(devinHeaders);
+		failed.streamEvent(devinFrame);
+		failed.respond({ "x-cpa-auth-kind": "oauth" });
+		expect(failed.emitted).toEqual([devin, devin]);
+	});
+
+	it("a route through a service not known is still told, so a change of route is seen", async () => {
+		const { emitted, respond, streamEvent } = await asked(async () => accounts);
+		const claudeLogin = { "X-Cpa-Auth-Kind": "oauth", "X-Cpa-Auth-Provider": "claude" };
+		respond(claudeLogin);
+		respond({
+			"X-Cpa-Auth-Host": "api.example.test",
+			"X-Cpa-Auth-Kind": "apikey",
+			"X-Cpa-Auth-Provider": "openai-compatible-lab",
+		});
+		respond(claudeLogin);
+		streamEvent({
+			type: "response.created",
+			response: { id: "resp-u" },
+			cpa_auth_kind: "apikey",
+			cpa_auth_provider: "openai-compatible-lab",
+			cpa_auth_host: "api.example.test",
+		});
+		// A known service stored with another letter case.
+		respond({ "X-Cpa-Auth-Kind": "oauth", "X-Cpa-Auth-Provider": "DeViN" });
+		streamEvent({ type: "response.created", cpa_auth_kind: "oauth", cpa_auth_provider: "DeViN" });
+		const claude = answered([{ provider: "anthropic", subscription: true }]);
+		const gateway = answered([{ provider: "api.example.test", subscription: false }]);
+		const devin = answered([{ provider: "devin", subscription: true }]);
+		expect(emitted).toEqual([claude, gateway, claude, gateway, devin, devin]);
+	});
 	it("nothing is said when CLIProxyAPI does not answer or no connection is set up", async () => {
 		const { pi, emitted } = fakePi();
 		await new UpstreamsAnnouncer(

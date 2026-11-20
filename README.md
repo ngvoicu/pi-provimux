@@ -351,10 +351,12 @@ from providers.dev.
   in `X-CPA-AUTH-PROVIDER` and an API key's host in `X-CPA-AUTH-HOST`. Over the Codex WebSocket, which has no response
   headers per turn, the same come from the `cpa_auth_kind`, `cpa_auth_provider` and `cpa_auth_host` fields Provimux
   puts on each turn's `response.created` event.
-  - **With the provider**, `upstreams` is that one credential, whatever its priority: a Claude login and a Devin login
-    serving the same model are told apart. When exactly one listed credential of the model has that provider, kind
-    (and host, when given), it fills in what the response does not say (an API key's host); when none does (the list
-    is older than the proxy's state), the response alone says it.
+  - **With the provider**, `upstreams` is that one credential, whatever its priority, read from the response alone:
+    its provider (whatever its letter case), its kind, and its host, where no host means the credential has none. The
+    credential list is not consulted (it may be older than the proxy's state) nor waited for. A Claude login and a
+    Devin login serving the same model are told apart. A credential that leads to a service not known is still
+    named, so a change of route is seen: by its host for an API key that has one (`api.example.test`), else by its
+    provider as the response gives it.
   - **With only the kind** (a Provimux that does not name the provider), a guess: the listed credentials of that
     kind at their highest priority, possibly several.
 

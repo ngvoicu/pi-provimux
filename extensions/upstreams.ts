@@ -15,8 +15,8 @@
  *   after `/cliproxyapi-refresh`. `upstreams` are what may serve the model (several: not known which), `fallbacks` what may
  *   answer when those fail.
  * - `model-upstreams:answered`: `{ provider, model, upstreams }`, after a response that names what answered (the
- *   `X-CPA-AUTH-*` headers, or the `cpa_auth_*` fields on response.created over the Codex WebSocket): the credential
- *   it names when it gives the provider, else a guess from the kind.
+ *   `X-CPA-AUTH-*` headers, or the `cpa_auth_*` fields on response.created over the Codex WebSocket): when it gives the
+ *   provider, the credential it names, from the response alone; else a guess from the kind and the credential list.
  *
  * An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
  * (anthropic, openai-codex, openai, meta, openrouter, google) or a providers.dev provider pi has none for (devin,
@@ -24,17 +24,17 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveEndpoints } from "./lib.ts";
-import { type Account, likelyAccounts, namedAccount, parseAccounts } from "./sources.ts";
+import { type Account, likelyAccounts, parseAccounts } from "./sources.ts";
 
-export { type Account, likelyAccounts, namedAccount } from "./sources.ts";
+export { type Account, likelyAccounts } from "./sources.ts";
 
 export const REQUEST_EVENT = "model-upstreams:request";
 export const UPSTREAMS_EVENT = "model-upstreams";
 export const ANSWERED_EVENT = "model-upstreams:answered";
 export const AUTH_KIND_HEADER = "x-cpa-auth-kind";
-/** The answering credential's provider, exactly as the credential list gives it. */
+/** The answering credential's provider, as the credential list names providers. */
 export const AUTH_PROVIDER_HEADER = "x-cpa-auth-provider";
-/** The host of an answering API key with a base URL, exactly as the credential list gives it. */
+/** The host of an answering API key with a base URL; absent when the credential has none. */
 export const AUTH_HOST_HEADER = "x-cpa-auth-host";
 /** The same on a WebSocket turn's response.created event. */
 export const AUTH_KIND_FIELD = "cpa_auth_kind";
@@ -139,28 +139,35 @@ export function routeOf(modelId: string, listed: ModelAccounts): Route {
 	return { upstreams: OWNERS[owner] ?? [{ provider: owner }] };
 }
 
+/** What a response says answered it: the credential's provider and kind and, for an API key with a base URL, its host. */
+export interface StatedCredential {
+	provider: string;
+	kind: string;
+	/** Absent: the credential has none. */
+	host?: string;
+}
+
 /**
- * What answered a request to a model; undefined when not known. When CLIProxyAPI names the credential's provider (and
- * an API key's host), that credential: the one listed account that matches fills in what the response does not say;
- * with none, what the response says stands alone. Given only the kind, a guess: the listed credentials of that kind at
- * their highest priority.
+ * What answered a request to a model, when CLIProxyAPI names the credential: from the response alone, the credential
+ * list is not consulted (it may be older than the proxy). The provider is matched without regard to letter case. A
+ * credential that leads to a service not known is still named, so a change of route is seen: by its host for an API
+ * key that has one, else by its provider as the response gives it.
  */
-export function answeredUpstreams(
-	modelId: string,
-	kind: string,
-	listed: ModelAccounts,
-	named?: { provider: string; host?: string },
-): Upstream[] | undefined {
-	if (named) {
-		const stated: Account = {
-			provider: named.provider,
-			kind,
-			priority: 0,
-			...(named.host ? { host: named.host } : {}),
-		};
-		const upstream = upstreamOf(namedAccount(listed.accounts[modelId] ?? [], stated) ?? stated, modelId);
-		return upstream ? [upstream] : undefined;
-	}
+export function statedUpstream(modelId: string, stated: StatedCredential): Upstream {
+	const account: Account = {
+		provider: stated.provider.toLowerCase(),
+		kind: stated.kind,
+		priority: 0,
+		...(stated.host ? { host: stated.host.toLowerCase() } : {}),
+	};
+	const known = upstreamOf(account, modelId);
+	if (known) return known;
+	const provider = stated.kind === "apikey" && account.host ? account.host : stated.provider;
+	return { provider, subscription: stated.kind !== "apikey" };
+}
+
+/** What answered a request to a model, from the kind of credential CLIProxyAPI names; undefined when not known. */
+export function answeredUpstreams(modelId: string, kind: string, listed: ModelAccounts): Upstream[] | undefined {
 	const upstreams = upstreamsOf(likelyAccounts(listed.accounts[modelId] ?? [], kind), modelId);
 	return upstreams.length > 0 ? upstreams : undefined;
 }
@@ -216,7 +223,7 @@ export class UpstreamsAnnouncer {
 		});
 		this.pi.on("after_provider_response", (event, ctx) => {
 			const model = ctx.model;
-			if (!model || model.provider !== this.providerId || !this.listed) return;
+			if (!model || model.provider !== this.providerId) return;
 			const headers = (event as { headers?: Record<string, string | undefined> }).headers ?? {};
 			const header = (wanted: string) =>
 				Object.entries(headers).find(([name]) => name.toLowerCase() === wanted)?.[1];
@@ -224,7 +231,7 @@ export class UpstreamsAnnouncer {
 		});
 		// The Codex WebSocket has no response headers per turn: CLIProxyAPI names what answered on response.created.
 		this.pi.on("provider_stream_event", (event) => {
-			if (event.provider !== this.providerId || !this.listed) return;
+			if (event.provider !== this.providerId) return;
 			const data = event.data;
 			if (!isRecord(data) || data.type !== "response.created") return;
 			const kind = data[AUTH_KIND_FIELD];
@@ -236,15 +243,19 @@ export class UpstreamsAnnouncer {
 	private answered(modelId: string, kindValue: unknown, providerValue: unknown, hostValue: unknown): void {
 		const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
 		const kind = text(kindValue)?.toLowerCase();
-		if (!this.listed || (kind !== "oauth" && kind !== "apikey")) return;
+		if (kind !== "oauth" && kind !== "apikey") return;
 		const provider = text(providerValue);
-		const host = text(hostValue)?.toLowerCase();
-		const upstreams = answeredUpstreams(
-			modelId,
-			kind,
-			this.listed,
-			provider ? { provider, ...(host ? { host } : {}) } : undefined,
-		);
+		const host = text(hostValue);
+		// Named: from the response alone, without waiting for the credential list; only once an extension asked.
+		// Kind only (an older CLIProxyAPI): a guess from the list, once it came.
+		let upstreams: Upstream[] | undefined;
+		if (provider) {
+			if (!this.wanted) return;
+			upstreams = [statedUpstream(modelId, { provider, kind, ...(host ? { host } : {}) })];
+		} else {
+			if (!this.listed) return;
+			upstreams = answeredUpstreams(modelId, kind, this.listed);
+		}
 		if (upstreams) this.pi.events.emit(ANSWERED_EVENT, { provider: this.providerId, model: modelId, upstreams });
 	}
 

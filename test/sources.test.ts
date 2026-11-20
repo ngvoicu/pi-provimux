@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fetchModelSources, loadMappedModels, toPiModel } from "../extensions/lib.ts";
-import { type Account, namedAccount, parseAccounts, sourceLabel } from "../extensions/sources.ts";
+import { type Account, parseAccounts, sourceLabel } from "../extensions/sources.ts";
 
 const login = (provider: string, priority = 0): Account => ({ provider, kind: "oauth", priority });
 const key = (provider: string, priority = 0, host?: string): Account => ({
@@ -84,22 +84,6 @@ describe("parseAccounts", () => {
 		]);
 		expect(parseAccounts(undefined)).toEqual([]);
 		expect(parseAccounts({})).toEqual([]);
-	});
-});
-
-describe("namedAccount", () => {
-	it("finds the one listed credential a response names, by provider, kind and host when given, whatever its priority", () => {
-		const accounts = [login("claude", 5), login("devin", 5), key("codex", -10, "api.openai.com"), key("codex", -20)];
-		expect(namedAccount(accounts, { provider: "devin", kind: "oauth" })).toBe(accounts[1]);
-		expect(namedAccount(accounts, { provider: "claude", kind: "oauth" })).toBe(accounts[0]);
-		expect(namedAccount(accounts, { provider: "codex", kind: "apikey", host: "api.openai.com" })).toBe(accounts[2]);
-		// The provider is compared as the list gives it; the kind and the host must match too.
-		expect(namedAccount(accounts, { provider: "Devin", kind: "oauth" })).toBeUndefined();
-		expect(namedAccount(accounts, { provider: "claude", kind: "apikey" })).toBeUndefined();
-		expect(namedAccount(accounts, { provider: "codex", kind: "apikey", host: "openrouter.ai" })).toBeUndefined();
-		// Without a host, two codex keys match: not one credential.
-		expect(namedAccount(accounts, { provider: "codex", kind: "apikey" })).toBeUndefined();
-		expect(namedAccount([], { provider: "claude", kind: "oauth" })).toBeUndefined();
 	});
 });
 
