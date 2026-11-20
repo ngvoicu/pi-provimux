@@ -346,9 +346,17 @@ from providers.dev.
 - **`model-upstreams`**: `{ provider, models: { [modelId]: { upstreams, fallbacks? } } }`, the answer, and again after
   `/cliproxyapi-refresh`. `upstreams` are what may serve the model (several: it is not known which), `fallbacks` what
   may answer when those fail or cool down.
-- **`model-upstreams:answered`** (Provimux): `{ provider, model, upstreams }`, after a response whose `X-CPA-AUTH-KIND` header
-  names the kind of credential that answered; over the Codex WebSocket, which has no response headers per turn, from
-  the `cpa_auth_kind` field Provimux puts on each turn's `response.created` event.
+- **`model-upstreams:answered`** (Provimux): `{ provider, model, upstreams }`, after a response that names the
+  credential that answered: its kind in the `X-CPA-AUTH-KIND` header and, from a Provimux that says them, its provider
+  in `X-CPA-AUTH-PROVIDER` and an API key's host in `X-CPA-AUTH-HOST`. Over the Codex WebSocket, which has no response
+  headers per turn, the same come from the `cpa_auth_kind`, `cpa_auth_provider` and `cpa_auth_host` fields Provimux
+  puts on each turn's `response.created` event.
+  - **With the provider**, `upstreams` is that one credential, whatever its priority: a Claude login and a Devin login
+    serving the same model are told apart. When exactly one listed credential of the model has that provider, kind
+    (and host, when given), it fills in what the response does not say (an API key's host); when none does (the list
+    is older than the proxy's state), the response alone says it.
+  - **With only the kind** (a Provimux that does not name the provider), a guess: the listed credentials of that
+    kind at their highest priority, possibly several.
 
 An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
 (`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider pi has none for

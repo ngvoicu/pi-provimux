@@ -48,6 +48,27 @@ export function likelyAccounts(accounts: Account[], kind?: string): Account[] {
 	return candidates.filter((account) => account.priority === top);
 }
 
+/** The credential a response says answered it: its provider and kind and, for an API key with a base URL, its host. */
+export interface NamedAccount {
+	provider: string;
+	kind: string;
+	host?: string;
+}
+
+/**
+ * The listed credential a response names: the one account with its provider and kind, and its host when the response
+ * gives one. Undefined when none matches (the list is older than the proxy's state) or several do.
+ */
+export function namedAccount(accounts: Account[], named: NamedAccount): Account | undefined {
+	const matches = accounts.filter(
+		(account) =>
+			account.provider === named.provider &&
+			account.kind === named.kind &&
+			(named.host === undefined || account.host === named.host),
+	);
+	return matches.length === 1 ? matches[0] : undefined;
+}
+
 /** The service behind a CLIProxyAPI provider, as people call it. */
 const SERVICES: Record<string, string> = {
 	claude: "Anthropic",
