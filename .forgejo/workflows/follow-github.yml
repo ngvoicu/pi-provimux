@@ -1,0 +1,78 @@
+name: Follow GitHub
+
+# Runs on the owner's Forgejo server (the NAS) only, and brings the NAS's main and v* tags up to GitHub's
+# (docs/FOLLOWING.md, 5). GitHub reads .github/workflows/ only, so it never sees this file. Forgejo reads
+# .forgejo/workflows/ and, while this folder exists, ignores .github/workflows/: on the NAS this is the only workflow
+# (no follow, no publish).
+# Fast-forward only. Everything is checked before anything changes: if the NAS's main has a commit that GitHub's
+# lacks, or a v* tag that GitHub has differently or not at all, the job fails and changes nothing: no force push, no
+# merge commit, no tag moved. Other branches are not mirrored.
+on:
+  schedule:
+    - cron: "13 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Fast-forward main, add new v* tags
+        run: |
+          set -eu
+          github=https://github.com/ngvoicu/pi-provimux.git
+          git fetch --no-tags origin main
+          git fetch --no-tags "$github" "+refs/heads/main:refs/github/main" "+refs/tags/v*:refs/github/tags/v*"
+          here=$(git rev-parse origin/main)
+          there=$(git rev-parse refs/github/main)
+          echo "NAS main: $here"
+          echo "GitHub main: $there"
+          bad=0
+          if [ "$here" != "$there" ] && ! git merge-base --is-ancestor "$here" "$there"; then
+            echo "::error::The NAS's main has commits that GitHub's lacks: not a fast-forward."
+            bad=1
+          fi
+          # Tags: GitHub's that the NAS lacks are added; one the NAS has differently, or GitHub lacks, stops the job.
+          git ls-remote --tags --refs origin 'refs/tags/v*' >"$RUNNER_TEMP/nas-tags"
+          git for-each-ref --format='%(objectname) %(refname)' 'refs/github/tags/' |
+            sed 's# refs/github/tags/# refs/tags/#' >"$RUNNER_TEMP/github-tags"
+          add=''
+          while read -r sha ref; do
+            have=$(awk -v r="$ref" '$2 == r { print $1 }' "$RUNNER_TEMP/nas-tags")
+            if [ -z "$have" ]; then
+              add="$add $sha:$ref"
+            elif [ "$have" != "$sha" ]; then
+              echo "::error::${ref#refs/tags/} is $have on the NAS and $sha on GitHub."
+              bad=1
+            fi
+          done <"$RUNNER_TEMP/github-tags"
+          while read -r sha ref; do
+            if ! awk -v r="$ref" '$2 == r { f = 1 } END { exit !f }' "$RUNNER_TEMP/github-tags"; then
+              echo "::error::${ref#refs/tags/} is on the NAS only."
+              bad=1
+            fi
+          done <"$RUNNER_TEMP/nas-tags"
+          if [ "$bad" -ne 0 ]; then
+            echo "Nothing was changed."
+            exit 1
+          fi
+          if [ "$here" = "$there" ]; then
+            echo "main: already equal."
+          else
+            git push origin "$there:refs/heads/main"
+            echo "The NAS's main is now $there."
+          fi
+          if [ -n "$add" ]; then
+            # shellcheck disable=SC2086 # one refspec per word
+            git push origin $add
+            echo "Tags added:$add"
+          else
+            echo "Tags: nothing new."
+          fi
