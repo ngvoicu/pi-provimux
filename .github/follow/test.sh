@@ -590,8 +590,10 @@ t_report() {
 	release 1.5.1
 	change extensions/index.ts "$(printf 'line 1\nline 2 (the fork)\nline 3')" "feat: the fork's line 2"
 	run prepare
+	rm "$OUT/readme.diff" # the report job has only the result
 	gh_run report
 	eq "$RUN_RC" 1 "a conflict is red"
+	has "$(jq -r '.[] | select(.title | startswith("README:")) | .body' "$GH_ISSUES")" "+readme of 1.5.1" "the README diff, from the result"
 	eq "$(jq -r '.[] | .title' "$GH_ISSUES" | sort | tr '\n' '|')" "README: after 1.5.1|follow: 1.5.1 — conflict|" "two issues"
 	has "$(jq -r '.[] | select(.title | startswith("follow:")) | .body' "$GH_ISSUES")" "follow.sh merge 1.5.1" "how to merge by hand"
 	: >"$GH_LOG"
@@ -613,10 +615,12 @@ t_report() {
 	has "$(jq -r '.[] | select(.title | startswith("follow:")) | .body' "$GH_ISSUES")" "~~~~~" "the log in a longer fence"
 	eq "$(jq -r '.[] | select(.title | startswith("follow:")) | .title' "$GH_ISSUES")" "follow: 1.5.1 — check failed" "title"
 	# Passed in a dry run: green, the issue stays.
-	FOLLOW_TEST_CANDIDATE=success FOLLOW_LAND=success FOLLOW_DRY_RUN=yes gh_run report
+	FOLLOW_TEST_CANDIDATE=success FOLLOW_LAND=dry-run gh_run report
 	eq "$RUN_RC" 0 "a dry-run pass is green"
+	FOLLOW_TEST_CANDIDATE=success FOLLOW_LAND=failure gh_run report
+	eq "$(jq -r '.[] | select(.title | startswith("follow:")) | .title' "$GH_ISSUES")" "follow: 1.5.1 — land failed" "land failed"
 	# Landed, then up to date and published: closed.
-	FOLLOW_TEST_CANDIDATE=success FOLLOW_LAND=success FOLLOW_DRY_RUN=no gh_run report
+	FOLLOW_TEST_CANDIDATE=success FOLLOW_LAND=landed gh_run report
 	eq "$(jq -r '.[] | select(.title | startswith("follow:")) | .title' "$GH_ISSUES")" "follow: 1.5.1 — landed" "landed"
 	jq '.state = "up-to-date" | .base_version = "1.5.1" | .fork_published = "true" | .fork_version = "105.1.1"' "$OUT/result.json" >"$OUT/r" &&
 		mv "$OUT/r" "$OUT/result.json"
@@ -669,14 +673,13 @@ t_plan() {
 	run plan
 	eq "$RUN_RC" 4 "refused"
 	has "$RUN_OUT" ".npmrc: the tree has one" ".npmrc"
-	# The changelog entry for the release notes.
-	eq "$(bash "$FOLLOW" notes 105.0.1)" "The fork." "notes"
 }
 
 # --- run ----------------------------------------------------------------------------------------------------------
 build_fixture >/dev/null
 ALL='numbers clean rerun waiting states conflict manifest_conflict manifest_merge refusals shape readme report plan'
-for t in ${*:-$ALL}; do
+[[ $# -gt 0 ]] || set -- $ALL
+for t in "$@"; do
 	echo "- $t"
 	"t_$t"
 done

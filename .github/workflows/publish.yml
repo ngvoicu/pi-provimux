@@ -1,0 +1,220 @@
+# Publishes the version main names, if npm does not have it (docs/FOLLOWING.md, 4.2). It reads state, not events,
+# so a rerun is always safe. The only workflow npm trusts: the trusted publisher of pi-provimux names this file and
+# the environment npm. There is no token and no secret anywhere.
+#
+# Started by a push to main (the owner's own releases), or by follow.yml and by hand (workflow_dispatch:
+# gh workflow run publish.yml -R ngvoicu/pi-provimux -f dry_run=no).
+#
+# DRY RUN. Until the owner's one-time npm steps are done (docs/FOLLOWING.md 4.4), "publish" runs
+# npm publish --dry-run and "tag" only says what it would do. A push takes the default below; a run by hand can
+# choose. To switch it on, change 'yes' to 'no' in both places marked "the switch" (and the same in follow.yml).
+#
+#   plan     the publish guard (follow.sh plan): git, jq, npm view, npm pack --dry-run --ignore-scripts
+#   test     npm ci, npm run check on that commit: the only job that runs the repository's code
+#   publish  a clean checkout of the live main, npm publish --ignore-scripts; no npm ci, no script, no build;
+#            id-token: write and the environment npm, nothing else
+#   tag      v<version> at the published commit, and the GitHub release with its changelog entry
+#   notify   the issue "publish: <version> — failed", or closes it once npm has the version
+name: publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: npm publish --dry-run, no tag, no release'
+        type: choice
+        options: ['yes', 'no']
+        # The switch (1 of 2).
+        default: 'yes'
+
+# One publish at a time, never cancelled midway.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  # The switch (2 of 2): what a push does.
+  DRY_RUN: ${{ inputs.dry_run || 'yes' }}
+
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+      publish: ${{ steps.plan.outputs.publish }}
+      published: ${{ steps.plan.outputs.published }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: The publish guard
+        id: plan
+        run: |
+          cp -R .github/follow "$RUNNER_TEMP/follow"
+          FOLLOW_OUT="$RUNNER_TEMP/out" bash "$RUNNER_TEMP/follow/follow.sh" plan
+
+  test:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm run check
+
+  publish:
+    needs: [plan, test]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The trusted publisher names this environment; GitHub admits only main to it (docs/FOLLOWING.md 6.3).
+    environment: npm
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      # No registry-url: setup-node would write an .npmrc whose _authToken npm would try instead of OIDC.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: The npm CLI (trusted publishing needs 11.5.1 or later)
+        run: |
+          v=$(npm --version)
+          echo "node $(node --version), npm $v"
+          [ "$(printf '%s\n%s\n' 11.5.1 "$v" | sort -V | head -n 1)" = 11.5.1 ] || { echo "::error::npm $v is older than 11.5.1"; exit 1; }
+      - name: Still the live main, a clean tree, the planned version
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          live=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)
+          [ "$live" = "$SHA" ] || fail "main is $live now, not $SHA: nothing is published from an older main"
+          [ "$(git rev-parse HEAD)" = "$SHA" ] || fail "the checkout is not $SHA"
+          [ -z "$(git status --porcelain --ignored)" ] || fail "the checkout is not clean"
+          [ ! -e .npmrc ] || fail "an .npmrc"
+          [ "$(jq -r .version package.json)" = "$VERSION" ] || fail "package.json does not say $VERSION"
+      - name: npm publish
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" != no ]; then
+            npm publish --dry-run --ignore-scripts --access public --registry https://registry.npmjs.org/
+            echo "Dry run: would publish pi-provimux $VERSION." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/
+          echo "Published pi-provimux $VERSION." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The tag v<version> at the published commit and the GitHub release. When npm already had the version (a rerun
+  # after the publish), the commit npm recorded (gitHead), if it has one and main contains it.
+  tag:
+    needs: [plan, publish]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      (needs.publish.result == 'success' || needs.plan.outputs.published == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          PUBLISHED: ${{ needs.plan.outputs.published }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          say() { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          tag="v$VERSION"
+          commit=$SHA
+          if [ "$PUBLISHED" = true ]; then
+            commit=$(npm view "pi-provimux@$VERSION" gitHead 2>/dev/null || true)
+            if ! [[ $commit =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$commit" "$GITHUB_SHA"; then
+              if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+                say "npm has $VERSION but recorded no commit of main ('$commit'): make the tag $tag by hand."
+              fi
+              exit 0
+            fi
+          fi
+          have=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)
+          if [ -n "$have" ]; then
+            [ "$have" = "$commit" ] || fail "$tag is $have, not $commit: tags are never moved"
+          elif [ "$DRY_RUN" != no ]; then
+            say "Dry run: would tag $tag at $commit."
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$commit" >/dev/null
+            say "Tagged $tag at $commit."
+          fi
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then exit 0; fi
+          # The version's changelog entry, as text.
+          git show "$commit:CHANGELOG.md" | awk -v h="## $VERSION" '$0 == h { on = 1; next } on && /^## / { exit } on' >"$RUNNER_TEMP/notes.md"
+          [ -s "$RUNNER_TEMP/notes.md" ] || echo "pi-provimux $VERSION." >"$RUNNER_TEMP/notes.md"
+          if [ "$DRY_RUN" != no ]; then
+            say "Dry run: would create the release $tag with:"
+            cat "$RUNNER_TEMP/notes.md" >>"$GITHUB_STEP_SUMMARY"
+          else
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --verify-tag --title "pi-provimux $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+            say "Released $tag."
+          fi
+
+  notify:
+    needs: [plan, test, publish, tag]
+    if: always() && needs.plan.outputs.version != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/follow
+          persist-credentials: false
+      - name: The publish issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          RESULT: >-
+            ${{ (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+            && format('plan {0}, test {1}, publish {2}, tag {3}', needs.plan.result, needs.test.result, needs.publish.result, needs.tag.result)
+            || 'success' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: FOLLOW_OUT="$RUNNER_TEMP/out" bash .github/follow/follow.sh report-publish "$VERSION" "$RESULT"

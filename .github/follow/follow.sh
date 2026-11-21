@@ -9,7 +9,11 @@
 #                                           changelog entry (3)
 #   follow.sh guard [MAIN] [R]              the guard of 2.6 on the candidate MAIN..R (default: the merge's main,
 #                                           HEAD); exit 4 with the reasons when it refuses
-#   follow.sh report                        writes the owner's issue from a run's result (2.7)
+#   follow.sh report                        writes the owner's issue from a run's result (2.7); reads
+#                                           FOLLOW_RESULT (default the result file), FOLLOW_TEST_CANDIDATE and
+#                                           FOLLOW_TEST_ORIGINAL (a job's result), FOLLOW_LAND (landed, dry-run,
+#                                           moved or a job's result), FOLLOW_FAILED_STEPS and FOLLOW_FAILED_LOG
+#                                           (files), RUN_URL; exit 1 for the states the owner must see
 #   follow.sh report-publish VERSION RESULT the issue of a failed publish, or closes it after a good one (4.3)
 #
 # For the workflows:
@@ -17,7 +21,6 @@
 #                                           candidate as a git bundle
 #   follow.sh fetch-candidate ID DIGEST     prepare's artifact by its id and digest; fetches the candidate
 #   follow.sh plan                          publish.yml's publish guard (4.2) on HEAD
-#   follow.sh notes VERSION                 that version's changelog entry
 #
 # The state of a run is $FOLLOW_OUT/result.json (default <git dir>/follow/result.json); exit codes: 0 done (look at
 # the state), 1 an error, 3 a conflict, 4 a refusal.
@@ -98,10 +101,9 @@ is_plain() { [[ $1 =~ $PLAIN_RE ]]; }
 
 # ver_cmp A B: -1, 0 or 1.
 ver_cmp() {
-	local IFS=.
 	local -a a b
-	a=($1)
-	b=($2)
+	IFS=. read -r -a a <<<"$1"
+	IFS=. read -r -a b <<<"$2"
 	local i
 	for i in 0 1 2; do
 		if ((10#${a[i]} > 10#${b[i]})); then
@@ -118,9 +120,8 @@ ver_cmp() {
 
 # encode 1.5.0 → 105.0 (3.1); fails when the minor is 100 or more.
 encode() {
-	local IFS=.
 	local -a v
-	v=($1)
+	IFS=. read -r -a v <<<"$1"
 	((10#${v[1]} < 100)) || return 1
 	echo "$((10#${v[0]} * 100 + 10#${v[1]})).$((10#${v[2]}))"
 }
@@ -128,9 +129,8 @@ encode() {
 # decode 105.0.3 → 1.5.0; fails for a number that is not of the form of 3.1.
 decode() {
 	is_plain "$1" || return 1
-	local IFS=.
 	local -a v
-	v=($1)
+	IFS=. read -r -a v <<<"$1"
 	((10#${v[0]} >= 100 && 10#${v[2]} >= 1)) || return 1
 	echo "$((10#${v[0]} / 100)).$((10#${v[0]} % 100)).$((10#${v[1]}))"
 }
@@ -343,6 +343,7 @@ do_merge() {
 	else
 		res_set readme_changed true
 		git diff "$obc" "$b" -- README.md >"$OUT/readme.diff"
+		res_set readme_diff "$(head -c 60000 "$OUT/readme.diff")"
 	fi
 
 	# package.json and package-lock.json by rule.
@@ -703,11 +704,6 @@ cmd_plan() {
 	fi
 }
 
-cmd_notes() {
-	local v=${1:?notes VERSION}
-	awk -v h="## $v" '$0 == h { on = 1; next } on && /^## / { exit } on' CHANGELOG.md | sed -e '/./,$!d'
-}
-
 # --- report ------------------------------------------------------------------------------------------------------
 # The issues are found by their title; the body carries the state, so a state is said once.
 fence_for() {
@@ -755,7 +751,7 @@ close_followed() {
 
 cmd_report() {
 	local res=${FOLLOW_RESULT:-$RES} state v title body red=1 tests=${FOLLOW_TEST_CANDIDATE:-} orig=${FOLLOW_TEST_ORIGINAL:-}
-	local land=${FOLLOW_LAND:-} dry=${FOLLOW_DRY_RUN:-yes} f
+	local land=${FOLLOW_LAND:-} f
 	if [[ ! -s $res ]]; then
 		echo '{"state":"error","reason":"the prepare job left no result"}' >"$TMP/r.json"
 		res=$TMP/r.json
@@ -780,13 +776,14 @@ cmd_report() {
 		fi
 		;;
 	candidate)
-		if [[ $tests == success && $land == success ]]; then
+		if [[ $tests == success && ($land == landed || $land == dry-run || $land == moved) ]]; then
 			red=0
-			if [[ $dry == no ]]; then
-				state=landed
-			else
-				state="passed (dry run, not landed)"
-			fi
+			case $land in
+			landed) state=landed ;;
+			dry-run) state="passed (dry run, not landed)" ;;
+			moved) state="passed (main moved meanwhile; the next run starts from it)" ;;
+			esac
+			say "$state"
 		elif [[ $tests != success ]]; then
 			state="check failed"
 			{
@@ -850,7 +847,7 @@ cmd_report() {
 		echo "The run failed before a result: $(jq -r '.reason // "see the run"' "$res" | md_item | sed 's/^- //')." >>"$body"
 		;;
 	esac
-	if [[ $(jq -r '.readme_changed // false' "$res") == true && -n $v ]]; then readme_issue "$v"; fi
+	if [[ $(jq -r '.readme_changed // false' "$res") == true && -n $v ]]; then readme_issue "$v" "$res"; fi
 	if ((red == 0)); then
 		if [[ $state == landed ]]; then
 			if issues_json open | jq -e --arg p "follow: $v — " 'any(.title | startswith($p))' >/dev/null; then
@@ -869,6 +866,10 @@ md_item_keep() { sed 's/^- //' | md_item; }
 readme_issue() {
 	local v=$1 title="README: after $1" f
 	if issues_json all | jq -e --arg t "$title" 'any(.title == $t)' >/dev/null; then return 0; fi
+	if [[ ! -s ${FOLLOW_README_DIFF:-$OUT/readme.diff} ]]; then
+		jq -r '.readme_diff // ""' "$2" >"$TMP/readme.diff"
+		FOLLOW_README_DIFF=$TMP/readme.diff
+	fi
 	{
 		echo "$ORIGINAL_NAME $v changed its README. The fork keeps its own (docs/FOLLOWING.md 2.5); what is new may need"
 		echo "describing in the fork's words. This blocks nothing."
@@ -918,7 +919,6 @@ guard) cmd_guard "$@" ;;
 prepare) cmd_prepare ;;
 fetch-candidate) cmd_fetch_candidate "$@" ;;
 plan) cmd_plan ;;
-notes) cmd_notes "$@" ;;
 report) cmd_report ;;
 report-publish) cmd_report_publish "$@" ;;
 *)
