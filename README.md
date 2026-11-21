@@ -64,6 +64,9 @@ pi install /absolute/path/to/pi-provimux
 pi -e /absolute/path/to/pi-provimux
 ```
 
+It needs pi 0.99.0 or newer: the Codex WebSocket reports which kind of account answered through pi's
+`provider_stream_event`, which older pi does not have.
+
 ### Coming from pi-cliproxyapi-provider
 
 pi-provimux keeps everything your setup names: the provider id `cliproxyapi` (so `cliproxyapi/<model>` in your
@@ -264,7 +267,7 @@ Unsupported pi thinking levels are set to `null` so they are hidden in the UI. W
 
 ## GPT Responses prompt caching
 
-For `gpt-` model IDs (ignoring case and surrounding whitespace), the provider sends the base prompt as the first `developer` input message instead of top-level `instructions`. Nonblank text is kept verbatim; blank text defaults to `You are a helpful assistant.` Existing input items stay in order, tools and `prompt_cache_key` are unchanged, and other models keep their existing request shape. This applies to HTTP and WebSocket requests, including Pi background streams that use this provider. A changed developer prefix or model sends the full input instead of a WebSocket continuation delta.
+For `gpt-` model IDs (ignoring case and surrounding whitespace), the provider sends the base prompt as the first `developer` input message instead of top-level `instructions`. Nonblank text is kept verbatim; blank text defaults to `You are a helpful assistant.` Existing input items stay in order, tools and `prompt_cache_key` are unchanged, and other models keep their existing request shape. This applies to HTTP and WebSocket requests, including Pi background streams that use this provider. A changed developer prefix or model sends the full input instead of a WebSocket continuation delta. An extension's `before_provider_request` hook comes first: if it changes `instructions`, its text is the one moved; if it removes them (deleted or set to `undefined`), no base prompt is put back, and the request goes as the hook left it.
 
 ## Cache-preserving thinking level changes
 
@@ -292,8 +295,8 @@ instead of the Codex Responses format every other model uses. This happens autom
   other model. Unlike the Codex format, Claude's format sends the output limit (`max_tokens`) on every request. In
   `"auto"`, a Claude model CLIProxyAPI reports no output limit for stays on the Codex format, which sends no output
   limit; with `true` pi would fall back to 16,384 output tokens.
-- **Not available for these models:** Fast mode (a Codex service tier) and the Codex WebSocket transport. Thinking,
-  tools, images and auto-compaction work as before.
+- **Not available for these models:** Fast mode (a Codex service tier; they keep their standard price under `/fast`
+  and `/ultrafast`) and the Codex WebSocket transport. Thinking, tools, images and auto-compaction work as before.
 - Changing the setting refreshes the model list (the cache records it). The first request of an ongoing session after
   a model switches formats is a cache miss.
 
@@ -338,7 +341,8 @@ bus (`pi.events`), so that they need to know nothing about CLIProxyAPI.
 from providers.dev.
 
 - **`model-upstreams:request`**: an extension that wants the routes sends this (any payload). This package then asks
-  CLIProxyAPI `GET /v1/models?include=accounts` and answers. Nothing is asked when no extension wants it.
+  CLIProxyAPI `GET /v1/models?include=accounts` again and answers. Without such an extension this adds no request;
+  the model list itself is always loaded with `?include=accounts`, for the names and the Claude Messages format.
 - **`model-upstreams`**: `{ provider, models: { [modelId]: { upstreams, fallbacks? } } }`, the answer, and again after
   `/cliproxyapi-refresh`. `upstreams` are what may serve the model (several: it is not known which), `fallbacks` what
   may answer when those fail or cool down.

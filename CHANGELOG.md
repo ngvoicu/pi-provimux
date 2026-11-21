@@ -18,6 +18,17 @@ plain CLIProxyAPI too.
 - The README describes the extension as Provimux's, with credits to router-for-me. The LICENSE keeps
   router-for-me's notice.
 
+### Changed
+
+- **Needs pi 0.99.0 or newer** (was 0.82.0). On older pi, `model-upstreams:answered` was never sent for Codex
+  WebSocket turns, as pi only passes their events to extensions (`provider_stream_event`) from 0.99.0.
+- **A hook's removal of the GPT system prompt is honoured.** When an extension's `before_provider_request` hook
+  deletes `instructions` (or sets them to `undefined`), the base prompt is no longer put back as the first developer
+  message: the request goes as the hook left it, for example with only the hook's own replacement. A hook that
+  changes `instructions` still has its text moved, and without a hook the caching fix from 1.5.0 is unchanged.
+- **Claude Messages models keep their standard price under `/fast` and `/ultrafast`.** They are sent to
+  `/v1/messages` without a speed tier, so the Fast price from models.dev no longer applies to them.
+
 ### From pi-cliproxyapi-provider 1.5.0 (merged)
 
 - **Ultra Fast mode**: `/ultrafast` sends `service_tier: "ultrafast"` on models that offer it. `/fast` and
