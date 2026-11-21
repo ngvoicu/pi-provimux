@@ -359,14 +359,26 @@ from providers.dev.
     named, so a change of route is seen: by its host for an API key that has one (`api.example.test`), else by its
     provider as the response gives it.
   - **With only the kind** (an older Provimux that does not name the provider), a guess: the listed credentials of
-    that kind at their highest priority, possibly several; `[]` when none of them is known.
+    that kind at their highest priority, possibly several; `[]` when none of them is known. The guess needs the
+    credential list: until it has loaded, such an answer is not reported at all, even after earlier answers were
+    named.
   - **`upstreams: []`**: answered, by something the proxy would not name. Provimux leaves an answer without the
     three when plugin code took part in its bytes; from a proxy that names answers (it lists its credentials, or
     named an answer before in this session) such an answer is reported as `[]`, so that a listener does not keep the
-    last named credential's values. Read it as "route not known".
+    last named credential's values. Read it as "route not known". Whether the proxy names answers is known only once
+    its credential list has loaded or it has named one: an answer that names nobody while the list is still loading
+    and before anything was named in this session is not reported. A list that could not be read counts as still
+    loading.
   - **Nothing** from plain CLIProxyAPI, which names no answer, nor before an extension asked for the routes.
   - **When**: as soon as the answer's headers (or its `response.created` event) arrive and its stream's first event
     says which model it is for, so before the answer ends, while the request is still out.
+  - **Each request on its own.** Requests overlap: pi's cache warmer refreshes the cache while the turn it warms is
+    still streaming, and an extension can send its own request with the session's callbacks. Each request keeps its
+    own response headers and its one report, so an answer is never reported with another request's credential or
+    model.
+
+  [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) reads `upstreams: []` as "route not known" from its
+  next release, 0.7.0, on; older versions ignore an empty `upstreams` and keep what they had.
 
 An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
 (`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider pi has none for
@@ -379,10 +391,15 @@ How the routes are made:
   CLIProxyAPI uses the highest priority that is free in every routing mode and picks among the credentials sharing it
   (round-robin by default; with no priority set, all share 0). So the `upstreams` are the credentials at the highest
   priority, the `fallbacks` the others. An API key whose host CLIProxyAPI names goes by the host (`openrouter.ai`,
-  `api.openai.com`, `api.anthropic.com`, `generativelanguage.googleapis.com`; another host is not known), whatever its
-  entry is called; without a host, an OpenAI-compatible entry counts as OpenRouter only when named `openrouter`. A
-  prefix CLIProxyAPI puts before a credential's models is left out of the model id. A credential at the top that leads
-  somewhere not known makes the route not known (`upstreams: []`).
+  `api.openai.com`, `api.anthropic.com`, `generativelanguage.googleapis.com`, `api.x.ai`, `api.meta.ai`,
+  `api.kimi.com`, `api.moonshot.ai`, `api.moonshot.cn`, `api.deepseek.com`, `api.mistral.ai`, `api.groq.com`,
+  `api.cerebras.ai`, `api.fireworks.ai`, `api.together.ai`, `integrate.api.nvidia.com`, `api.xiaomimimo.com`;
+  another host is not known), whatever its entry is called; without a host, an OpenAI-compatible entry counts as
+  OpenRouter only when named `openrouter`. The model id is the provider's own, as pi's catalog has it: a prefix
+  CLIProxyAPI puts before a credential's models is left out, and nothing else (`openai/gpt-oss-120b` at Groq,
+  `Qwen/Qwen3.6-Plus` at Together, `google/gemma-3-12b-it` at NVIDIA, `accounts/fireworks/models/…` at Fireworks,
+  `lab/model` at OpenRouter). A credential at the top that leads somewhere not known makes the route not known
+  (`upstreams: []`).
 - **A CLIProxyAPI that doesn't**: the lab its model list names as the owner (`owned_by`), by login or key
   (`subscription` absent; for OpenAI the Codex login or an OpenAI key); `devin/…` (CLIProxyAPI's own prefix) is Devin;
   any other name with a slash is not known.

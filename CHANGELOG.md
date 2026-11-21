@@ -26,14 +26,23 @@ plain CLIProxyAPI too.
   are told apart, and a service not known is named by its host or provider. At most one report per answer, sent when
   its headers or first event arrive, while the request is out, for the model the request was sent to (a virtual
   model's routed one). Over HTTP and SSE only the headers count; over the WebSocket only `response.created`.
+- **Each request is reported on its own.** Overlapping requests (pi's cache warmer next to the turn it warms, an
+  extension's own request with the session's callbacks, two requests to one model, a WebSocket turn next to an SSE
+  request) each report their own credential, once: a request's headers and its one report are kept by that request
+  alone, never in a slot shared with other requests.
 - **`upstreams: []` for an answer that names nobody.** When Provimux leaves an answer without a name (plugin code
   took part in it), the report says `upstreams: []`: answered, by something the proxy would not name, read as
-  "route not known". Plain CLIProxyAPI, which names no answer, still gets no report. Only the kind, from an older
-  Provimux: the guess from the credential list, as before.
+  "route not known". It is sent only once the proxy is known to name answers: such an answer is not reported while
+  the credential list is still loading (or could not be read) and nothing was named before in the session. Plain
+  CLIProxyAPI, which names no answer, still gets no report. Only the kind, from an older Provimux: the guess from the
+  credential list, as before, so such an answer is not reported until the list has loaded.
+  [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) reads `[]` as "route not known" from its next
+  release, 0.7.0, on; older versions ignore it.
 - **More credentials map to pi's providers:** the kimi.com login to `kimi-coding`, xAI to `xai`, Vertex to
   `google-vertex`, and API keys by host to `xai`, `meta`, `kimi-coding`, `moonshotai`, `moonshotai-cn`, `deepseek`,
   `mistral`, `groq`, `cerebras`, `fireworks`, `together`, `nvidia` and `xiaomi`. A host or provider such as
-  `constructor` is named as given.
+  `constructor` is named as given. The model id is the provider's own, as pi's catalog has it, in the routes and in
+  what answered: only a prefix the proxy added is left out (`openai/gpt-oss-120b` at Groq stays as it is).
 - **Needs pi 0.99.0 or newer** (was 0.82.0). On older pi, `model-upstreams:answered` was never sent for Codex
   WebSocket turns, as pi only passes their events to extensions (`provider_stream_event`) from 0.99.0.
 - **A hook's removal of the GPT system prompt is honoured.** When an extension's `before_provider_request` hook
