@@ -69,6 +69,60 @@ describe("where a credential leads", () => {
 		});
 		const openrouter = { provider: "openai-compatible-openrouter", kind: "apikey", priority: 0 };
 		expect(upstreamOf(openrouter, "openai/gpt-6.1-sol")).toEqual({ provider: "openrouter", subscription: false });
+		expect(upstreamOf(openrouter, "team/openai/gpt-6.1-sol")).toEqual({
+			provider: "openrouter",
+			model: "openai/gpt-6.1-sol",
+			subscription: false,
+		});
+		expect(upstreamOf(openrouter, "auto")).toEqual({ provider: "openrouter", subscription: false });
+	});
+
+	/**
+	 * Ids from pi's catalogs as providers.dev keeps them (site/data/pi/providers, at ec012af). The proxy's id of an
+	 * OpenAI-compatible model is the upstream's own (or `prefix/` before it); the id said is the provider's, never a part
+	 * of it, in the routes and in what answered.
+	 */
+	describe("keeps each provider's own model id, as pi's catalog has it", () => {
+		const cases: Array<{ provider: string; host: string; ids: string[] }> = [
+			{
+				provider: "groq",
+				host: "api.groq.com",
+				ids: ["openai/gpt-oss-120b", "qwen/qwen3.6-27b", "llama-3.3-70b-versatile"],
+			},
+			{
+				provider: "fireworks",
+				host: "api.fireworks.ai",
+				ids: ["accounts/fireworks/models/deepseek-v4p1-flash", "accounts/fireworks/routers/kimi-latest"],
+			},
+			{
+				provider: "together",
+				host: "api.together.ai",
+				ids: ["Qwen/Qwen3.6-Plus", "deepseek-ai/DeepSeek-V4.1-Flash"],
+			},
+			{ provider: "nvidia", host: "integrate.api.nvidia.com", ids: ["google/gemma-3-12b-it", "z-ai/glm-5.3-flash"] },
+			{ provider: "deepseek", host: "api.deepseek.com", ids: ["deepseek-v4-pro"] },
+			{ provider: "cerebras", host: "api.cerebras.ai", ids: ["gpt-oss-120b"] },
+		];
+		for (const { provider, host, ids } of cases) {
+			it(provider, () => {
+				const account = at(host);
+				for (const id of ids) {
+					const plain = { provider, subscription: false };
+					const prefixed = { provider, model: id, subscription: false };
+					// As the proxy names it: the provider's own id, said as it is.
+					expect(upstreamOf(account, id)).toEqual(plain);
+					expect(routeOf(id, listed({ [id]: [account] })).upstreams).toEqual([plain]);
+					expect(statedUpstream(id, { provider: "openai-compatible-lab", kind: "apikey", host })).toEqual(plain);
+					// With a prefix the proxy added: the provider's id, without it.
+					const ours = `team/${id}`;
+					expect(upstreamOf(account, ours)).toEqual(prefixed);
+					expect(routeOf(ours, listed({ [ours]: [account] })).upstreams).toEqual([prefixed]);
+					expect(statedUpstream(ours, { provider: "openai-compatible-lab", kind: "apikey", host })).toEqual(
+						prefixed,
+					);
+				}
+			});
+		}
 	});
 
 	it("an API key goes by the host it is sent to, whatever its entry is called", () => {

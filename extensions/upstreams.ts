@@ -117,6 +117,28 @@ const OWNERS: Record<string, Upstream[]> = {
 	meta: [{ provider: "meta" }],
 };
 
+/** Groq's own ids with a slash: these labs' models (`openai/gpt-oss-120b`); its other ids have none. */
+const GROQ_LABS = new Set(["openai", "qwen"]);
+
+/**
+ * How many of a model id's last `/`-parts are the provider's own id, as pi's catalog has it; what comes before is a
+ * prefix the proxy added. One for a provider whose ids have no slash (everyone not here).
+ */
+const OWN_ID_PARTS: Record<string, (parts: string[]) => number> = {
+	openrouter: () => 2, // `openai/gpt-5`
+	together: () => 2, // `Qwen/Qwen3.6-Plus`
+	nvidia: () => 2, // `google/gemma-3-12b-it`
+	fireworks: () => 4, // `accounts/fireworks/models/deepseek-v4p1-flash`
+	groq: (parts) => (parts.length >= 2 && GROQ_LABS.has(parts[parts.length - 2]!) ? 2 : 1),
+};
+
+/** A model's id at a provider: the proxy's id without a prefix the proxy added. */
+export function ownModelId(provider: string, modelId: string): string {
+	const parts = modelId.split("/");
+	const count = own(OWN_ID_PARTS, provider)?.(parts) ?? 1;
+	return parts.slice(-count).join("/");
+}
+
 /** A credential's upstream for a model; undefined when it leads somewhere not known. */
 export function upstreamOf(account: Account, modelId: string): Upstream | undefined {
 	const provider =
@@ -124,8 +146,7 @@ export function upstreamOf(account: Account, modelId: string): Upstream | undefi
 			? own(API_HOSTS, account.host)
 			: own(own(CREDENTIALS, account.provider) ?? {}, account.kind);
 	if (!provider) return undefined;
-	// OpenRouter's names are `lab/model`; nobody else's have a slash, so one there is a prefix the proxy added.
-	const model = provider === "openrouter" ? modelId : modelId.slice(modelId.lastIndexOf("/") + 1);
+	const model = ownModelId(provider, modelId);
 	return { provider, ...(model !== modelId ? { model } : {}), subscription: account.kind !== "apikey" };
 }
 
