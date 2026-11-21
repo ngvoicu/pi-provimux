@@ -1,18 +1,21 @@
 # Follows the original, router-for-me/pi-cliproxyapi-provider (docs/FOLLOWING.md, 2).
 #
-# Every 3 hours, or by hand: takes the original's newest release (npm's latest and the commit on its main that set
-# that version) once it has been public for 24 hours, merges it into main, stamps the version and the changelog,
-# runs the guard, then npm ci and npm run check on the merged tree. A clean, passing candidate is pushed to main
-# (fast-forward only) and publish.yml is started. Anything else lands nothing and is said in an issue, once per state.
+# Every 3 hours, or by hand: takes the original's newest release (npm's latest, the commit on its main that set that
+# version, and npm's tarball of it, file by file the same) once it has been public for 24 hours, merges it into main,
+# stamps the version and the changelog, runs the guard, then npm ci and npm run check on the merged tree. A clean,
+# passing candidate is checked again, pushed to main (fast-forward only) and publish.yml is started. Anything else
+# lands nothing and is said in an issue, once per state.
 #
 # DRY RUN. Until the owner's one-time npm steps are done (docs/FOLLOWING.md 4.4), "land" only says what it would do:
 # it pushes nothing and starts nothing. Scheduled runs take the default below; a run by hand can choose. To switch
 # it on, change 'yes' to 'no' in both places marked "the switch" (and the same in publish.yml), in one commit.
 #
-# Trust (docs/FOLLOWING.md 6.1): every job checks out this run's own commit and runs its own .github/follow scripts.
-# Only the two test jobs run the original's or the candidate's code; they have a read-only token, no id-token, no
-# secret, and nothing they write is read later: "land" takes the candidate from prepare's artifact by the id and
-# digest prepare output, and from the test jobs nothing but their conclusion. No job uses a cache.
+# Trust (docs/FOLLOWING.md 6.1): every job runs on GitHub only, from refs/heads/main only (checked exactly, by the
+# shell, before anything else), checks out this run's own commit and runs its own .github/follow scripts. Only the
+# two test jobs run the original's or the candidate's code, and they run it in a container that has none of the
+# runner's credentials; nothing they write is read later: "land" takes the candidate from prepare's artifact by the
+# id and digest prepare output, checks it again by content, and takes from the test jobs only their conclusion. No
+# job uses a cache.
 name: follow
 
 on:
@@ -21,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "A published version of the original newer than main's base; empty = npm's latest"
+        description: "A published version of the original newer than main's base (X.Y.Z); empty = npm's latest"
         required: false
         default: ''
       no_wait:
@@ -46,13 +49,16 @@ env:
   FOLLOW_WAIT_HOURS: '24'
   # The switch (2 of 2): what a scheduled run does.
   DRY_RUN: ${{ inputs.dry_run || 'yes' }}
+  # The image the original's and the candidate's code run in.
+  NODE_IMAGE: node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 
 jobs:
-  # Select, merge, stamp and guard: git, npm view (registry data, read as JSON), jq and this run's scripts. No code
-  # of the original or of the candidate runs here.
+  # Select, check, merge, stamp and guard: git, npm view (registry data, read as JSON), npm's tarball (read, never
+  # run), jq and this run's scripts. No code of the original or of the candidate runs here.
   prepare:
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
     outputs:
@@ -65,15 +71,24 @@ jobs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "follow runs from refs/heads/main only"; exit 1; }'
+      - name: Check the inputs
+        env:
+          V: ${{ inputs.version }}
+        shell: bash
+        run: |
+          re='^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$'
+          if [[ -n $V && ! $V =~ $re ]]; then echo "The version input is not a plain X.Y.Z."; exit 1; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Self-test of the follow scripts and workflows (throwaway repositories)
+        run: bash .github/follow/test.sh
       - name: The follow scripts, outside the tree they merge
         run: cp -R .github/follow "$RUNNER_TEMP/follow"
-      - name: Self-test of the follow scripts (throwaway repositories)
-        run: bash "$RUNNER_TEMP/follow/test.sh"
       - name: Select, merge, stamp, guard
         id: prepare
         env:
@@ -87,8 +102,8 @@ jobs:
           RESULT: ${{ runner.temp }}/out/result.json
         run: |
           [ -s "$RESULT" ] || exit 0
-          jq -r '"### follow: \(.state) \(.version // "")", "", "\(.reason // "")", "", (.reasons[]?, .conflicts[]? | "- " + .)' "$RESULT" |
-            tr -d '<>`' >>"$GITHUB_STEP_SUMMARY"
+          jq -r '"### follow: \(.state) \(.version // "")", "", (.reasons[]?, .conflicts[]? | "- " + .)' "$RESULT" |
+            head -n 60 | tr -cd 'A-Za-z0-9 ._:,()/#\n-' >>"$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         if: steps.prepare.outputs.state == 'candidate'
@@ -98,23 +113,27 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The merged tree: npm ci and npm run check. Runs the original's and the fork's code and their dev dependencies.
+  # The merged tree: npm ci and npm run check, in a container. Runs the original's and the fork's code and their dev
+  # dependencies.
   test-candidate:
     name: test (candidate)
     needs: prepare
-    if: needs.prepare.outputs.state == 'candidate'
+    if: github.server_url == 'https://github.com' && needs.prepare.outputs.state == 'candidate'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
       actions: read
     steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "follow runs from refs/heads/main only"; exit 1; }'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      # Before any code of the candidate runs: prepare's artifact by its id and digest, its tree exported.
+      # Before any code of the candidate runs: prepare's artifact by its id and digest, its tree written out by git
+      # (checkout-index, which no export attribute can thin out).
       - name: The candidate's tree (git only)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -124,68 +143,76 @@ jobs:
         run: |
           set -euo pipefail
           got=$(FOLLOW_OUT="$RUNNER_TEMP/out" bash .github/follow/follow.sh fetch-candidate "$ID" "$DIGEST")
-          [ "$got" = "$WANT" ] || { echo "::error::the artifact holds $got, prepare made $WANT"; exit 1; }
-          mkdir "$RUNNER_TEMP/tree"
-          git archive "$got" | tar -x -C "$RUNNER_TEMP/tree"
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24'
+          [ "$got" = "$WANT" ] || { echo "the artifact holds $got, prepare made $WANT"; exit 1; }
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git read-tree "$got"
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git checkout-index -a --prefix="$RUNNER_TEMP/tree/"
+      # The container gets the tree and the network, and none of the runner's variables, tokens or caches.
       - name: npm ci
-        working-directory: ${{ runner.temp }}/tree
-        run: npm ci
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm ci
       - name: npm run check
-        working-directory: ${{ runner.temp }}/tree
-        run: npm run check
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm run check
 
   # The original's release alone, the same way. Information only: it tells whether a failure is the original's own.
   test-original:
     name: test (original)
     needs: prepare
-    if: needs.prepare.outputs.state == 'candidate'
+    if: github.server_url == 'https://github.com' && needs.prepare.outputs.state == 'candidate'
     continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "follow runs from refs/heads/main only"; exit 1; }'
       - name: The original's release (git only)
         env:
           BUMP: ${{ needs.prepare.outputs.bump }}
         run: |
           set -euo pipefail
-          [[ $BUMP =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no release commit"; exit 1; }
+          [[ $BUMP =~ ^[0-9a-f]{40}$ ]] || { echo "no release commit"; exit 1; }
           git init -q "$RUNNER_TEMP/o"
           cd "$RUNNER_TEMP/o"
           git fetch -q --no-tags https://github.com/router-for-me/pi-cliproxyapi-provider.git main
-          mkdir "$RUNNER_TEMP/tree"
-          git archive "$BUMP" | tar -x -C "$RUNNER_TEMP/tree"
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24'
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git read-tree "$BUMP"
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git checkout-index -a --prefix="$RUNNER_TEMP/tree/"
       - name: npm ci
-        working-directory: ${{ runner.temp }}/tree
-        run: npm ci
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm ci
       - name: npm run check
-        working-directory: ${{ runner.temp }}/tree
-        run: npm run check
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm run check
 
-  # Pushes the candidate to main without force and starts publish.yml; or, when main already has the release but npm
-  # lacks main's version, only starts publish.yml. git and gh only.
+  # Checks the candidate again by content (the guard, and npm's tarball against the merged commit), pushes it to main
+  # without force and starts publish.yml; or, when main already has the release but npm lacks main's version, only
+  # starts publish.yml. git, gh and this run's scripts; no code of the candidate.
   land:
     needs: [prepare, test-candidate]
     if: >-
-      always() && needs.prepare.result == 'success' &&
+      always() && github.server_url == 'https://github.com' && needs.prepare.result == 'success' &&
       ((needs.prepare.outputs.state == 'candidate' && needs.test-candidate.result == 'success') ||
       ((needs.prepare.outputs.state == 'up-to-date' || needs.prepare.outputs.state == 'not-newer') &&
       needs.prepare.outputs.fork_published == 'false'))
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    # main is written by land, publish and tag one at a time.
+    concurrency:
+      group: pi-provimux-main
+      cancel-in-progress: false
     permissions:
       contents: write
       actions: write
     outputs:
       landed: ${{ steps.land.outputs.landed }}
     steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "land runs from refs/heads/main only"; exit 1; }'
       # The token is kept for the push: this job runs no code of the candidate.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -202,44 +229,17 @@ jobs:
           MAIN: ${{ github.sha }}
         run: |
           set -euo pipefail
-          fail() { echo "::error::$*"; exit 1; }
-          say() { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
-          [ "$GITHUB_REF" = refs/heads/main ] || fail "follow runs on main only, not $GITHUB_REF"
-          live=$(git ls-remote origin refs/heads/main | cut -f1)
+          got=''
           if [ "$STATE" = candidate ]; then
             got=$(FOLLOW_OUT="$RUNNER_TEMP/out" bash .github/follow/follow.sh fetch-candidate "$ID" "$DIGEST")
-            [ "$got" = "$WANT" ] || fail "the artifact holds $got, prepare made $WANT"
-            [ "$(git rev-parse "$got^1^1")" = "$MAIN" ] || fail "$got is not two commits on $MAIN"
-            if [ "$live" != "$MAIN" ]; then
-              say "main moved to $live since this run started; nothing lands, the next run starts from it."
-              echo "landed=moved" >>"$GITHUB_OUTPUT"
-              exit 0
-            fi
-            if [ "$DRY_RUN" != no ]; then
-              git push --dry-run origin "$got:refs/heads/main"
-              say "Dry run: would push $got to main (fast-forward from $MAIN), then run publish.yml."
-              echo "landed=dry-run" >>"$GITHUB_OUTPUT"
-              exit 0
-            fi
-            # No force: git refuses anything but a fast-forward.
-            git push origin "$got:refs/heads/main"
-            say "Landed: main is $got."
-            echo "landed=landed" >>"$GITHUB_OUTPUT"
-          else
-            [ "$live" = "$MAIN" ] || { say "main moved; nothing to start."; exit 0; }
+            [ "$got" = "$WANT" ] || { echo "the artifact holds $got, prepare made $WANT"; exit 1; }
           fi
-          # A push with GITHUB_TOKEN starts no workflow; workflow_dispatch is the exception.
-          if [ "$DRY_RUN" != no ]; then
-            say "Dry run: would run gh workflow run publish.yml --ref main -f dry_run=no."
-          else
-            gh workflow run publish.yml -R "$GITHUB_REPOSITORY" --ref main -f dry_run=no
-            say "publish.yml started."
-          fi
+          FOLLOW_OUT="$RUNNER_TEMP/out" bash .github/follow/follow.sh land "$STATE" "$MAIN" "$got"
 
   # Writes the owner's issue: one per release of the original, updated in place, a comment when its state changes.
   report:
     needs: [prepare, test-candidate, test-original, land]
-    if: always()
+    if: always() && github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -247,6 +247,8 @@ jobs:
       actions: read
       issues: write
     steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "report runs from refs/heads/main only"; exit 1; }'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -271,8 +273,8 @@ jobs:
               "$RUNNER_TEMP/jobs.json" >"$RUNNER_TEMP/steps.txt"
             job=$(jq -r '[.jobs[] | select(.name == "test (candidate)") | .id] | first // ""' "$RUNNER_TEMP/jobs.json")
             if [ -n "$job" ]; then
-              gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" 2>/dev/null | tail -n 80 |
-                sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z //' >"$RUNNER_TEMP/log.txt" || true
+              gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" 2>/dev/null >"$RUNNER_TEMP/joblog.txt" || true
+              tail -n 80 "$RUNNER_TEMP/joblog.txt" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z //' >"$RUNNER_TEMP/log.txt"
             fi
             export FOLLOW_FAILED_STEPS="$RUNNER_TEMP/steps.txt" FOLLOW_FAILED_LOG="$RUNNER_TEMP/log.txt"
           fi

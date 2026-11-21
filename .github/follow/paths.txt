@@ -1,14 +1,34 @@
-# The paths the original may change without the owner (docs/FOLLOWING.md, 2.6).
-# One per line: a path, or a folder followed by /** for everything under it. A change of the original to any other
-# path stops the follow run until the owner adds the path here in a commit of his own.
-# Deliberately not here: LICENSE, vitest.config.ts, .npmrc, .github/, .forgejo/, docs/, CHANGELOG.md, any new
-# top-level name.
-extensions/**
-test/**
+# The exact paths the original may change without the owner (docs/FOLLOWING.md, 2.6). One path per line; no
+# wildcards (a line with * or ? is ignored). A change of the original to any other path, a new file included, stops
+# the follow run until the owner adds the path here in a commit of his own.
+# Refused whatever this list says (follow.sh, denied): .npmrc, .npmignore, .gitattributes, .gitignore, .gitmodules
+# and other package or git configuration at any depth; tsconfig*.json, biome.json, vitest.config.* and other check
+# configuration; anything under .github/, .forgejo/ or docs/. Deliberately not here: LICENSE, CHANGELOG.md.
 README.md
 package.json
 package-lock.json
-biome.json
-tsconfig.json
 cliproxyapi.example.json
-.gitignore
+extensions/auto-compact.ts
+extensions/codex-stream.ts
+extensions/fast-footer.ts
+extensions/fast.ts
+extensions/index.ts
+extensions/lib.ts
+extensions/pause.ts
+extensions/retry.ts
+extensions/sources.ts
+extensions/tps.ts
+extensions/upstreams.ts
+test/auto-compact.test.ts
+test/cache.test.ts
+test/claude-messages.test.ts
+test/codex-stream.test.ts
+test/fast-command.test.ts
+test/fast.test.ts
+test/lib.test.ts
+test/pause.test.ts
+test/pi-compat.test.ts
+test/retry.test.ts
+test/sources.test.ts
+test/transcript-compat.test.ts
+test/upstreams.test.ts

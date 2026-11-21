@@ -4,10 +4,13 @@
 //
 //   merge package|lock BASE OURS THEIRS OUT  three-way merge by rule into OUT; prints one conflict per line;
 //                                            exit 0 merged, 3 conflicts (OUT then keeps ours where they are)
-//   stops BASE OURS THEIRS                   package.json: the keys the original changed that the owner decides;
-//                                            prints one per line; exit 0 none, 4 some
-//   lock-check MAIN CANDIDATE                package-lock.json of the candidate: every package from the npm
-//                                            registry with an integrity, no new install script; exit 0 / 4
+//   stops BASE OURS THEIRS                   package.json: the keys the original changed that the owner decides
+//                                            (every key but the fork's and engines); prints one per line; exit 0
+//                                            none, 4 some
+//   lock-check MAIN CANDIDATE PKG            package-lock.json of the candidate: every package from the npm
+//                                            registry by its exact address with a full sha512 integrity, the root
+//                                            entry's dependencies those of PKG (package.json), and no entry that
+//                                            runs install scripts added or changed; exit 0 / 4
 //   set-version FILE VERSION                 the version in package.json, or its two copies in package-lock.json,
 //                                            changing nothing else in the text
 //   same-but-version A B                     exit 0 when A and B differ in their version fields only, else 4
@@ -16,8 +19,12 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const FORK_KEYS = new Set(["name", "version", "description", "keywords", "repository", "homepage", "bugs", "author"]);
-const MAP_KEYS = new Set(["devDependencies", "peerDependencies", "engines"]);
-const REGISTRY = "https://registry.npmjs.org/";
+// Merged key by key (a merge by hand needs them merged); of these only engines is not a stop for the guard.
+const MAP_KEYS = new Set(["devDependencies", "peerDependencies", "optionalDependencies", "engines"]);
+const FREE_KEYS = new Set(["engines"]);
+const DEP_KEYS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
+const RESOLVED = /^https:\/\/registry\.npmjs\.org\/(@[a-z0-9._~-]+\/)?[a-z0-9._~-]+\/-\/[a-z0-9._~-]+-[0-9A-Za-z.+-]+\.tgz$/;
+const INTEGRITY = /^sha512-[A-Za-z0-9+/]{86}==$/;
 
 const read = (file) => {
 	if (file === "-" || !existsSync(file)) return { text: "", json: {} };
@@ -202,7 +209,7 @@ try {
 		const [b, o, t] = args.map(read).map((x) => x.json);
 		const stops = [];
 		for (const k of keyOrder(b, t)) {
-			if (FORK_KEYS.has(k) || MAP_KEYS.has(k)) continue;
+			if (FORK_KEYS.has(k) || FREE_KEYS.has(k)) continue;
 			if (eq(get(b, k), get(t, k))) continue;
 			const what = !has(b, k) ? "added" : !has(t, k) ? "removed" : "changed";
 			stops.push(`package.json: the original ${what} \`${k}\`${has(o, k) ? "" : " (the fork has no such key)"}`);
@@ -210,22 +217,35 @@ try {
 		for (const s of stops) console.log(s);
 		process.exit(stops.length ? 4 : 0);
 	} else if (cmd === "lock-check") {
-		const [main, cand] = args.map(read).map((x) => x.json);
+		const [main, cand, pkg] = args.map(read).map((x) => x.json);
 		const bad = [];
+		const name = (p) => show(String(p).slice(0, 200));
 		const mainPkgs = isObj(main.packages) ? main.packages : {};
-		const pkgs = isObj(cand.packages) ? cand.packages : {};
-		for (const [p, e] of Object.entries(pkgs)) {
-			if (p === "" || !isObj(e)) continue;
-			if (e.link === true) {
-				if (!eq(e, mainPkgs[p])) bad.push(`package-lock.json packages[${show(p)}]: a new link`);
+		const pkgs = isObj(cand.packages) ? cand.packages : null;
+		if (Object.keys(cand).length && !pkgs) bad.push("package-lock.json: no packages");
+		for (const [p, e] of Object.entries(pkgs ?? {})) {
+			if (!isObj(e)) {
+				bad.push(`package-lock.json packages[${name(p)}]: not an object`);
 				continue;
 			}
-			if (typeof e.resolved !== "string" || !e.resolved.startsWith(REGISTRY))
-				bad.push(`package-lock.json packages[${show(p)}]: resolved ${show(e.resolved)} is not on ${REGISTRY}`);
-			if (typeof e.integrity !== "string" || !/^sha512-/.test(e.integrity))
-				bad.push(`package-lock.json packages[${show(p)}]: no sha512 integrity`);
-			if (e.hasInstallScript === true && get(mainPkgs[p], "hasInstallScript") !== true)
-				bad.push(`package-lock.json packages[${show(p)}]: a new install script`);
+			if (p === "") {
+				for (const k of DEP_KEYS)
+					if (!eq(e[k] ?? {}, pkg[k] ?? {}))
+						bad.push(`package-lock.json: the root entry's ${k} are not package.json's`);
+				continue;
+			}
+			const before = mainPkgs[p];
+			// An entry that runs install scripts, before or now, may not change at all.
+			if ((e.hasInstallScript === true || get(before, "hasInstallScript") === true) && !eq(e, before))
+				bad.push(`package-lock.json packages[${name(p)}]: an entry with install scripts is added or changed`);
+			if (e.link === true) {
+				if (!eq(e, before)) bad.push(`package-lock.json packages[${name(p)}]: a new link`);
+				continue;
+			}
+			if (typeof e.resolved !== "string" || !RESOLVED.test(e.resolved))
+				bad.push(`package-lock.json packages[${name(p)}]: resolved is not a tarball address on the npm registry`);
+			if (typeof e.integrity !== "string" || !INTEGRITY.test(e.integrity))
+				bad.push(`package-lock.json packages[${name(p)}]: no full sha512 integrity`);
 		}
 		for (const b of bad) console.log(b);
 		process.exit(bad.length ? 4 : 0);
