@@ -44,7 +44,7 @@ Added in pi-provimux:
 - **[Where each model comes from, in its name](#where-each-model-comes-from-in-its-name).** With Provimux, a model's
   name ends with what serves it: `Claude Opus 5.5 · Anthropic sub, fallback api`.
 - **[Where each model comes from, for other extensions](#where-each-model-comes-from-for-other-extensions).** Over
-  pi's event bus, which accounts may serve each model and, with Provimux, which kind answered each response, also over
+  pi's event bus, which accounts may serve each model and, with Provimux, which one answered each response, also over
   the Codex WebSocket. [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) uses it.
 - **One package in pi's list.** The footer helper loads from the provider, so `pi list` shows a single extension.
 
@@ -357,8 +357,14 @@ from providers.dev.
     Devin login serving the same model are told apart. A credential that leads to a service not known is still
     named, so a change of route is seen: by its host for an API key that has one (`api.example.test`), else by its
     provider as the response gives it.
-  - **With only the kind** (a Provimux that does not name the provider), a guess: the listed credentials of that
-    kind at their highest priority, possibly several.
+  - **With only the kind** (an older Provimux that does not name the provider), a guess: the listed credentials of
+    that kind at their highest priority, possibly several.
+  - **When**: once per answer, as soon as its headers (or its `response.created` event) arrive, so before the answer
+    ends and while the request is still out; only once an extension asked for the routes.
+  - **Nothing** for an answer that names nobody: plain CLIProxyAPI, which never sends these, and a Provimux answer
+    whose bytes plugin code took part in, which Provimux leaves without the three. No guess is made from the list;
+    a listener such as pi-cache-keeper reads the missing report as a route not known, and stops relying on the last
+    one.
 
 An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
 (`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider pi has none for

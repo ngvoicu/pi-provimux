@@ -20,6 +20,13 @@ plain CLIProxyAPI too.
 
 ### Changed
 
+- **What answered names the credential, not only its kind.** `model-upstreams:answered` reports the one credential
+  Provimux names in `X-CPA-AUTH-PROVIDER` and `X-CPA-AUTH-HOST` (`cpa_auth_provider`, `cpa_auth_host` on the Codex
+  WebSocket's `response.created`), read from the response alone: a Claude login and a Devin login serving one model
+  are told apart, and a service not known is named by its host or provider. It is sent when the answer's headers or
+  first event arrive, while the request is out. An answer that names nobody (plain CLIProxyAPI, or a Provimux answer
+  plugin code took part in) gets no report, which listeners read as a route not known. Only the kind, from an older
+  Provimux: the guess from the credential list, as before.
 - **Needs pi 0.99.0 or newer** (was 0.82.0). On older pi, `model-upstreams:answered` was never sent for Codex
   WebSocket turns, as pi only passes their events to extensions (`provider_stream_event`) from 0.99.0.
 - **A hook's removal of the GPT system prompt is honoured.** When an extension's `before_provider_request` hook
