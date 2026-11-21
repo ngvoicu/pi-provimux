@@ -1,0 +1,14 @@
+# The paths the original may change without the owner (docs/FOLLOWING.md, 2.6).
+# One per line: a path, or a folder followed by /** for everything under it. A change of the original to any other
+# path stops the follow run until the owner adds the path here in a commit of his own.
+# Deliberately not here: LICENSE, vitest.config.ts, .npmrc, .github/, .forgejo/, docs/, CHANGELOG.md, any new
+# top-level name.
+extensions/**
+test/**
+README.md
+package.json
+package-lock.json
+biome.json
+tsconfig.json
+cliproxyapi.example.json
+.gitignore
