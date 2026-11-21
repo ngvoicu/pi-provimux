@@ -8,7 +8,7 @@ Provimux, each model's name also says which accounts serve it (a subscription lo
 other pi extensions learn which one answered. With CLIProxyAPI, those parts stay quiet and everything else works.
 
 ```bash
-pi install git:github.com/ngvoicu/pi-provimux
+pi install npm:pi-provimux
 ```
 
 Then, in pi:
@@ -51,7 +51,10 @@ Added in pi-provimux:
 ## Install
 
 ```bash
-# from GitHub
+# from npm
+pi install npm:pi-provimux
+
+# or from GitHub
 pi install git:github.com/ngvoicu/pi-provimux
 
 # from a local checkout
@@ -60,8 +63,6 @@ pi install /absolute/path/to/pi-provimux
 # or temporarily for one run
 pi -e /absolute/path/to/pi-provimux
 ```
-
-pi-provimux is not published on npm.
 
 ### Coming from pi-cliproxyapi-provider
 
@@ -72,7 +73,7 @@ the provider:
 
 ```bash
 pi remove npm:@router-for-me/pi-cliproxyapi-provider   # or the source you installed it from
-pi install git:github.com/ngvoicu/pi-provimux
+pi install npm:pi-provimux
 ```
 
 ## Login-style setup (recommended)

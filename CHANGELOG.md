@@ -8,8 +8,8 @@ plain CLIProxyAPI too.
 
 ### The name
 
-- The package is `pi-provimux` (was `@router-for-me/pi-cliproxyapi-provider`), installed from git:
-  `pi install git:github.com/ngvoicu/pi-provimux`. It is not published on npm.
+- The package is `pi-provimux` (was `@router-for-me/pi-cliproxyapi-provider`): `pi install npm:pi-provimux`, or
+  from git, `pi install git:github.com/ngvoicu/pi-provimux`.
 - Nothing your setup names changes: the provider id `cliproxyapi` (`cliproxyapi/<model>`), `/login CLIProxyAPI`, the
   commands, the `CLIPROXYAPI_*` environment variables, `cliproxyapi.json`, `cliproxyapi-models.json` and the
   `model-upstreams` events stay as they were. Remove the old package before installing this one, so that only one
