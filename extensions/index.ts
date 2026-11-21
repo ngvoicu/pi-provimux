@@ -65,7 +65,7 @@ import type { PauseController } from "./pause.ts";
 import { pauseController, waitForPauseToEnd } from "./pause.ts";
 import { registerTransientNetworkErrorRetry } from "./retry.ts";
 import registerTpsStatus from "./tps.ts";
-import { UpstreamsAnnouncer } from "./upstreams.ts";
+import { answeredClaudeMessages, answeredStream, UpstreamsAnnouncer } from "./upstreams.ts";
 
 class ConfigPersistenceError extends Error {
 	constructor(cause: unknown) {
@@ -831,7 +831,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				model.provider === identity.providerId ? fastMode.getServiceTierFor(model.id) : undefined,
 		});
 		proactiveCompaction.setCloseWebSocketSessions(streams.closeOpenAICodexWebSocketSessions);
-		streamSimple = proactiveCompaction.wrapStreamSimple(streams.streamSimple);
+		// Each request keeps what its answer says (which credential answered) to itself: requests overlap.
+		streamSimple = answeredStream(proactiveCompaction.wrapStreamSimple(streams.streamSimple));
 
 		pi.on("session_shutdown", () => {
 			try {
@@ -851,8 +852,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			const entry: CompatRegistrationEntry = {
 				instanceId,
 				providerId: identity.providerId,
-				rawStream: streams.rawStream,
-				rawStreamSimple: streams.rawStreamSimple,
+				rawStream: answeredStream(streams.rawStream),
+				rawStreamSimple: answeredStream(streams.rawStreamSimple),
 			};
 
 			coordinator.stack.push(entry);
@@ -969,6 +970,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		resolveConnection(agentDir, identity.providerId),
 	);
 	upstreams.register();
+	// The Claude Messages models are sent by pi-ai's own implementation: their requests get their own callbacks there.
+	try {
+		const { getApiProvider } = await import("@earendil-works/pi-ai/compat");
+		const release = answeredClaudeMessages(identity.providerId, getApiProvider);
+		pi.on("session_shutdown", () => release());
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		logWarn(`what answered Claude Messages requests is not told: ${message}`);
+	}
 
 	let activeContext: ExtensionContext | undefined;
 	let latestStaleModelIds: string[] = [];

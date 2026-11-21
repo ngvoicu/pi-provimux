@@ -21,6 +21,11 @@
  *   from a proxy that names answers (one that lists its credentials, or named an answer before): `upstreams: []`,
  *   answered by something the proxy would not name. A proxy that names no answer (plain CLIProxyAPI): nothing.
  *
+ * Requests overlap (pi's cache warmer next to the turn it warms, an extension's own call with the session's callbacks),
+ * and pi's events say nothing of which request they belong to. So what a request's answer says is kept by that request
+ * alone: each call of the provider's stream gets its own callbacks (`answeredOptions`), which hold its headers and its
+ * one report, and mark the stream event it is told with. The session's handler only reads that mark.
+ *
  * An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
  * (anthropic, openai-codex, openai, meta, openrouter, google) or a providers.dev provider pi has none for (devin,
  * antigravity); the model's id there when it differs; a subscription login (true) or an API key (false).
@@ -223,6 +228,141 @@ export async function fetchModelAccounts(
 	return listed;
 }
 
+/** What an answer says answered it, as given: the kind, provider and host (any may be absent or not a string). */
+interface Statement {
+	kind: unknown;
+	provider: unknown;
+	host: unknown;
+}
+
+const STATEMENTS_KEY = Symbol.for("pi-provimux.answered-statements");
+
+/**
+ * The stream event each answer is told with → what the answer said. Keyed by the event itself, which pi hands to the
+ * session's `provider_stream_event` handlers as it is: an event belongs to one request, so nothing here can be taken
+ * for another's. Shared by every copy of this module in the process (pi may load the extension more than once).
+ */
+function statements(): WeakMap<object, Statement> {
+	const global = globalThis as { [STATEMENTS_KEY]?: WeakMap<object, Statement> };
+	global[STATEMENTS_KEY] ??= new WeakMap();
+	return global[STATEMENTS_KEY];
+}
+
+/** The callbacks one request is sent with, as `onResponse` and `onProviderStreamEvent` take them. */
+export interface AnswerCallbacks<TModel = unknown> {
+	onResponse?: (response: { status: number; headers: Record<string, string> }, model: TModel) => unknown;
+	onProviderStreamEvent?: (data: unknown, model: TModel) => unknown;
+}
+
+/**
+ * One request's callbacks, which keep what its answer says to themselves. Over HTTP and SSE its response's headers
+ * (`onResponse`, which pi calls with that request's response and model) are told with its stream's first event; over
+ * the Codex WebSocket, which calls no `onResponse`, the `cpa_auth_*` fields of its first response.created. Once: later
+ * events of the answer, and a body's own fields over HTTP (an inner gateway's), tell nothing. The callbacks given are
+ * called as they were, with the same arguments; nothing else changes.
+ */
+export function answeredOptions<T extends AnswerCallbacks<never> | undefined>(options: T): T {
+	const onEvent = options?.onProviderStreamEvent;
+	// Nobody hears the stream's events: there is nobody to tell.
+	if (!options || !onEvent) return options;
+	const onResponse = options.onResponse;
+	let headers: Record<string, string> | undefined;
+	let told = false;
+	const header = (wanted: string) =>
+		headers && Object.entries(headers).find(([name]) => name.toLowerCase() === wanted)?.[1];
+	return {
+		...options,
+		onResponse: (response: { status: number; headers: Record<string, string> }, model: never) => {
+			// A retried request: the last response is the one whose body is read.
+			headers = response.headers ?? {};
+			return onResponse?.(response, model);
+		},
+		onProviderStreamEvent: (data: unknown, model: never) => {
+			if (!told && isRecord(data)) {
+				if (headers) {
+					told = true;
+					statements().set(data, {
+						kind: header(AUTH_KIND_HEADER),
+						provider: header(AUTH_PROVIDER_HEADER),
+						host: header(AUTH_HOST_HEADER),
+					});
+				} else if (data.type === "response.created") {
+					told = true;
+					statements().set(data, {
+						kind: data[AUTH_KIND_FIELD],
+						provider: data[AUTH_PROVIDER_FIELD],
+						host: data[AUTH_HOST_FIELD],
+					});
+				}
+			}
+			return onEvent(data, model);
+		},
+	} as T;
+}
+
+/** A stream function whose every call keeps what its answer says to itself (`answeredOptions`). */
+export function answeredStream<M, C, O extends AnswerCallbacks<never> | undefined, R>(
+	stream: (model: M, context: C, options: O) => R,
+): (model: M, context: C, options: O) => R {
+	return (model, context, options) => stream(model, context, answeredOptions(options));
+}
+
+/** pi-ai's implementation of an API, as `getApiProvider` gives it. */
+interface ApiImplementation {
+	stream: (model: { provider: string }, context: unknown, options?: AnswerCallbacks<never>) => unknown;
+	streamSimple: (model: { provider: string }, context: unknown, options?: AnswerCallbacks<never>) => unknown;
+}
+
+const CLAUDE_SCOPE_KEY = Symbol.for("pi-provimux.claude-messages-scope");
+
+interface ClaudeScope {
+	/** Provider id → how many loaded copies of the extension want it. */
+	providers: Map<string, number>;
+	/** The implementations already wrapped (pi replaces its implementation when it reloads extensions). */
+	wrapped: WeakSet<object>;
+}
+
+/**
+ * Gives each request to this provider's Claude Messages models its own callbacks (`answeredOptions`), as the
+ * provider's own stream does for the Codex format. pi sends those models with pi-ai's `anthropic-messages`
+ * implementation, not the provider's stream, so its calls are wrapped where pi looks the implementation up; other
+ * providers' requests go through unchanged. The implementation is changed in place, not registered anew: pi-ai's
+ * compat functions treat their built-in providers as built-in only while the implementation is the one they made.
+ * Returns what to call when this copy of the extension shuts down.
+ */
+export function answeredClaudeMessages(
+	providerId: string,
+	getApiProvider: (api: string) => unknown,
+	api = "anthropic-messages",
+): () => void {
+	const global = globalThis as { [CLAUDE_SCOPE_KEY]?: ClaudeScope };
+	global[CLAUDE_SCOPE_KEY] ??= { providers: new Map(), wrapped: new WeakSet() };
+	const scope = global[CLAUDE_SCOPE_KEY];
+	const implementation = getApiProvider(api) as ApiImplementation | undefined;
+	if (
+		implementation &&
+		typeof implementation.stream === "function" &&
+		typeof implementation.streamSimple === "function" &&
+		!scope.wrapped.has(implementation)
+	) {
+		scope.wrapped.add(implementation);
+		for (const method of ["stream", "streamSimple"] as const) {
+			const original = implementation[method];
+			implementation[method] = (model, context, options) =>
+				original(model, context, scope.providers.has(model.provider) ? answeredOptions(options) : options);
+		}
+	}
+	scope.providers.set(providerId, (scope.providers.get(providerId) ?? 0) + 1);
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		const count = (scope.providers.get(providerId) ?? 1) - 1;
+		if (count > 0) scope.providers.set(providerId, count);
+		else scope.providers.delete(providerId);
+	};
+}
+
 /** Tells other extensions where this provider's models come from, and what answered each request. */
 export class UpstreamsAnnouncer {
 	private listed: ModelAccounts | undefined;
@@ -231,10 +371,6 @@ export class UpstreamsAnnouncer {
 	private wanted = false;
 	/** Whether the proxy named what answered a request in this session: it is one that names answers. */
 	private namedBefore = false;
-	/** The headers of the request's HTTP response, until its stream's first event says which model it was for. */
-	private pendingHeaders: Record<string, string | undefined> | undefined;
-	/** The request's answer came over HTTP (headers, SSE): no event in its body counts. */
-	private overHttp = false;
 
 	constructor(
 		private readonly pi: ExtensionAPI,
@@ -250,40 +386,15 @@ export class UpstreamsAnnouncer {
 			this.wanted = true;
 			void this.announce();
 		});
-		// Each request starts here, whatever its transport: what the last one said is over.
-		this.pi.on("before_provider_request", () => {
-			this.pendingHeaders = undefined;
-			this.overHttp = false;
-		});
-		// pi gives the headers without the request's model (its context has the session's selection, which may be a
-		// virtual model or another provider's): they wait for the stream's first event, which has the model sent.
-		this.pi.on("after_provider_response", (event) => {
-			const response = event as { status?: number; headers?: Record<string, string | undefined> };
-			this.pendingHeaders = response.headers ?? {};
-			this.overHttp = true;
-		});
+		// The event a request's answer is told with, marked by that request's own callbacks (`answeredOptions`); its
+		// model is the one the request was sent to, not the session's selection (a virtual model, or another provider's).
+		// pi's events name no request, so nothing else here is read from them.
 		this.pi.on("provider_stream_event", (event) => {
-			const ours = event.provider === this.providerId;
-			if (this.pendingHeaders) {
-				const headers = this.pendingHeaders;
-				this.pendingHeaders = undefined;
-				if (!ours) return;
-				const header = (wanted: string) =>
-					Object.entries(headers).find(([name]) => name.toLowerCase() === wanted)?.[1];
-				this.answered(
-					event.model,
-					header(AUTH_KIND_HEADER),
-					header(AUTH_PROVIDER_HEADER),
-					header(AUTH_HOST_HEADER),
-				);
-				return;
-			}
-			// Over HTTP only the headers count: fields in the body are not the proxy's own (an inner gateway's).
-			if (!ours || this.overHttp) return;
-			// The Codex WebSocket has no response headers per turn: the proxy names what answered on response.created.
-			const data = event.data;
-			if (!isRecord(data) || data.type !== "response.created") return;
-			this.answered(event.model, data[AUTH_KIND_FIELD], data[AUTH_PROVIDER_FIELD], data[AUTH_HOST_FIELD]);
+			if (event.provider !== this.providerId || !isRecord(event.data)) return;
+			const stated = statements().get(event.data);
+			if (!stated) return;
+			statements().delete(event.data);
+			this.answered(event.model, stated.kind, stated.provider, stated.host);
 		});
 	}
 

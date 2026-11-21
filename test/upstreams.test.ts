@@ -4,6 +4,9 @@ import { sourceLabel } from "../extensions/sources.ts";
 import {
 	type Account,
 	ANSWERED_EVENT,
+	type AnswerCallbacks,
+	answeredClaudeMessages,
+	answeredOptions,
 	answeredUpstreams,
 	fetchModelAccounts,
 	likelyAccounts,
@@ -297,39 +300,110 @@ describe("CLIProxyAPI's credential list", () => {
 	});
 });
 
+describe("each request's own callbacks", () => {
+	it("a request's headers are told once, with its first event; a WebSocket turn's first response.created", () => {
+		const events: unknown[] = [];
+		const session = { onResponse: vi.fn(), onProviderStreamEvent: (data: unknown) => events.push(data) };
+		const sse = answeredOptions<AnswerCallbacks<string>>(session) as Required<AnswerCallbacks<string>>;
+		const response = { status: 200, headers: { "X-CPA-AUTH-KIND": "oauth", "X-CPA-AUTH-PROVIDER": "claude" } };
+		sse.onResponse(response, "m");
+		// pi's own callbacks get what they always got.
+		expect(session.onResponse).toHaveBeenCalledWith(response, "m");
+		const first = { type: "message_start" };
+		sse.onProviderStreamEvent(first, "m");
+		sse.onProviderStreamEvent({ type: "response.created", cpa_auth_kind: "apikey" }, "m");
+		expect(events).toEqual([first, { type: "response.created", cpa_auth_kind: "apikey" }]);
+		expect(events[0]).toBe(first);
+		// Without anybody hearing the stream's events, the options are left as they are.
+		const quiet = { onResponse: vi.fn() };
+		expect(answeredOptions(quiet)).toBe(quiet);
+		expect(answeredOptions(undefined)).toBeUndefined();
+	});
+
+	it("Claude Messages requests of this provider get their own callbacks where pi looks the implementation up", () => {
+		const seen: Array<{ provider: string; options: unknown }> = [];
+		const record = (model: { provider: string }, _context: unknown, options?: unknown) =>
+			seen.push({ provider: model.provider, options });
+		const implementation = { api: "anthropic-messages", stream: record, streamSimple: record };
+		const lookup = (api: string) => (api === "anthropic-messages" ? implementation : undefined);
+		const release = answeredClaudeMessages("cliproxyapi", lookup);
+		// A second copy of the extension in the process: the implementation is wrapped once.
+		const releaseAgain = answeredClaudeMessages("cliproxyapi", lookup);
+		const wrapped = implementation.streamSimple;
+		expect(lookup("anthropic-messages")).toBe(implementation);
+
+		const options = { onProviderStreamEvent: () => {} };
+		implementation.streamSimple({ provider: "cliproxyapi" }, {}, options);
+		implementation.stream({ provider: "cliproxyapi" }, {}, options);
+		implementation.streamSimple({ provider: "anthropic" }, {}, options);
+		expect(seen[0]!.options).not.toBe(options);
+		expect(seen[1]!.options).not.toBe(options);
+		// Another provider's request: unchanged.
+		expect(seen[2]!.options).toBe(options);
+
+		// Once every copy has shut down, this provider's requests go through unchanged too.
+		release();
+		release();
+		implementation.streamSimple({ provider: "cliproxyapi" }, {}, options);
+		expect(seen[3]!.options).not.toBe(options);
+		releaseAgain();
+		implementation.streamSimple({ provider: "cliproxyapi" }, {}, options);
+		expect(seen[4]!.options).toBe(options);
+		expect(implementation.streamSimple).toBe(wrapped);
+		// No implementation: nothing to wrap, nothing breaks.
+		answeredClaudeMessages("cliproxyapi", () => undefined)();
+	});
+});
+
 describe("the events", () => {
 	/** The session's selection, as pi's context gives it: a virtual model of another provider, never the request's. */
 	const selection = { provider: "router", id: "virtual" };
 	/**
-	 * pi as it delivers one request, by the handler a test calls:
-	 * - `after_provider_response` (event, { model: the model sent }): an HTTP answer. The request starts, its headers
-	 *   come with the session's selection, then its stream's first event with the model sent.
-	 * - `provider_stream_event` (event): a Codex WebSocket turn. The request starts, then the event; no headers.
+	 * pi as it delivers one request, by the handler a test calls; each call is a request of its own, sent with its own
+	 * callbacks (`answeredOptions` over the callbacks pi's SDK gives every request, which emit pi's events):
+	 * - `after_provider_response` (event, { model: the model sent }): an HTTP answer. Its headers, then its stream's
+	 *   first event.
+	 * - `provider_stream_event` (event): a Codex WebSocket turn. The event; no headers.
 	 */
 	function fakePi() {
 		const registered = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 		const call = (name: string, event: unknown) => registered.get(name)?.(event, { model: selection });
+		type Sent = { provider: string; id: string; api?: string };
+		/** The callbacks pi's SDK gives each request: its events, with no request named and the session's selection. */
+		const session = {
+			onResponse: (response: { status: number; headers: Record<string, string> }) =>
+				call("after_provider_response", { type: "after_provider_response", ...response }),
+			onProviderStreamEvent: (data: unknown, model: Sent) =>
+				call("provider_stream_event", {
+					type: "provider_stream_event",
+					provider: model.provider,
+					api: model.api ?? "x",
+					model: model.id,
+					data,
+				}),
+		};
+		/** A request's own callbacks. */
+		const request = () => answeredOptions<AnswerCallbacks<Sent>>(session) as Required<AnswerCallbacks<Sent>>;
 		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>([
 			[
 				"after_provider_response",
 				(event, ctx) => {
-					const model = (ctx as { model: { provider: string; id: string } }).model;
-					call("before_provider_request", { type: "before_provider_request", payload: { model: model.id } });
-					call("after_provider_response", { type: "after_provider_response", ...(event as object) });
-					call("provider_stream_event", {
-						type: "provider_stream_event",
-						provider: model.provider,
-						api: "x",
-						model: model.id,
-						data: { type: "message_start" },
-					});
+					const model = (ctx as { model: Sent }).model;
+					const sent = request();
+					sent.onResponse(event as { status: number; headers: Record<string, string> }, model);
+					sent.onProviderStreamEvent({ type: "message_start" }, model);
 				},
 			],
 			[
 				"provider_stream_event",
 				(event) => {
-					call("before_provider_request", { type: "before_provider_request", payload: {} });
-					call("provider_stream_event", event);
+					const { provider, model, api, data } = event as {
+						provider: string;
+						model: string;
+						api: string;
+						data: unknown;
+					};
+					request().onProviderStreamEvent(data, { provider, id: model, api });
 				},
 			],
 		]);
@@ -345,10 +419,7 @@ describe("the events", () => {
 				},
 			},
 		} as unknown as ExtensionAPI;
-		/** Calls what the announcer registered, as pi would. */
-		const direct = (name: string, event: unknown, ctx: unknown = { model: selection }) =>
-			registered.get(name)?.(event, ctx);
-		return { pi, handlers, listeners, emitted, registered: direct };
+		return { pi, handlers, listeners, emitted, request };
 	}
 	const accounts = listed({ "claude-opus-5-5": [login, key] }, { "claude-opus-5-5": "anthropic" });
 	const answered = (upstreams: Upstream[]) => [
@@ -357,7 +428,7 @@ describe("the events", () => {
 	];
 	/** An announcer an extension asked for routes, with what its lookup gives; `settle`: wait for the lookup. */
 	async function asked(fetchAccounts: () => Promise<ModelAccounts>, settle = true) {
-		const { pi, handlers, listeners, emitted, registered } = fakePi();
+		const { pi, handlers, listeners, emitted, request } = fakePi();
 		const announcer = new UpstreamsAnnouncer(
 			pi,
 			"cliproxyapi",
@@ -378,7 +449,7 @@ describe("the events", () => {
 				{ type: "provider_stream_event", provider: "cliproxyapi", api: "x", model: "claude-opus-5-5", data },
 				{},
 			);
-		return { announcer, emitted, respond, streamEvent, registered };
+		return { announcer, emitted, respond, streamEvent, request };
 	}
 
 	it("every model's route when an extension asks, again after a refresh, and what answered a request", async () => {
@@ -669,28 +740,23 @@ describe("the events", () => {
 		expect(emitted).toEqual([]);
 	});
 	it("over HTTP and SSE only the headers count: fields in the body's response.created are an inner gateway's", async () => {
-		const { emitted, streamEvent, registered } = await asked(async () => accounts);
+		const { emitted, streamEvent, request } = await asked(async () => accounts);
 		const inner = {
 			cpa_auth_kind: "apikey",
 			cpa_auth_provider: "openai-compatible-inner",
 			cpa_auth_host: "inner.test",
 		};
+		const sent = { provider: "cliproxyapi", id: "claude-opus-5-5" };
 		/** An answer over HTTP whose body starts with response.created, as the Codex format's SSE does. */
 		const sse = (headers: Record<string, string>) => {
-			registered("before_provider_request", { type: "before_provider_request", payload: {} });
-			registered("after_provider_response", { type: "after_provider_response", status: 200, headers });
+			const callbacks = request();
+			callbacks.onResponse({ status: 200, headers }, sent);
 			for (const data of [
 				{ type: "response.created", response: { id: "r" }, ...inner },
 				{ type: "response.in_progress", response: { id: "r" }, ...inner },
 				{ type: "response.created", response: { id: "r" }, ...inner },
 			])
-				registered("provider_stream_event", {
-					type: "provider_stream_event",
-					provider: "cliproxyapi",
-					api: "x",
-					model: "claude-opus-5-5",
-					data,
-				});
+				callbacks.onProviderStreamEvent(data, sent);
 		};
 		sse({ "x-cpa-auth-kind": "oauth", "x-cpa-auth-provider": "claude" });
 		// Withheld by the proxy (a stream interceptor in the path): the inner gateway's fields are not taken.
@@ -701,7 +767,17 @@ describe("the events", () => {
 		emitted.length = 0;
 		streamEvent({ type: "response.created", cpa_auth_kind: "oauth", cpa_auth_provider: "claude" });
 		streamEvent({ type: "response.created", response: { id: "r" } });
-		expect(emitted).toEqual([answered([{ provider: "anthropic", subscription: true }]), answered([])]);
+		const turn = request();
+		turn.onProviderStreamEvent(
+			{ type: "response.created", cpa_auth_kind: "oauth", cpa_auth_provider: "claude" },
+			sent,
+		);
+		turn.onProviderStreamEvent(
+			{ type: "response.created", cpa_auth_kind: "apikey", cpa_auth_provider: "claude" },
+			sent,
+		);
+		const claude = answered([{ provider: "anthropic", subscription: true }]);
+		expect(emitted).toEqual([claude, answered([]), claude]);
 	});
 
 	it("an answer that names nobody: [] from a proxy that names answers, nothing from plain CLIProxyAPI", async () => {
@@ -739,39 +815,20 @@ describe("the events", () => {
 	});
 
 	it("the model is the request's, not the session's selection (a virtual model, here or elsewhere)", async () => {
-		const { emitted, registered } = await asked(async () => accounts);
-		/** pi: the context names the selection; the stream's events name the model sent. */
-		const send = (selected: { provider: string; id: string }, sent: { provider: string; id: string }) => {
-			const ctx = { model: selected };
-			registered("before_provider_request", { type: "before_provider_request", payload: { model: sent.id } }, ctx);
-			registered(
-				"after_provider_response",
-				{
-					type: "after_provider_response",
-					status: 200,
-					headers: { "x-cpa-auth-kind": "oauth", "x-cpa-auth-provider": "claude" },
-				},
-				ctx,
+		const { emitted, request } = await asked(async () => accounts);
+		/** pi: its events carry the session's selection (`fakePi`); the request's callbacks get the model sent. */
+		const send = (sent: { provider: string; id: string }) => {
+			const callbacks = request();
+			callbacks.onResponse(
+				{ status: 200, headers: { "x-cpa-auth-kind": "oauth", "x-cpa-auth-provider": "claude" } },
+				sent,
 			);
-			registered(
-				"provider_stream_event",
-				{
-					type: "provider_stream_event",
-					provider: sent.provider,
-					api: "x",
-					model: sent.id,
-					data: { type: "message_start" },
-				},
-				ctx,
-			);
+			callbacks.onProviderStreamEvent({ type: "message_start" }, sent);
 		};
-		const physical = { provider: "cliproxyapi", id: "claude-opus-5-5" };
-		send({ provider: "router", id: "routed" }, physical);
-		send({ provider: "cliproxyapi", id: "routed" }, physical);
-		send(physical, physical);
-		// A selection of this provider whose request went to another provider: nothing said for it.
-		send(physical, { provider: "anthropic", id: "claude-opus-5-5" });
+		send({ provider: "cliproxyapi", id: "claude-opus-5-5" });
+		// A request that went to another provider: nothing said for it.
+		send({ provider: "anthropic", id: "claude-opus-5-5" });
 		const claude = answered([{ provider: "anthropic", subscription: true }]);
-		expect(emitted).toEqual([claude, claude, claude]);
+		expect(emitted).toEqual([claude]);
 	});
 });

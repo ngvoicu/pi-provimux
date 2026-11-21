@@ -1,7 +1,8 @@
 /**
  * What answered, over the wire: pi's own transports (Claude Messages over SSE; the Codex format over SSE and over the
  * WebSocket, through this package's patched module) against a fixture proxy, with the announcer's handlers wired the
- * way pi wires them (`onResponse` → `after_provider_response`, `onProviderStreamEvent` → `provider_stream_event`).
+ * way pi wires them (`onResponse` → `after_provider_response`, `onProviderStreamEvent` → `provider_stream_event`),
+ * each request with its own callbacks over those, as the provider's stream gives them.
  *
  * Three kinds of answer:
  * - named: Provimux names the credential (`X-CPA-AUTH-*` headers; `cpa_auth_*` on the WebSocket's response.created);
@@ -16,7 +17,6 @@
  * pi's context names the session's selection, here a virtual model of another provider: the model reported is the
  * request's.
  */
-import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import type { Api, AssistantMessageEvent, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
@@ -29,7 +29,15 @@ import {
 	type CliproxyCodexStreams,
 	loadCliproxyCodexStreams,
 } from "../extensions/codex-stream.ts";
-import { ANSWERED_EVENT, type ModelAccounts, REQUEST_EVENT, UpstreamsAnnouncer } from "../extensions/upstreams.ts";
+import {
+	ANSWERED_EVENT,
+	answeredOptions,
+	answeredStream,
+	type ModelAccounts,
+	REQUEST_EVENT,
+	UpstreamsAnnouncer,
+} from "../extensions/upstreams.ts";
+import { acceptWebSocket } from "./websocket-fixture.ts";
 
 type Naming = "named" | "nobody" | "plain";
 
@@ -128,53 +136,6 @@ function route(req: IncomingMessage, res: ServerResponse) {
 	});
 }
 
-/** A minimal WebSocket server side (RFC 6455): text messages in, text messages out, close and ping answered. */
-function acceptWebSocket(req: IncomingMessage, socket: Socket, onMessage: (send: (text: string) => void) => void) {
-	const accept = createHash("sha1")
-		.update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
-		.digest("base64");
-	socket.write(
-		`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
-	);
-	const frame = (opcode: number, payload: Buffer) => {
-		const length = payload.length;
-		const head =
-			length < 126
-				? Buffer.from([0x80 | opcode, length])
-				: Buffer.from([0x80 | opcode, 126, length >> 8, length & 0xff]);
-		if (!socket.destroyed) socket.write(Buffer.concat([head, payload]));
-	};
-	const send = (text: string) => frame(0x1, Buffer.from(text));
-	let buffered = Buffer.alloc(0);
-	socket.on("data", (chunk: Buffer) => {
-		buffered = Buffer.concat([buffered, chunk]);
-		while (buffered.length >= 2) {
-			const opcode = buffered[0]! & 0x0f;
-			let length = buffered[1]! & 0x7f;
-			let offset = 2;
-			if (length === 126) {
-				length = buffered.readUInt16BE(2);
-				offset = 4;
-			} else if (length === 127) {
-				length = Number(buffered.readBigUInt64BE(2));
-				offset = 10;
-			}
-			if (buffered.length < offset + 4 + length) return;
-			const mask = buffered.subarray(offset, offset + 4);
-			const payload = Buffer.from(buffered.subarray(offset + 4, offset + 4 + length));
-			for (let i = 0; i < payload.length; i++) payload[i]! ^= mask[i % 4]!;
-			buffered = buffered.subarray(offset + 4 + length);
-			if (opcode === 0x1) onMessage(send);
-			else if (opcode === 0x9) frame(0xa, payload);
-			else if (opcode === 0x8) {
-				frame(0x8, Buffer.alloc(0));
-				socket.end();
-			}
-		}
-	});
-	socket.on("error", () => {});
-}
-
 let server: Server;
 let baseUrl: string;
 let codex: CliproxyCodexStreams;
@@ -251,11 +212,11 @@ async function announcer(lists: boolean) {
 	const wiring: SimpleStreamOptions = {
 		apiKey: "sk-test",
 		onPayload: async (payload) => {
-			await handlers.get("before_provider_request")!({ type: "before_provider_request", payload }, ctx);
+			await handlers.get("before_provider_request")?.({ type: "before_provider_request", payload }, ctx);
 			return undefined;
 		},
 		onResponse: async (response) => {
-			await handlers.get("after_provider_response")!(
+			await handlers.get("after_provider_response")?.(
 				{ type: "after_provider_response", status: response.status, headers: response.headers },
 				ctx,
 			);
@@ -322,7 +283,7 @@ describe("what answered, over the wire", () => {
 				anthropicStream(
 					model("claude-opus-5-5", "anthropic-messages") as Model<"anthropic-messages">,
 					normalizeContext(context),
-					wiring,
+					answeredOptions(wiring),
 				),
 		},
 		{
@@ -330,7 +291,7 @@ describe("what answered, over the wire", () => {
 			way: "sse",
 			expected: codexLogin,
 			send: (wiring: SimpleStreamOptions) =>
-				codex.streamSimple(model("gpt-6.1-sol", CLIPROXYAPI_CODEX_API, "/v1"), context, {
+				answeredStream(codex.streamSimple)(model("gpt-6.1-sol", CLIPROXYAPI_CODEX_API, "/v1"), context, {
 					...wiring,
 					transport: "sse",
 				} as SimpleStreamOptions),
@@ -340,7 +301,7 @@ describe("what answered, over the wire", () => {
 			way: "ws",
 			expected: codexLogin,
 			send: (wiring: SimpleStreamOptions) =>
-				codex.streamSimple(model("gpt-6.1-sol", CLIPROXYAPI_CODEX_API, "/v1"), context, {
+				answeredStream(codex.streamSimple)(model("gpt-6.1-sol", CLIPROXYAPI_CODEX_API, "/v1"), context, {
 					...wiring,
 					transport: "websocket",
 					sessionId: `ws-${Math.random()}`,
