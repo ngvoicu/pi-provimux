@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { sourceLabel } from "../extensions/sources.ts";
 import {
 	type Account,
 	ANSWERED_EVENT,
@@ -74,6 +75,58 @@ describe("where a credential leads", () => {
 		// A Claude key sent elsewhere, or an entry named openrouter on another host: not what the name says.
 		expect(upstreamOf(at("llm.example.com", "claude"), "claude-opus-5-5")).toBeUndefined();
 		expect(upstreamOf(at("llm.example.com", "openai-compatible-openrouter"), "openai/gpt-6.1-sol")).toBeUndefined();
+	});
+
+	it("names the proxy can send find only their own entry, and map to pi's provider ids", async () => {
+		// Hosts and providers that are names of an object's inherited properties are named as given, as strings.
+		for (const host of ["constructor", "__proto__"]) {
+			expect(statedUpstream("m", { provider: "openai-compatible-lab", kind: "apikey", host })).toEqual({
+				provider: host,
+				subscription: false,
+			});
+			expect(upstreamOf(at(host), "m")).toBeUndefined();
+			expect(sourceLabel([at(host)])).toBe(`${host} api`);
+		}
+		for (const provider of ["constructor", "__proto__", "valueOf"]) {
+			expect(statedUpstream("m", { provider, kind: "oauth" })).toEqual({ provider, subscription: true });
+			expect(sourceLabel([{ provider, kind: "oauth", priority: 0 }])).toBe(`${provider} sub`);
+		}
+		expect(routeOf("constructor", listed({}, {}))).toEqual({ upstreams: [] });
+		expect(routeOf("m", listed({}, { m: "constructor" }))).toEqual({ upstreams: [{ provider: "constructor" }] });
+		// A model list with such ids: entries like any other.
+		vi.stubGlobal(
+			"fetch",
+			async () =>
+				new Response(
+					JSON.stringify({
+						data: [
+							{ id: "__proto__", owned_by: "anthropic", accounts: [login] },
+							{ id: "constructor", owned_by: "openai" },
+						],
+					}),
+				),
+		);
+		const odd = await fetchModelAccounts("http://127.0.0.1:1/v1", "k");
+		expect(Object.keys(odd.accounts)).toEqual(["__proto__"]);
+		expect(routeOf("__proto__", odd)).toEqual({ upstreams: [{ provider: "anthropic", subscription: true }] });
+		expect(routeOf("constructor", odd).upstreams).toEqual([
+			{ provider: "openai-codex", subscription: true },
+			{ provider: "openai", subscription: false },
+		]);
+
+		// The proxy's credential providers, as pi (or providers.dev) names the service.
+		const named = (provider: string, kind: string, host?: string) =>
+			statedUpstream("m", { provider, kind, ...(host ? { host } : {}) }).provider;
+		expect(named("kimi", "oauth")).toBe("kimi-coding");
+		expect(named("kimi-ai", "oauth")).toBe("kimi-ai"); // api.kimi.ai: no pi provider
+		expect(named("xai", "oauth")).toBe("xai");
+		expect(named("xai", "apikey")).toBe("xai");
+		expect(named("vertex", "apikey")).toBe("google-vertex");
+		expect(named("gemini", "apikey")).toBe("google");
+		expect(named("openai-compatible-lab", "apikey", "api.moonshot.ai")).toBe("moonshotai");
+		expect(named("openai-compatible-lab", "apikey", "api.kimi.com")).toBe("kimi-coding");
+		expect(named("openai-compatible-lab", "apikey", "api.deepseek.com")).toBe("deepseek");
+		expect(named("xai", "apikey", "api.x.ai")).toBe("xai");
 	});
 });
 
@@ -245,12 +298,45 @@ describe("CLIProxyAPI's credential list", () => {
 });
 
 describe("the events", () => {
+	/** The session's selection, as pi's context gives it: a virtual model of another provider, never the request's. */
+	const selection = { provider: "router", id: "virtual" };
+	/**
+	 * pi as it delivers one request, by the handler a test calls:
+	 * - `after_provider_response` (event, { model: the model sent }): an HTTP answer. The request starts, its headers
+	 *   come with the session's selection, then its stream's first event with the model sent.
+	 * - `provider_stream_event` (event): a Codex WebSocket turn. The request starts, then the event; no headers.
+	 */
 	function fakePi() {
-		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+		const registered = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+		const call = (name: string, event: unknown) => registered.get(name)?.(event, { model: selection });
+		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>([
+			[
+				"after_provider_response",
+				(event, ctx) => {
+					const model = (ctx as { model: { provider: string; id: string } }).model;
+					call("before_provider_request", { type: "before_provider_request", payload: { model: model.id } });
+					call("after_provider_response", { type: "after_provider_response", ...(event as object) });
+					call("provider_stream_event", {
+						type: "provider_stream_event",
+						provider: model.provider,
+						api: "x",
+						model: model.id,
+						data: { type: "message_start" },
+					});
+				},
+			],
+			[
+				"provider_stream_event",
+				(event) => {
+					call("before_provider_request", { type: "before_provider_request", payload: {} });
+					call("provider_stream_event", event);
+				},
+			],
+		]);
 		const listeners = new Map<string, (data: unknown) => void>();
 		const emitted: Array<[string, unknown]> = [];
 		const pi = {
-			on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
+			on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => registered.set(name, handler),
 			events: {
 				emit: (channel: string, data: unknown) => emitted.push([channel, data]),
 				on: (channel: string, handler: (data: unknown) => void) => {
@@ -259,7 +345,10 @@ describe("the events", () => {
 				},
 			},
 		} as unknown as ExtensionAPI;
-		return { pi, handlers, listeners, emitted };
+		/** Calls what the announcer registered, as pi would. */
+		const direct = (name: string, event: unknown, ctx: unknown = { model: selection }) =>
+			registered.get(name)?.(event, ctx);
+		return { pi, handlers, listeners, emitted, registered: direct };
 	}
 	const accounts = listed({ "claude-opus-5-5": [login, key] }, { "claude-opus-5-5": "anthropic" });
 	const answered = (upstreams: Upstream[]) => [
@@ -268,7 +357,7 @@ describe("the events", () => {
 	];
 	/** An announcer an extension asked for routes, with what its lookup gives; `settle`: wait for the lookup. */
 	async function asked(fetchAccounts: () => Promise<ModelAccounts>, settle = true) {
-		const { pi, handlers, listeners, emitted } = fakePi();
+		const { pi, handlers, listeners, emitted, registered } = fakePi();
 		const announcer = new UpstreamsAnnouncer(
 			pi,
 			"cliproxyapi",
@@ -289,7 +378,7 @@ describe("the events", () => {
 				{ type: "provider_stream_event", provider: "cliproxyapi", api: "x", model: "claude-opus-5-5", data },
 				{},
 			);
-		return { announcer, emitted, respond, streamEvent };
+		return { announcer, emitted, respond, streamEvent, registered };
 	}
 
 	it("every model's route when an extension asks, again after a refresh, and what answered a request", async () => {
@@ -343,12 +432,14 @@ describe("the events", () => {
 				},
 			],
 		]);
-		// No header, another value, or another provider's model: nothing said.
+		// No header or another value, from a proxy that lists its credentials: answered by something it would not name.
+		// Another provider's model: nothing said.
 		emitted.length = 0;
 		respond({});
 		respond({ "x-cpa-auth-kind": "other" });
 		respond({ "x-cpa-auth-kind": "apikey" }, { provider: "anthropic", id: "claude-opus-5-5" });
-		expect(emitted).toEqual([]);
+		const unnamed = [ANSWERED_EVENT, { provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [] }];
+		expect(emitted).toEqual([unnamed, unnamed]);
 	});
 
 	it("over the Codex WebSocket, what answered comes from response.created, which has no headers", async () => {
@@ -379,13 +470,14 @@ describe("the events", () => {
 				},
 			],
 		]);
-		// Other events, a response.created without the field (an older CLIProxyAPI), or another provider: nothing.
+		// A response.created without the field: named nobody, from a proxy that lists its credentials.
+		// Other events or another provider: nothing.
 		emitted.length = 0;
 		streamEvent({ type: "response.output_text.delta", cpa_auth_kind: "apikey" });
 		streamEvent({ type: "response.created", response: { id: "r" } });
 		streamEvent({ type: "response.created", cpa_auth_kind: "apikey" }, "openai");
 		streamEvent("junk");
-		expect(emitted).toEqual([]);
+		expect(emitted).toEqual([[ANSWERED_EVENT, { provider: "cliproxyapi", model: "claude-opus-5-5", upstreams: [] }]]);
 	});
 
 	it("a Claude login and a Devin login of the same kind and priority: each answer names its own service", async () => {
@@ -420,7 +512,7 @@ describe("the events", () => {
 		respond({ "x-cpa-auth-kind": "apikey", "x-cpa-auth-provider": "claude", "x-cpa-auth-host": "API.Anthropic.com" });
 		// A proxy that names only the kind: the guess as before, both logins.
 		respond({ "x-cpa-auth-kind": "oauth" });
-		// An empty provider is no provider; a provider without a kind says nothing.
+		// An empty provider is no provider; a provider without a kind names nobody.
 		respond({ "x-cpa-auth-kind": "oauth", "x-cpa-auth-provider": " " });
 		respond({ "x-cpa-auth-provider": "devin" });
 		expect(emitted).toEqual([
@@ -429,6 +521,7 @@ describe("the events", () => {
 			answered([{ provider: "anthropic", subscription: false }]),
 			answered([...claude, ...devinOnly]),
 			answered([...claude, ...devinOnly]),
+			answered([]),
 		]);
 
 		const streamEvent = (data: unknown) =>
@@ -574,5 +667,111 @@ describe("the events", () => {
 			async () => accounts,
 		).announce();
 		expect(emitted).toEqual([]);
+	});
+	it("over HTTP and SSE only the headers count: fields in the body's response.created are an inner gateway's", async () => {
+		const { emitted, streamEvent, registered } = await asked(async () => accounts);
+		const inner = {
+			cpa_auth_kind: "apikey",
+			cpa_auth_provider: "openai-compatible-inner",
+			cpa_auth_host: "inner.test",
+		};
+		/** An answer over HTTP whose body starts with response.created, as the Codex format's SSE does. */
+		const sse = (headers: Record<string, string>) => {
+			registered("before_provider_request", { type: "before_provider_request", payload: {} });
+			registered("after_provider_response", { type: "after_provider_response", status: 200, headers });
+			for (const data of [
+				{ type: "response.created", response: { id: "r" }, ...inner },
+				{ type: "response.in_progress", response: { id: "r" }, ...inner },
+				{ type: "response.created", response: { id: "r" }, ...inner },
+			])
+				registered("provider_stream_event", {
+					type: "provider_stream_event",
+					provider: "cliproxyapi",
+					api: "x",
+					model: "claude-opus-5-5",
+					data,
+				});
+		};
+		sse({ "x-cpa-auth-kind": "oauth", "x-cpa-auth-provider": "claude" });
+		// Withheld by the proxy (a stream interceptor in the path): the inner gateway's fields are not taken.
+		sse({});
+		expect(emitted).toEqual([answered([{ provider: "anthropic", subscription: true }]), answered([])]);
+		// WebSocket turns after them: there the proxy writes the fields itself (an upstream's are removed), and
+		// response.created counts, once per turn.
+		emitted.length = 0;
+		streamEvent({ type: "response.created", cpa_auth_kind: "oauth", cpa_auth_provider: "claude" });
+		streamEvent({ type: "response.created", response: { id: "r" } });
+		expect(emitted).toEqual([answered([{ provider: "anthropic", subscription: true }]), answered([])]);
+	});
+
+	it("an answer that names nobody: [] from a proxy that names answers, nothing from plain CLIProxyAPI", async () => {
+		const unnamed = answered([]);
+		const claude = answered([{ provider: "anthropic", subscription: true }]);
+		// Provimux: it lists its credentials.
+		const provimux = await asked(async () => accounts);
+		provimux.respond({});
+		provimux.streamEvent({ type: "response.created", response: { id: "r" } });
+		provimux.respond({ "x-cpa-auth-kind": "oauth", "x-cpa-auth-provider": "claude" });
+		provimux.respond({ "X-CPA-AUTH-HOST": "api.anthropic.com" }); // no kind: names nobody
+		expect(provimux.emitted).toEqual([unnamed, unnamed, claude, unnamed]);
+
+		// Plain CLIProxyAPI: no credentials listed, and no answer ever named.
+		const plain = await asked(async () => listed({}, { "claude-opus-5-5": "anthropic" }));
+		plain.respond({});
+		plain.streamEvent({ type: "response.created", response: { id: "r" } });
+		plain.respond({ "content-type": "text/event-stream" });
+		expect(plain.emitted).toEqual([]);
+
+		// A proxy whose list could not be read, once it named an answer: it names answers.
+		const unread = await asked(async () => {
+			throw new Error("503");
+		});
+		unread.respond({});
+		expect(unread.emitted).toEqual([]);
+		unread.respond({ "x-cpa-auth-kind": "oauth", "x-cpa-auth-provider": "claude" });
+		unread.respond({});
+		expect(unread.emitted).toEqual([claude, unnamed]);
+
+		// Kind only, with no listed credential of that kind: answered, by what is not known.
+		const keyless = await asked(async () => listed({ "claude-opus-5-5": [login] }));
+		keyless.respond({ "x-cpa-auth-kind": "apikey" });
+		expect(keyless.emitted).toEqual([unnamed]);
+	});
+
+	it("the model is the request's, not the session's selection (a virtual model, here or elsewhere)", async () => {
+		const { emitted, registered } = await asked(async () => accounts);
+		/** pi: the context names the selection; the stream's events name the model sent. */
+		const send = (selected: { provider: string; id: string }, sent: { provider: string; id: string }) => {
+			const ctx = { model: selected };
+			registered("before_provider_request", { type: "before_provider_request", payload: { model: sent.id } }, ctx);
+			registered(
+				"after_provider_response",
+				{
+					type: "after_provider_response",
+					status: 200,
+					headers: { "x-cpa-auth-kind": "oauth", "x-cpa-auth-provider": "claude" },
+				},
+				ctx,
+			);
+			registered(
+				"provider_stream_event",
+				{
+					type: "provider_stream_event",
+					provider: sent.provider,
+					api: "x",
+					model: sent.id,
+					data: { type: "message_start" },
+				},
+				ctx,
+			);
+		};
+		const physical = { provider: "cliproxyapi", id: "claude-opus-5-5" };
+		send({ provider: "router", id: "routed" }, physical);
+		send({ provider: "cliproxyapi", id: "routed" }, physical);
+		send(physical, physical);
+		// A selection of this provider whose request went to another provider: nothing said for it.
+		send(physical, { provider: "anthropic", id: "claude-opus-5-5" });
+		const claude = answered([{ provider: "anthropic", subscription: true }]);
+		expect(emitted).toEqual([claude, claude, claude]);
 	});
 });

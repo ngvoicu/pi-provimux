@@ -7,7 +7,14 @@
  * - named: Provimux names the credential (`X-CPA-AUTH-*` headers; `cpa_auth_*` on the WebSocket's response.created);
  * - named nobody: Provimux withdrew the name (plugin code took part in the bytes), so the three are absent;
  * - plain CLIProxyAPI, which never sends them.
- * The last two look the same on the wire, and the extension says nothing for either.
+ * The last two look the same on the wire. The extension tells them apart by the proxy: Provimux lists its credentials,
+ * so its unnamed answer is reported as `upstreams: []`; plain CLIProxyAPI's is not reported.
+ *
+ * The Codex format's SSE body carries an inner gateway's `cpa_auth_*` fields on its response.created, named or not:
+ * Provimux passes them through on SSE, and only its headers count there.
+ *
+ * pi's context names the session's selection, here a virtual model of another provider: the model reported is the
+ * request's.
  */
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -37,6 +44,12 @@ const NAMED_HEADERS = {
 	"X-CPA-AUTH-PROVIDER": "claude",
 };
 const CODEX_NAMED_HEADERS = { "X-CPA-AUTH-KIND": "oauth", "X-CPA-AUTH-PROVIDER": "codex" };
+/** What an inner gateway says on its own response.created, passed through in an SSE body. */
+const INNER_GATEWAY = {
+	cpa_auth_kind: "apikey",
+	cpa_auth_provider: "openai-compatible-inner",
+	cpa_auth_host: "inner.test",
+};
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const anthropicFrames = [
@@ -106,7 +119,8 @@ function route(req: IncomingMessage, res: ServerResponse) {
 		served.push("sse");
 		const named = naming === "named";
 		if (req.url?.includes("/messages")) void writeSse(res, named ? NAMED_HEADERS : {}, anthropicFrames);
-		else if (req.url?.includes("/responses")) void writeSse(res, named ? CODEX_NAMED_HEADERS : {}, codexFrames());
+		else if (req.url?.includes("/responses"))
+			void writeSse(res, named ? CODEX_NAMED_HEADERS : {}, codexFrames(INNER_GATEWAY));
 		else {
 			res.writeHead(404);
 			res.end();
@@ -191,8 +205,14 @@ afterAll(async () => {
 	await new Promise((resolve) => server.close(resolve));
 });
 
-/** The announcer with pi's wiring, an extension (pi-cache-keeper) having asked; what it said, and when. */
-async function announcer() {
+/** The session's selection: a virtual model of another provider, which routes to the models sent here. */
+const selection = { provider: "router", id: "virtual" };
+
+/**
+ * The announcer with pi's wiring, an extension (pi-cache-keeper) having asked; what it said, and when. `lists`: the
+ * proxy lists its credentials (Provimux), else not (plain CLIProxyAPI).
+ */
+async function announcer(lists: boolean) {
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const listeners = new Map<string, (data: unknown) => void>();
 	const said: Array<{ channel: string; data: unknown; answerEnded: boolean }> = [];
@@ -208,10 +228,12 @@ async function announcer() {
 	} as unknown as ExtensionAPI;
 	const list: ModelAccounts = {
 		owners: { "claude-opus-5-5": "anthropic", "gpt-6.1-sol": "openai" },
-		accounts: {
-			"claude-opus-5-5": [{ provider: "claude", kind: "oauth", priority: 0 }],
-			"gpt-6.1-sol": [{ provider: "codex", kind: "oauth", priority: 0 }],
-		},
+		accounts: lists
+			? {
+					"claude-opus-5-5": [{ provider: "claude", kind: "oauth", priority: 0 }],
+					"gpt-6.1-sol": [{ provider: "codex", kind: "oauth", priority: 0 }],
+				}
+			: {},
 	};
 	const upstreams = new UpstreamsAnnouncer(
 		pi,
@@ -223,19 +245,25 @@ async function announcer() {
 	listeners.get(REQUEST_EVENT)!({});
 	await upstreams.announce();
 	said.length = 0;
-	// As pi's SDK does: the response's headers before its stream is read, then each parsed stream event.
+	// As pi's SDK does: the payload before it is sent, the response's headers before its stream is read (without the
+	// request's model: the context has the session's selection), then each parsed stream event with the model sent.
+	const ctx = { model: selection };
 	const wiring: SimpleStreamOptions = {
 		apiKey: "sk-test",
-		onResponse: async (response, model) => {
+		onPayload: async (payload) => {
+			await handlers.get("before_provider_request")!({ type: "before_provider_request", payload }, ctx);
+			return undefined;
+		},
+		onResponse: async (response) => {
 			await handlers.get("after_provider_response")!(
 				{ type: "after_provider_response", status: response.status, headers: response.headers },
-				{ model },
+				ctx,
 			);
 		},
 		onProviderStreamEvent: async (data, model) => {
 			await handlers.get("provider_stream_event")!(
 				{ type: "provider_stream_event", data, provider: model.provider, api: model.api, model: model.id },
-				{},
+				ctx,
 			);
 		},
 	};
@@ -321,22 +349,28 @@ describe("what answered, over the wire", () => {
 	];
 
 	for (const transport of transports) {
-		it(`${transport.name}: named, the credential is told while the request is out; named nobody or plain CLIProxyAPI, nothing`, async () => {
-			const { said, wiring } = await announcer();
+		const unnamed = { ...transport.expected, data: { ...transport.expected.data, upstreams: [] } };
+		it(`${transport.name}: once per answer while it is out; named nobody, []; plain CLIProxyAPI, nothing`, async () => {
+			const provimux = await announcer(true);
+			const plain = await announcer(false);
 			const told: unknown[][] = [];
 			served.length = 0;
-			for (const each of ["named", "nobody", "named", "plain"] as Naming[]) {
+			for (const [each, wiring, said] of [
+				["named", provimux.wiring, provimux.said],
+				["nobody", provimux.wiring, provimux.said],
+				["named", provimux.wiring, provimux.said],
+				["plain", plain.wiring, plain.said],
+			] as const) {
 				naming = each;
 				const ends = await run(transport.send(wiring));
 				expect(ends.at(-1)).toBe("done");
 				told.push(said.splice(0));
 			}
 			expect(told).toEqual([
-				// Named: one report, sent before the fixture proxy finished writing the answer.
+				// Named: one report, from the proxy's own statement, sent before the answer ended.
 				[transport.expected],
-				// Named nobody (plugin code took part): no report for this answer, which pi-cache-keeper reads as a change
-				// of route, so it does not keep the values of the last named credential.
-				[],
+				// Named nobody (plugin code took part): said as `[]`, answered by what the proxy would not name.
+				[unnamed],
 				[transport.expected],
 				// Plain CLIProxyAPI: none of the three, quiet as before.
 				[],

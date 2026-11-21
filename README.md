@@ -346,11 +346,12 @@ from providers.dev.
 - **`model-upstreams`**: `{ provider, models: { [modelId]: { upstreams, fallbacks? } } }`, the answer, and again after
   `/cliproxyapi-refresh`. `upstreams` are what may serve the model (several: it is not known which), `fallbacks` what
   may answer when those fail or cool down.
-- **`model-upstreams:answered`** (Provimux): `{ provider, model, upstreams }`, after a response that names the
-  credential that answered: its kind in the `X-CPA-AUTH-KIND` header and, from a Provimux that says them, its provider
-  in `X-CPA-AUTH-PROVIDER` and an API key's host in `X-CPA-AUTH-HOST`. Over the Codex WebSocket, which has no response
-  headers per turn, the same come from the `cpa_auth_kind`, `cpa_auth_provider` and `cpa_auth_host` fields Provimux
-  puts on each turn's `response.created` event.
+- **`model-upstreams:answered`** (Provimux): `{ provider, model, upstreams }`, what answered a request, at most once
+  per answer. `model` is the model the request was sent to (a virtual model's routed model, not the selection).
+  Over HTTP and SSE only the response headers count: the kind in `X-CPA-AUTH-KIND`, the credential's provider in
+  `X-CPA-AUTH-PROVIDER` and an API key's host in `X-CPA-AUTH-HOST`; fields in the body are not Provimux's (an inner
+  gateway's) and are ignored. Over the Codex WebSocket, which has no response headers per turn, only the
+  `cpa_auth_kind`, `cpa_auth_provider` and `cpa_auth_host` fields Provimux puts on the turn's `response.created`.
   - **With the provider**, `upstreams` is that one credential, whatever its priority, read from the response alone:
     its provider (whatever its letter case), its kind, and its host, where no host means the credential has none. The
     credential list is not consulted (it may be older than the proxy's state) nor waited for. A Claude login and a
@@ -358,13 +359,14 @@ from providers.dev.
     named, so a change of route is seen: by its host for an API key that has one (`api.example.test`), else by its
     provider as the response gives it.
   - **With only the kind** (an older Provimux that does not name the provider), a guess: the listed credentials of
-    that kind at their highest priority, possibly several.
-  - **When**: once per answer, as soon as its headers (or its `response.created` event) arrive, so before the answer
-    ends and while the request is still out; only once an extension asked for the routes.
-  - **Nothing** for an answer that names nobody: plain CLIProxyAPI, which never sends these, and a Provimux answer
-    whose bytes plugin code took part in, which Provimux leaves without the three. No guess is made from the list;
-    a listener such as pi-cache-keeper reads the missing report as a route not known, and stops relying on the last
-    one.
+    that kind at their highest priority, possibly several; `[]` when none of them is known.
+  - **`upstreams: []`**: answered, by something the proxy would not name. Provimux leaves an answer without the
+    three when plugin code took part in its bytes; from a proxy that names answers (it lists its credentials, or
+    named an answer before in this session) such an answer is reported as `[]`, so that a listener does not keep the
+    last named credential's values. Read it as "route not known".
+  - **Nothing** from plain CLIProxyAPI, which names no answer, nor before an extension asked for the routes.
+  - **When**: as soon as the answer's headers (or its `response.created` event) arrive and its stream's first event
+    says which model it is for, so before the answer ends, while the request is still out.
 
 An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
 (`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider pi has none for

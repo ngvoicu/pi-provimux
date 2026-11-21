@@ -18,6 +18,11 @@ export interface Account {
 	host?: string;
 }
 
+/** A table's own entry: a name such as `constructor` or `__proto__` finds nothing. */
+export function own<T>(table: Readonly<Record<string, T>>, key: string): T | undefined {
+	return Object.hasOwn(table, key) ? table[key] : undefined;
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -76,9 +81,9 @@ const COMPATIBLE_PREFIX = "openai-compatible-";
 
 /** Who a credential belongs to. Not known: the host it is sent to, else the name CLIProxyAPI gives it. */
 function serviceOf(account: Account): string {
-	if (account.kind === "apikey" && account.host) return HOST_SERVICES[account.host] ?? account.host;
+	if (account.kind === "apikey" && account.host) return own(HOST_SERVICES, account.host) ?? account.host;
 	const provider = account.provider.trim();
-	const known = SERVICES[provider.toLowerCase()];
+	const known = own(SERVICES, provider.toLowerCase());
 	if (known) return known;
 	return provider.toLowerCase().startsWith(COMPATIBLE_PREFIX) ? provider.slice(COMPATIBLE_PREFIX.length) : provider;
 }
@@ -92,7 +97,7 @@ function sourcesOf(accounts: Account[]): Source[] {
 	const seen = new Set<string>();
 	const sources: Source[] = [];
 	for (const account of accounts) {
-		const source = { service: serviceOf(account), kind: KINDS[account.kind] ?? account.kind };
+		const source = { service: serviceOf(account), kind: own(KINDS, account.kind) ?? account.kind };
 		const key = JSON.stringify([source.service, source.kind]);
 		if (seen.has(key)) continue;
 		seen.add(key);
