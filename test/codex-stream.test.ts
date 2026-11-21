@@ -1223,7 +1223,7 @@ describe("GPT Responses prompt caching", () => {
 		]);
 	});
 
-	it("restores the base prompt before an existing transcript developer message when a hook deletes instructions", async () => {
+	it("honours a hook that deletes instructions before an existing transcript developer message", async () => {
 		const streams = await loadCliproxyCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const extra = "Keep answers concise.";
@@ -1252,8 +1252,56 @@ describe("GPT Responses prompt caching", () => {
 		const { body } = captured[0];
 		expect(body).not.toHaveProperty("instructions");
 		expect(body.input).toEqual([
-			developerItem(systemPrompt),
 			{ role: "developer", content: extra },
+			{ role: "user", content: [{ type: "input_text", text: "question" }] },
+		]);
+	});
+
+	it("sends only a hook's replacement when it removes instructions and supplies its own developer message", async () => {
+		const streams = await loadCliproxyCodexStreams();
+		const captured: CapturedRequest[] = [];
+		const replacement = developerItem("Replacement prompt.");
+		const result = await streams
+			.streamSimple(
+				midConvoModel(false),
+				{ systemPrompt, messages: [userMessage("question")] },
+				{
+					...sseOptions(captured),
+					onPayload: (payload) => {
+						const { instructions, ...rest } = payload as Record<string, any>;
+						expect(instructions).toBe(systemPrompt);
+						return { ...rest, input: [replacement, ...rest.input] };
+					},
+				},
+			)
+			.result();
+
+		expect(result.errorMessage).toBeUndefined();
+		const { body } = captured[0];
+		expect(body).not.toHaveProperty("instructions");
+		expect(body.input).toEqual([replacement, { role: "user", content: [{ type: "input_text", text: "question" }] }]);
+	});
+
+	it("still moves the base prompt when a hook rewrites the body but leaves instructions as built", async () => {
+		const streams = await loadCliproxyCodexStreams();
+		const captured: CapturedRequest[] = [];
+		const result = await streams
+			.streamSimple(
+				midConvoModel(false),
+				{ systemPrompt, messages: [userMessage("question")] },
+				{
+					...sseOptions(captured),
+					onPayload: (payload) => ({ ...(payload as object), metadata: { tagged: "yes" } }),
+				},
+			)
+			.result();
+
+		expect(result.errorMessage).toBeUndefined();
+		const { body } = captured[0];
+		expect(body).not.toHaveProperty("instructions");
+		expect(body.metadata).toEqual({ tagged: "yes" });
+		expect(body.input).toEqual([
+			developerItem(systemPrompt),
 			{ role: "user", content: [{ type: "input_text", text: "question" }] },
 		]);
 	});
@@ -1262,11 +1310,11 @@ describe("GPT Responses prompt caching", () => {
 	const explicitDeveloper = developerItem(systemPrompt);
 	const implicitDeveloper = { role: "developer", content: systemPrompt };
 	it.each([
-		{ name: "instructions are deleted", remove: true, prefix: [], expected: [developerItem(systemPrompt)] },
+		{ name: "instructions are deleted", remove: true, prefix: [], expected: [] },
 		{
 			name: "instructions are unset and a developer-role tool item leads",
 			prefix: [additionalTools],
-			expected: [developerItem(systemPrompt), additionalTools],
+			expected: [additionalTools],
 		},
 		{
 			name: "the base is moved to a typed developer message",
@@ -1278,7 +1326,7 @@ describe("GPT Responses prompt caching", () => {
 			prefix: [implicitDeveloper],
 			expected: [implicitDeveloper],
 		},
-	])("preserves a base prompt after an in-place hook when $name", async ({ remove, prefix, expected }) => {
+	])("sends what an in-place hook left when $name", async ({ remove, prefix, expected }) => {
 		const streams = await loadCliproxyCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const result = await streams

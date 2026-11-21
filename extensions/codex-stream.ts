@@ -1479,12 +1479,16 @@ export async function loadCliproxyCodexStreams(
 			if (!effective || typeof effective !== "object" || Array.isArray(effective)) return effective;
 
 			const body = effective as Record<string, unknown>;
+			const reshaped = nativeMidConvoEffort ? reshapeConfigurationUpdates(body) : body;
+			// A hook (pi's before_provider_request) that removed the built instructions, deleting them or setting them
+			// to undefined, decided what the model is told: send its body as it is, with no base prompt put back.
+			if (builtInstructions !== undefined && body.instructions === undefined) {
+				if (!("instructions" in reshaped)) return reshaped;
+				const { instructions: _removed, ...rest } = reshaped;
+				return rest;
+			}
 			// Prefix the final full body before either transport, including WebSocket delta detection.
-			return moveGptInstructionsToInput(
-				nativeMidConvoEffort ? reshapeConfigurationUpdates(body) : body,
-				builtInstructions,
-				supportsTranscript ? undefined : context,
-			);
+			return moveGptInstructionsToInput(reshaped, builtInstructions, supportsTranscript ? undefined : context);
 		},
 	});
 
