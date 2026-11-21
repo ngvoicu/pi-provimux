@@ -52,6 +52,20 @@ The original releases by a version-bump commit on `main` followed by an `npm pub
 Both must exist. A version on npm with no bump commit on the original's `main`, or two such commits, is reported and
 nothing lands.
 
+3. **`B` is what npm ships.** Before anything is merged, npm's tarball of `V` is downloaded from
+   `https://registry.npmjs.org/` only, checked against the registry's `sha512` integrity, read in memory (never
+   unpacked), and every file in it must be a regular file of `B` with the same bytes (`.github/follow/tarball.mjs`).
+   A file that differs, a file `B` lacks, a link, or no tarball at all: `refused`. Neither `gitHead` nor npm's
+   attestations are relied on; the original's 1.5.0 has neither, and its twelve files are `5a1641b`'s byte for byte.
+   This binds the shipped files to the commit, so a rewritten branch cannot bring another tree under an aged version
+   number. It cannot authenticate what the tarball does not carry: the tests and `package-lock.json` (2.6 guards
+   those by policy).
+
+Every string from upstream is checked before it is used: versions are tokens of `[0-9A-Za-z.+-]` (anything else reads
+as `!`), only plain `X.Y.Z` versions with at most six digits a part reach arithmetic, and the old base's version is
+read back from its commit. A version asked for by hand is checked before it is shown. Inside GitHub Actions, the
+script stops runner commands (`::stop-commands::`) for everything it prints.
+
 Why not the head of the original's `main`: commits between two bumps are work the original has not released
 (`90611c1 feat: add Ultra Fast mode` stood on `main` before `5a1641b` bumped to 1.5.0). The fork ships what the
 original shipped, nothing earlier. Why npm as well as git: npm's publish time is set by the registry, so the wait
@@ -97,10 +111,10 @@ Every job checks out the run's own commit (`github.sha`, the `main` the run name
 
 | Job | What it does | What it runs | Permissions |
 |---|---|---|---|
-| `prepare` | Selects the release (2.1, 2.2). Decides whether there is anything to do. Merges `B` into `main` in a temporary worktree, applies the file rules (2.5), runs the guard (2.6), stamps the version and the changelog (3). Uploads the candidate as a git bundle. | git, `npm view` (registry data, parsed as JSON), `jq`, the run's own scripts. No code of the original or of the candidate. | `contents: read` |
-| `test (candidate)` | Exports the candidate's tree (no `.git`), `npm ci`, `npm run check`. | **The original's and the fork's code, and their dev dependencies.** | `contents: read` |
-| `test (original)` | The same on `B` alone. Information only: it tells the owner whether a failure is the original's own. It never decides. | **The original's code.** | `contents: read` |
-| `land` | Needs `prepare` and a successful `test (candidate)`. Takes the bundle by the id and digest `prepare` output, checks the candidate is the commit `prepare` named, pushes it to `main` without force, then starts `publish.yml`. | git and `gh` only. | `contents: write`, `actions: write` |
+| `prepare` | Selects the release and binds it to npm's tarball (2.1, 2.2). Decides whether there is anything to do. Runs the guard on git objects (paths and kinds of file) before anything is written, then merges `B` into `main` in a temporary worktree, applies the file rules (2.5), stamps the version and the changelog (3) and runs the whole guard (2.6). Uploads the candidate as a git bundle. | git, `npm view` and npm's tarball (data, never run), `jq`, the run's own scripts. No code of the original or of the candidate. | `contents: read` |
+| `test (candidate)` | Writes the candidate's tree with `git checkout-index` (no `.git`, no export attribute), then `npm ci`, `npm run check` **in a container** (pinned `node:24` image) that gets the tree and the network and none of the runner's variables, tokens or caches. | **The original's and the fork's code, and their dev dependencies**, in the container. | `contents: read` |
+| `test (original)` | The same on `B` alone. Information only: it tells the owner whether a failure is the original's own. It never decides. | **The original's code**, in the container. | `contents: read` |
+| `land` | Needs `prepare` and a successful `test (candidate)`. Takes the bundle by the id and digest `prepare` output, checks it is the commit `prepare` named, then **checks it again by content** (`follow.sh recheck`: the whole guard, and npm's tarball against `M`'s second parent), pushes it to `main` without force, then starts `publish.yml`. | git, `gh`, the run's own scripts. | `contents: write`, `actions: write` |
 | `report` | Always. Writes the issue (2.7). | The run's own script, `gh`. | `issues: write` |
 
 **The candidate** is two commits on top of `main`:
@@ -124,8 +138,15 @@ workflow's `GITHUB_TOKEN` starts no workflow, so `land` then runs `gh workflow r
 **Nothing to do** (green, no issue): `B` is already in `main`; `V` is not newer than the old base; `V` is waiting.
 When `B` is in `main` but npm lacks the version `main` names, `land` only starts `publish.yml` again.
 
-`land` tells `report` what it did: `landed`, `dry-run` (it pushed nothing; `git push --dry-run` checked the push), or
-`moved` (`main` moved since the run started: nothing lands, green, the next run starts from the new `main`).
+`land` tells `report` what it did, each only once its step is done: `landed` (pushed, and `publish.yml` started),
+`dispatched` (only `publish.yml` started), `dry-run` (it pushed nothing; `git push --dry-run` checked the push),
+`moved` (`main` moved since the run started: nothing lands, green, the next run starts from the new `main`),
+`refused` (the recheck refused), `push-failed` or `dispatch-failed` (landed, but `publish.yml` did not start: red).
+
+**Where and by whom.** Every job of both workflows runs only on github.com (`github.server_url`) and only from
+`refs/heads/main`: its first step compares `GITHUB_REF` with `refs/heads/main` in the shell, exactly and
+case-sensitively (Actions' own `==` ignores case). `land`, `publish` and `tag` share the concurrency group
+`pi-provimux-main`, so only one of them writes at a time.
 
 **Self-test.** `prepare` first runs `.github/follow/test.sh` (11), so a run whose scripts are broken stops before it
 merges anything.
@@ -146,8 +167,9 @@ the original's README diff, so that what is new gets described in the fork's wor
 | Keys | Rule |
 |---|---|
 | `name`, `version`, `description`, `keywords`, `repository`, `homepage`, `bugs`, `author` | The fork's, always. What the original does to them is ignored (its `version` is read as `V`, not copied). |
-| `devDependencies`, `peerDependencies`, `engines` | Three-way: a key only one side changed takes that side. Both sides changed it differently: stop. |
-| `dependencies`, `optionalDependencies`, `bundleDependencies`, `overrides`, `scripts`, `bin`, `files`, `pi`, `main`, `exports`, `type`, `publishConfig`, `license`, and any key the original adds | The original changed it: **stop, the owner decides.** These decide what is installed on a user's machine, what runs at install, what pi loads, what the check runs, and under which licence. |
+| `engines` | Three-way: a key only one side changed takes that side. Both sides changed it differently: stop. |
+| `devDependencies`, `peerDependencies`, `optionalDependencies` | Merged key by key, three ways (so that a merge by hand gets them right), but the original changing them at all is **a stop for the guard, the owner decides**: a new peer can be installed on users' machines, a new development dependency chooses what runs the checks. |
+| `dependencies`, `bundleDependencies`, `overrides`, `scripts`, `bin`, `files`, `pi`, `main`, `exports`, `type`, `publishConfig`, `license`, and any key the original adds | The original changed it: **stop, the owner decides.** These decide what is installed on a user's machine, what runs at install, what pi loads, what the check runs, and under which licence. |
 
 **`package-lock.json`** is merged the same way: the entries of `packages` are compared whole, three ways; the root
 entry's name and version are the fork's; both sides changed one entry differently: stop. The test job's `npm ci`
@@ -155,31 +177,45 @@ fails when the result does not match `package.json`.
 
 ### 2.6 The guard
 
-The guard reads git objects only. Any refusal stops the run before the tests.
+The guard reads git objects only. Any refusal stops the run before the tests. Its paths and kinds of file are
+checked **before the merge writes anything** (a link where the merge writes would otherwise be followed); the rest
+after. A checker that fails to run is an error, never a pass.
 
-1. **Paths.** Every path the original changed between the old base and `B` must match `.github/follow/paths.txt`:
-   `extensions/**`, `test/**`, `README.md`, `package.json`, `package-lock.json`, `biome.json`, `tsconfig.json`,
-   `cliproxyapi.example.json`, `.gitignore`. Deliberately **not** on it: `LICENSE`; `vitest.config.ts` (it decides
-   which tests run); `.npmrc`; anything under `.github/`, `.forgejo/` or `docs/`; `CHANGELOG.md`; any new top-level
-   name. The owner accepts a new path by adding it to the list in a commit of his own; the next run then passes.
-2. **The manifest** stop-keys of 2.5.
-3. **The fork's own tests** (test files the old base does not have) are in the candidate, unchanged. Together with
-   `scripts` and `vitest.config.ts` being the owner's, this means what `npm run check` runs cannot shrink without
-   him.
+1. **Paths.** Every path the original changed between the old base and `B`, and every path `M` changes on `main`,
+   must be **exactly** a line of `.github/follow/paths.txt`: today's files under `extensions/` and `test/`, one by
+   one, and `README.md`, `package.json`, `package-lock.json`, `cliproxyapi.example.json`. No wildcards: a new file
+   of the original stops the run until the owner adds it. Refused whatever the list says, at any depth: `.npmrc`,
+   `.npmignore`, `.gitattributes`, `.gitignore`, `.gitmodules` and other package or git configuration;
+   `tsconfig*.json`, `biome.json`, `vitest.config.*` and other check configuration; anything under `.github/`,
+   `.forgejo/` or `docs/`. Deliberately not on the list: `LICENSE`, `CHANGELOG.md`. A path that becomes a link, a
+   submodule or anything but a regular file is refused, and so is one of the four files the merge writes
+   (`README.md`, `package.json`, `package-lock.json`, `CHANGELOG.md`) that is not a regular file on either side.
+2. **The manifest** stop-keys of 2.5, and the candidate's `package-lock.json`: every package from
+   `https://registry.npmjs.org/<name>/-/<file>.tgz` with a full `sha512` integrity, the root entry's dependencies
+   equal to `package.json`'s, and **no entry that runs install scripts added or changed in any way** (version,
+   address, anything), even when it ran them before (`protobufjs`, `@google/genai` and `fsevents` do today).
+3. **The fork's tests**: every test file the fork added *or changed* (its blob on `main` is not the old base's;
+   today four of the original's test files carry fork changes) is in the candidate unchanged. Together with
+   `scripts` and the check configuration being the owner's, what `npm run check` runs cannot shrink without him.
 4. **The candidate's shape:** `main..R` is exactly `M` then `R`; `M`'s parents are `main` and `B`; `R` changes only
    the three files it may.
 5. **The version** of `R` decodes to `V` (3).
 
-Built, the guard also refuses: a path `M` changes on `main` that is not on the list (whatever the merge base); a
-symbolic link or submodule the original adds; in the candidate's `package-lock.json`, a package not resolved from
-`https://registry.npmjs.org/` with a `sha512` integrity, or one that gains an install script; a `README.md` that is not
-`main`'s; a change to `vitest.config.ts` or to `scripts`. On the original's paths the shape is read on `main`'s line
-(`git rev-list --first-parent main..R` is `R`, `M`): `main..R` itself also holds the original's commits.
+Also refused: a `README.md` that is not `main`'s; a change to `vitest.config.ts` or to `scripts`. The shape is read
+on `main`'s line (`git rev-list --first-parent main..R` is `R`, `M`): `main..R` itself also holds the original's
+commits.
 
 ### 2.7 What the owner is told
 
 One issue per release of the original, `follow: <V> — <state>`, updated in place, with a comment only when the state
 changes (a refusal that repeats every 3 hours says it once). The run is red for every state in this table.
+
+The automation finds its issues by **the label `follow-bot`, its own author (`github-actions[bot]`) and a hidden key**
+in the body (`<!-- follow-bot:key=follow:1.5.1 -->`), over every page of issues, open and closed; never by title. It
+never edits an issue someone else opened. A closed issue of the same key is reopened rather than duplicated. The
+failure issue is written first; the `README: after <V>` issue after it, and a failed write of either does not stop
+the other (the run is red). Text from upstream or from a log is cut to a budget (lists to 40 items of 300
+characters, the log to its last 80 lines and 16 kB, the body to 60 kB).
 
 | State | The issue gives |
 |---|---|
@@ -188,22 +224,29 @@ changes (a refusal that repeats every 3 hours says it once). The run is red for 
 | `refused` | Each guard reason, and what accepting it means. |
 | `no release commit` | npm's `latest` has no single bump commit on the original's `main`, or is not a plain `X.Y.Z`. |
 | `land failed` | The candidate passed, the job `land` did not: see the run. |
+| `landed, publish not started` | `main` has the release, `publish.yml` could not be started: start it by hand. |
 | `error` | The run failed before it had a result (a fetch, npm's registry): see the run. |
 
-A failed publish has its own issue, `publish: <version> — failed`, from `publish.yml` (4.3); the next good publish of
-that version closes it. When a release lands, its open `follow:` issue, if any, becomes `follow: <V> — landed`.
+A failed publish has its own issue, `publish: <version> — failed`, from `publish.yml` (4.3). It is closed only by a
+publish that is not a dry run, once npm shows the version. When a release lands, its open `follow:` issue, if any, becomes `follow: <V> — landed`.
 
 The issue is closed by the first run that finds `B` in `main` and `main`'s version on npm.
 
-**By hand, when a run stopped** (the same scripts, on the owner's Mac or a worker's branch):
+**By hand, when a run stopped** (the same scripts, on the owner's Mac or a worker's branch). The scripts run from
+outside the tree they merge (`merge` and `stamp` refuse otherwise), `stamp` ends with the guard, and the original's
+code runs in a container:
 
 ```sh
-.github/follow/follow.sh merge 1.5.1     # the same merge and rules; leaves a conflict in the work tree
-# resolve, then:
-.github/follow/follow.sh stamp           # the version and the changelog entry, as commit R
-npm run check
-git push upstream main                   # GitHub; publish.yml publishes it
+cp -R .github/follow /tmp/follow-tools      # main's scripts, outside the tree being merged
+/tmp/follow-tools/follow.sh merge 1.5.1     # the same checks, merge and rules; leaves a conflict in the work tree
+# resolve, git add, then:
+/tmp/follow-tools/follow.sh stamp           # M and R, then the guard: exit 4 = refused, do not push
+docker run --rm -v "$PWD:/w" -w /w node:24 sh -c 'npm ci && npm run check'
+git push upstream HEAD:main                 # GitHub; publish.yml publishes it
 ```
+
+A refusal by the guard is the owner's to read and accept, as in the automatic path; pushing past it is his decision,
+made knowingly.
 
 ### 2.8 Does it land and publish by itself?
 
@@ -324,11 +367,11 @@ One run at a time, never cancelled midway.
 
 | Job | What it does | What it runs | Permissions |
 |---|---|---|---|
-| `plan` | Reads `main`'s name and version. npm already has that version: nothing to publish, go to `tag`. Otherwise the publish guard (below). | git, `jq`, `npm view`, `npm pack --dry-run --ignore-scripts`. No repository code. | `contents: read` |
-| `test` | `npm ci`, `npm run check` on that commit. | **The repository's code and dev dependencies.** | `contents: read` |
-| `publish` | Needs `plan` and `test`. Checks out the commit with no stored credential, checks it is still the live `main` and the tree is clean, then `npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/`. | `git` and the npm CLI. **No repository code:** no `npm ci`, no lifecycle script, no build (the package has none: pi loads the `.ts` files). | `id-token: write`, `contents: read`; environment `npm` |
-| `tag` | After `publish`: the tag `v<version>` at the commit that was just published, and the GitHub release with the changelog entry. When the version was already on npm and the tag is missing, it tags the commit npm recorded (`gitHead`) if npm recorded one and it is in `main`; otherwise it says so and tags nothing. | git and `gh` only. | `contents: write` |
-| `notify` | After a failure: the issue `publish: <version> — failed`, or the state `landed, not published` on the open `follow:` issue. | The run's own script, `gh`. | `issues: write` |
+| `plan` | Refuses an `.npmrc` anywhere in the tree before npm runs at all. Reads `main`'s name and version; asks npm, from a neutral folder with no configuration and `--registry=https://registry.npmjs.org/`, whether it has that version: yes, nothing to publish, go to `tag`. Otherwise the publish guard (below). | git, `jq`, `npm view`, `npm pack --dry-run --ignore-scripts`. No repository code. | `contents: read` |
+| `test` | `npm ci`, `npm run check` on that commit, in the same container as `follow`'s tests. | **The repository's code and dev dependencies**, in the container. | `contents: read` |
+| `publish` | Needs `plan` and `test`. Checks out the commit with no stored credential; then **in one step** checks the tree is clean and that the live `main` is still that commit, and runs `npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/`. | `git` and the npm CLI. **No repository code:** no `npm ci`, no lifecycle script, no build (the package has none: pi loads the `.ts` files). | `id-token: write`, `contents: read`; environment `npm` |
+| `tag` | `follow.sh tag`: the tag `v<version>` at the commit just published, which must be in the live `main`, and the GitHub release with the changelog entry; a missing release is made even when the tag exists. When the version was already on npm, the commit npm recorded (`gitHead`) if it is in the live `main`, else the existing tag; with neither, the job **fails** and `notify` tells the owner to make the tag. An annotated tag is followed to its commit. | git, `gh`, `npm view`, the run's own script. | `contents: write`; environment `npm` |
+| `notify` | After a failure: the issue `publish: <version> — failed`. After a success that is not a dry run, and only once npm shows the version, it closes that issue. | The run's own script, `gh`, `npm view`. | `issues: write` |
 
 **The publish guard** (`plan`):
 
@@ -336,12 +379,16 @@ One run at a time, never cancelled midway.
 - the version has the form of 3.1, decodes to the base git shows, and is greater than npm's `latest`;
 - `scripts` has no lifecycle script (`preinstall`, `install`, `postinstall`, `prepublish`, `prepare`,
   `prepublishOnly`, `prepack`, `postpack`, `publish`, `postpublish`);
-- there is no `.npmrc` in the tree;
+- there is no `.npmrc` in the tree (checked first, before any npm command);
+- `publishConfig` is absent or exactly `{"access": "public"}` (no other dist-tag, registry or provenance setting);
 - the tarball would hold only tracked files under `extensions/`, plus `package.json`, `README.md`, `LICENSE` and
-  `CHANGELOG.md`.
+  `CHANGELOG.md`, and it holds every extension `pi.extensions` registers and every file they import by a relative
+  path (a nested `.npmignore` cannot leave one out).
+
+The same publish guard applies to every route: the owner's own pushes and `follow`'s landings alike.
 
 **The environment `npm`** (GitHub): deployments from the branch `main` only, no secret, no reviewer (unless the
-owner chooses the human step of 2.8). Only the job `publish` declares it, and the trusted publisher names it.
+owner chooses the human step of 2.8). The jobs `publish` and `tag` declare it, and the trusted publisher names it.
 
 **The npm CLI:** Node 24 from `actions/setup-node`, pinned; the job asserts `npm --version` is at least 11.5.1 and
 fails otherwise. No `NODE_AUTH_TOKEN`, and no `registry-url` for `setup-node`: with it, `setup-node` writes an
@@ -401,9 +448,11 @@ There is no secret to store on GitHub.
 Both workflows have an input `dry_run` (`yes` or `no`) and the line `DRY_RUN: ${{ inputs.dry_run || 'yes' }}`. A run
 by hand chooses; a scheduled `follow` run and a `push` to `main` have no input and take the fallback, `yes`.
 
-In a dry run everything is checked and nothing changes: `follow`'s `land` fetches and checks the candidate, checks
+In a dry run everything is checked and nothing changes: `follow`'s `land` fetches and rechecks the candidate, checks
 the push with `git push --dry-run`, and says what it would push and start; `publish` runs every check and
-`npm publish --dry-run`; `tag` says which tag and release it would make. Issues are still written.
+`npm pack --dry-run` (not `npm publish --dry-run`, which would exchange the OIDC token first); `tag` says which tag
+and release it would make. Failure issues are still written; a dry run never closes one. The `publish` job still
+enters the environment `npm` and holds `id-token: write`; it uses neither.
 
 **Switching it off** is one commit, after 4.4 steps 1 to 3: in `.github/workflows/follow.yml` and
 `.github/workflows/publish.yml`, change `default: 'yes'` ("the switch (1 of 2)") and `inputs.dry_run || 'yes'`
@@ -420,15 +469,20 @@ or not, declares it, and GitHub creates an environment it does not know with no 
 
 - **Where it runs:** on the owner's Forgejo (the NAS) only. GitHub reads `.github/workflows/` and never sees it.
   Forgejo, while `.forgejo/workflows/` exists, ignores `.github/workflows/` (as the site's workflow states and its
-  NAS shows): on the NAS this is the only workflow, so `follow` and `publish` never run there. For that reason this
-  file lands **in the same commit as, or before,** the GitHub workflows.
+  NAS shows, and Forgejo's documentation now says): on the NAS this is the only workflow, so `follow` and `publish`
+  never run there. **No revision of this repository has `.github/workflows/` without `.forgejo/workflows/`** (the
+  branch's history was arranged so, and `test.sh` checks every commit); the GitHub jobs also run only when the server
+  is github.com. **The deploy is one ref update:** the NAS's `main` moves straight to the merged tip, never through
+  an intermediate revision.
 - **When:** hourly (`cron: '13 * * * *'`), and by hand.
-- **What:** fetches `main` and the `v*` tags from `https://github.com/ngvoicu/pi-provimux.git`. `main` is pushed to
-  the NAS only as a fast-forward; a new tag is pushed; if the NAS has a commit GitHub lacks, or a `v*` tag that
-  GitHub has differently or not at all, the job fails and changes nothing (every check comes before any push). No
-  force, no merge commit.
-- **Permissions:** `contents: write` on the NAS's own repository. It runs git only, on a public address, with no
-  secret.
+- **What:** fetches `main` and the `v*` tags from `https://github.com/ngvoicu/pi-provimux.git` into fully qualified
+  refs (`refs/remotes/…`), checks everything, then pushes `main` (fast-forward only) and the new tags in **one
+  `git push --atomic`**: if the NAS has a commit GitHub lacks, a `v*` tag that GitHub has differently or not at all,
+  or the server refuses any ref, nothing changes. No force, no merge commit.
+- **Permissions:** `contents: write` on the NAS's own repository, given to `actions/checkout` pinned by commit
+  (`11d5960…`, v4.4.0, the same commit on data.forgejo.org and GitHub). Otherwise git only, on a public address,
+  with no secret. It does not judge tags (semver, ancestry, npm): it copies GitHub's `v*` tags, which a ruleset
+  protects there.
 - **Other branches** are not mirrored.
 
 **Nobody pushes to the NAS.** Locally the remotes keep the names every repository of the owner uses: `origin` is the
@@ -448,16 +502,23 @@ The Forgejo repository needs Actions switched on and a runner that serves `ubunt
 | `publish.yml` → `test` | `main`: `npm ci`, `npm run check` | `contents: read` | none | no |
 
 These three are the only jobs that install dependencies or execute anything from the tree. None has `id-token`,
-none declares an environment, and there is no secret in the repository for them to find. What leaves them is their
-conclusion and nothing else: no later job reads a file they wrote (2.4), and no cache is shared.
+none declares an environment, and there is no secret in the repository for them to find. The code runs **in a
+container** (`node:24.22.3-bookworm-slim`, pinned by digest) that is given the tree and the network and nothing of
+the runner: no `GITHUB_TOKEN`, no Actions runtime token (so no artifact or cache writes), no `GITHUB_*` file, no
+sudo, all capabilities dropped. No job uses a cache, and every `setup-node` has `package-manager-cache: false`.
+What leaves them is their conclusion and nothing else: no later job reads a file they wrote (2.4).
+
+**What remains:** the container has the network (npm needs it), so code in it can reach anything public; the
+runner around it still holds its runtime credential, which a container escape would expose; and the job's own
+token (`contents: read`, `actions: read`) is used by the step before, outside the container.
 
 The jobs that can change something run none of that code:
 
 | Job | Can | Runs |
 |---|---|---|
-| `follow.yml` → `land` | push `main` (fast-forward), start `publish.yml` | git, `gh` |
+| `follow.yml` → `land` | push `main` (fast-forward), start `publish.yml` | git, `gh`, the run's scripts (recheck) |
 | `publish.yml` → `publish` | publish to npm (OIDC, environment `npm`, `main` only) | git, the npm CLI with `--ignore-scripts` |
-| `publish.yml` → `tag` | create a `v*` tag and a release | git, `gh` |
+| `publish.yml` → `tag` | create a `v*` tag and a release (environment `npm`, live `main` only) | git, `gh`, the run's script |
 | `report`, `notify` | write issues | the run's own script, `gh` |
 
 There is no `pull_request_target` workflow and none is added. A workflow run for a pull request from a fork gets a
@@ -468,7 +529,8 @@ read-only token and no `id-token`.
 In the order a commit meets them:
 
 1. **Only a release.** A commit is taken only as part of a version the original published on npm as `latest`, and
-   only up to that version's bump commit. A push to the original's `main` alone changes nothing here.
+   only up to that version's bump commit, whose files must be the bytes npm ships (2.1). A push to the original's
+   `main` alone changes nothing here.
 2. **The wait.** 24 hours from npm's own timestamp. A release that is pulled or replaced inside that time never
    arrives.
 3. **A clean merge.** Any conflict outside the three ruled files stops it.
@@ -484,10 +546,19 @@ In the order a commit meets them:
 8. **Afterwards.** Every version on npm carries provenance: the workflow, the run and the commit it came from. A
    bad release is answered by a greater version (4.3).
 
-**What is left.** Hostile code that merges cleanly, touches only existing source files, passes the tests and
-survives a day in public is published. Nothing automatic sees it. The owner's remaining defences are the wait and
-the changelog entry and release each update produces. Choosing the pull request of 2.8 closes this, at the price of
-a click per release.
+**What is left, and accepted by the owner.** Hostile code that merges cleanly, touches only existing source files,
+passes the tests and survives a day in public lands on `main` (git installs get it at their next `pi update`) and
+is published to npm. Nothing automatic sees it. A merge also makes the original's whole history reachable from
+`main`: an intermediate change the original later reverted stays in git history even though the guard, which
+compares trees, never sees it in the installed files.
+
+**The owner's decision, 2026-11-22:** "make it fully automatic and write tests". Landing and publishing stay
+unattended: no pull request and no approval step (2.8's human steps are not taken). The security review of
+2026-11-22 (finding 1) found this residual risk; the owner accepts it. What narrows it, all automatic: only npm
+releases, bound byte for byte to their commit (2.1); the 24-hour wait; an exact list of paths and no new file
+without him; no dependency, peer, development dependency, install-script package or check configuration changing
+without him (2.5, 2.6); the fork's tests, its changes to the original's tests included, kept; the original's code
+run in a container without the runner's credentials (6.1); and the changelog entry and release of every update.
 
 Two more residual points: the test jobs' result is produced by the code they run, so a hostile release can make
 its own tests pass (they guard against breakage, not intent); and whoever can push to this repository can publish,
@@ -556,8 +627,10 @@ automation is built and reviewed on a branch but **not merged**; nobody is worki
    (`git tag v<version> <the commit>`, `git push upstream v<version>`): no workflow exists yet to do it.
 7. **Owner: trusted publisher** (4.4, step 3).
 8. **Merge the automation** to `main` on GitHub, with the next version: the workflows, the scripts, the mirror
-   workflow, this file. `publish.yml` publishes it (4.4, step 4). Push `main` to the NAS one last time, with the
-   push address given in full, so that the mirror workflow is there to run; from then on the NAS follows. Check: the
+   workflow, this file. `publish.yml` publishes it (4.4, step 4). **Each deploy is one ref update to the merged
+   tip** (`git push upstream <tip>:refs/heads/main`, then the same to the NAS), never a series of pushes through the
+   branch's commits. Push `main` to the NAS one last time that way, with the push address given in full, so that
+   the mirror workflow is there to run; from then on the NAS follows. Check: the
    version on npm with provenance, the tag `v<version>`, the NAS equal to GitHub within the hour, and only "Follow
    GitHub" in the NAS's Actions. Then the owner sets "disallow tokens" (4.4, step 5).
 9. **Owner: his own pi, from git to npm.** The login and the settings stay (`~/.pi/agent/cliproxyapi.json` is not
@@ -672,7 +745,8 @@ workflows of a public repository are still disabled after 60 days without activi
 ## 10. Build order
 
 1. Done. `.github/follow/`: `follow.sh` (`select`, `merge`, `stamp`, `guard`, `report`, and for the workflows
-   `prepare`, `fetch-candidate`, `plan`, `report-publish`), `manifest.mjs`, `paths.txt`, `test.sh`.
+   `prepare`, `fetch-candidate`, `recheck`, `land`, `plan`, `tag`, `report-publish`), `manifest.mjs`,
+   `tarball.mjs`, `paths.txt`, `test.sh`. Revised after the security review of 2026-11-22 (findings 2 to 12).
 2. Done. `follow.yml` and `publish.yml`, with `land` and `publish` behind the dry run (4.5).
 3. Done. `.forgejo/workflows/follow-github.yml`.
 4. The runbook of 7, with the owner's steps of 4.4.
@@ -680,8 +754,10 @@ workflows of a public repository are still disabled after 60 days without activi
 ## 11. The tests
 
 `bash .github/follow/test.sh` (or `test.sh clean conflict …` for some) builds an "original" with releases and a
-"fork" built on its 1.5.0 in a temporary folder, with a stub npm registry (`FOLLOW_NPM_DIR`) and a stub `gh`; no
-network. It runs on macOS's bash 3.2 and on Linux (bash 5, GNU tools), and `follow.yml` runs it before every
+"fork" built on its 1.5.0 in a temporary folder, with a stub npm registry (`FOLLOW_NPM_DIR`, with each release's
+tarball), a stub `gh` and a fake `npm`; no network. It also reads the workflows as text for what a local run cannot
+exercise, and checks every commit's tree (12). `FOLLOW_TEST_SCRIPTS` and `FOLLOW_TEST_TREE` point it at another
+revision's scripts and tree. It runs on macOS's bash 3.2 and on Linux (bash 5, GNU tools), and `follow.yml` runs it before every
 `prepare`. It is not part of `npm run check`, which only `package.json`'s `scripts` decide.
 
 | Case | What it shows |
@@ -692,8 +768,19 @@ network. It runs on macOS's bash 3.2 and on Linux (bash 5, GNU tools), and `foll
 | `waiting` | A release 2 hours old waits, with the time it is taken; `no_wait` and a shorter wait take it. |
 | `states` | Up to date, not newer, not on npm, not plain, no bump commit, two bump commits, a minor of 100. |
 | `conflict` | A conflict in a source file lands nothing and leaves the work tree alone; by hand it stops, and after resolving `stamp` and `guard` finish. |
-| `manifest_conflict`, `manifest_merge` | `devDependencies` changed on both sides stops; changed on one side each merges key by key, the lockfile takes the original's entry, `description` stays the fork's, tabs kept. |
-| `refusals` | Each refusal: `LICENSE`, a workflow, a new top-level file, `vitest.config.ts`, `.npmrc`, `docs/`, a symbolic link, `dependencies`, a `postinstall`, `license`, a new key, `pi`, `files`, a package from another registry, a new install script. |
+| `manifest_conflict`, `manifest_merge` | `devDependencies` changed on both sides is a conflict; changed on one side each, a merge by hand gets both keys, `description` stays the fork's, tabs kept, and the guard refuses it. |
+| `refusals` | Each refusal: `LICENSE`, a workflow, a new top-level file, `vitest.config.ts`, `.npmrc`, `docs/`, a symbolic link, `dependencies`, a `postinstall`, `license`, a new key, `pi`, `files`, a package from another registry. |
+| `f2_release` | npm's tarball with a changed file, with a file the commit lacks, with a wrong integrity, missing, and a rewritten bump commit: all refused. |
+| `f3_strings`, `f3_links`, `f3_checker` | A version string with a line break adds no record; a hostile old-base version is never evaluated; a version input with a runner command is not echoed; runner commands are stopped; a link where the merge writes is refused and nothing is written through it; a checker that fails is an error, not a pass. |
+| `f4_deps` | New or changed `devDependencies`, `peerDependencies`, `optionalDependencies`; an install-script entry whose version changes; a new install script; a short integrity; a root entry unlike `package.json`. |
+| `f5_paths`, `f5_pack` | A nested `.npmrc`, `.npmignore`, `.gitattributes`; `tsconfig.json`; a new extension file; a test the fork changed; a nested `.npmignore` leaving the registered extension out of the tarball. |
+| `f6_refs` | `plan`, `land`, `tag` refuse `refs/heads/Main` and a tag ref. |
+| `f8_recovery` | `merge` from inside the tree refused; a hand merge carrying a refused change ends in the guard's refusal; `plan` refuses an `.npmrc` before npm runs, runs npm from a neutral folder against the public registry, and refuses a publish tag in `publishConfig`. |
+| `f9_issues` | Past 350 issues; a contributor's issue with the bot's title and key untouched; the bot's closed issue reopened, not duplicated; the failure issue first, written even when the README issue fails; a 5000-line list kept under GitHub's limit. |
+| `f10_publish`, `f10_land` | A dry run closes nothing; a success without the version on npm closes nothing; an annotated tag at the commit passes; a missing release is made; no `gitHead` and no tag fails; a long changelog; a commit outside the live `main` is not tagged; a failed dispatch is `dispatch-failed`, never `landed`; a tampered candidate is refused by `land` and nothing is pushed. |
+| `f11_mirror` | A tag the NAS refuses leaves `main` unmoved too; a tag named `origin/main` does not stand in for the branch; the mirror follows. |
+| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; `tag` in the environment `npm`; the version input checked; the test jobs in a container with no `setup-node` and no `git archive`; no cache; `land` by `follow.sh land`; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA. |
+| `f12_history` | No commit has `.github/workflows/` without `.forgejo/workflows/`. |
 | `shape` | Candidates spoiled after the merge: the fork's own test changed, README changed, `R` changing another file or more than the version, a wrong version, a third commit, no merge. |
 | `readme` | The original's README change: the fork's README byte for byte, the diff kept; both sides changing it is no conflict. |
 | `report` | A conflict opens the issue and the README issue; a rerun writes no comment; a new state renames it with one comment; check failed with its log in a longer fence; dry run green; land failed; landed; up to date and published closes it; the publish issue opens and closes. |
