@@ -1,30 +1,78 @@
-# pi-cliproxyapi-provider
+# pi-provimux
 
-Pi provider extension that discovers models from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) and registers them for use in pi. It supports catalog-driven Fast and Ultra Fast modes and also ships a small TUI helper that shows elapsed runtime and a TPS summary after each agent turn.
+**Provimux's extension for [pi](https://pi.dev).** It adds [Provimux](https://github.com/ngvoicu/provimux) as a
+provider in pi, and works the same with plain [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
+
+Every model your Provimux or CLIProxyAPI serves appears in pi's `/model`, under the provider `cliproxyapi`. With
+Provimux, each model's name also says which accounts serve it (a subscription login or an API key, and whose), and
+other pi extensions learn which one answered. With CLIProxyAPI, those parts stay quiet and everything else works.
+
+```bash
+pi install git:github.com/ngvoicu/pi-provimux
+```
+
+Then, in pi:
+
+```text
+/login CLIProxyAPI
+```
+
+and enter the server's address (for example `http://127.0.0.1:8317`) and your client key.
+
+pi-provimux is a fork of [router-for-me/pi-cliproxyapi-provider](https://github.com/router-for-me/pi-cliproxyapi-provider),
+see [Credits](#credits).
 
 ## What it does
 
-1. Registers a provider that always appears in `/login` (account sign-in path).
-2. Interactive setup collects `baseUrl` + `apiKey` via `/login CLIProxyAPI` or `/login cliproxyapi`.
-3. Fetches `{root}/v1/models?client_version=pi`.
-4. Maps the CLIProxyAPI catalog into pi models, including support for faster service tiers.
-5. Registers inference against `{root}/backend-api/`.
-6. Provides `/fast` and `/ultrafast` to select faster service tiers for supported models.
-7. Caches the model catalog in `~/.pi/agent/cliproxyapi-models.json`, refreshes it in the background on startup, and provides `/cliproxyapi-refresh` to force a refresh.
-8. In interactive TUI sessions, shows footer elapsed time during runs and a TPS / token usage toast when the agent settles.
-9. After compaction, closes the reused Codex WebSocket for that session so CLIProxyAPI's server-side context resets with the compacted client messages.
+From the original extension:
+
+- **Your models in pi.** It reads the model list from `{root}/v1/models?client_version=pi` and registers each model
+  with its context window, reasoning levels and, when [models.dev](https://models.dev) knows it, its price.
+- **Setup by `/login`.** `/login CLIProxyAPI` asks for the address and the key, checks them, and saves them.
+- **A model cache**, so pi starts at once when the server is slow; `/cliproxyapi-refresh` reloads the list.
+- **`/fast` and `/ultrafast`**: faster service tiers on the models that offer them.
+- **`/pause` and `/continue`**: hold every request to the provider until you continue.
+- **GPT prompt caching kept**: the base prompt of `gpt-` models is sent so the prompt cache keeps being read.
+- **Thinking level changes that keep the cache**, for models that support them.
+- **Elapsed time and tokens per second** in pi's footer.
+- **A fresh Codex WebSocket after compaction**, so the server's context matches the compacted one.
+
+Added in pi-provimux:
+
+- **[Claude Messages format](#claude-messages-format).** Claude models go to `/v1/messages` in Claude's own format,
+  automatically where safe. With pi's long cache retention, that brings Anthropic's 1-hour prompt cache.
+- **[Where each model comes from, in its name](#where-each-model-comes-from-in-its-name).** With Provimux, a model's
+  name ends with what serves it: `Claude Opus 5.5 · Anthropic sub, fallback api`.
+- **[Where each model comes from, for other extensions](#where-each-model-comes-from-for-other-extensions).** Over
+  pi's event bus, which accounts may serve each model and, with Provimux, which kind answered each response, also over
+  the Codex WebSocket. [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) uses it.
+- **One package in pi's list.** The footer helper loads from the provider, so `pi list` shows a single extension.
 
 ## Install
 
 ```bash
-# from npm
-pi install npm:@router-for-me/pi-cliproxyapi-provider
+# from GitHub
+pi install git:github.com/ngvoicu/pi-provimux
 
 # from a local checkout
-pi install /absolute/path/to/pi-cliproxyapi-provider
+pi install /absolute/path/to/pi-provimux
 
 # or temporarily for one run
-pi -e /absolute/path/to/pi-cliproxyapi-provider
+pi -e /absolute/path/to/pi-provimux
+```
+
+pi-provimux is not published on npm.
+
+### Coming from pi-cliproxyapi-provider
+
+pi-provimux keeps everything your setup names: the provider id `cliproxyapi` (so `cliproxyapi/<model>` in your
+settings still works), `/login CLIProxyAPI`, the commands, the `CLIPROXYAPI_*` environment variables, and the files
+`cliproxyapi.json` and `cliproxyapi-models.json`. Remove the old package first, so that only one of them registers
+the provider:
+
+```bash
+pi remove npm:@router-for-me/pi-cliproxyapi-provider   # or the source you installed it from
+pi install git:github.com/ngvoicu/pi-provimux
 ```
 
 ## Login-style setup (recommended)
@@ -251,8 +299,8 @@ instead of the Codex Responses format every other model uses. This happens autom
 ## Where each model comes from, in its name
 
 Through CLIProxyAPI pi sees one provider, so its model list does not say whether a model is served by a subscription
-login or by a paid API key, nor by whom. A CLIProxyAPI that lists its credentials
-([router-for-me/CLIProxyAPI#7634](https://github.com/router-for-me/CLIProxyAPI/pull/7634)) is asked for them with the
+login or by a paid API key, nor by whom. [Provimux](https://github.com/ngvoicu/provimux), or a CLIProxyAPI that lists its credentials
+([router-for-me/CLIProxyAPI#7634](https://github.com/router-for-me/CLIProxyAPI/pull/7634)), is asked for them with the
 plain model list (`GET /v1/models?include=accounts`, one request per model list refresh), and each model's name then
 ends with where it comes from:
 
@@ -293,9 +341,9 @@ from providers.dev.
 - **`model-upstreams`**: `{ provider, models: { [modelId]: { upstreams, fallbacks? } } }`, the answer, and again after
   `/cliproxyapi-refresh`. `upstreams` are what may serve the model (several: it is not known which), `fallbacks` what
   may answer when those fail or cool down.
-- **`model-upstreams:answered`**: `{ provider, model, upstreams }`, after a response whose `X-CPA-AUTH-KIND` header
+- **`model-upstreams:answered`** (Provimux): `{ provider, model, upstreams }`, after a response whose `X-CPA-AUTH-KIND` header
   names the kind of credential that answered; over the Codex WebSocket, which has no response headers per turn, from
-  the `cpa_auth_kind` field CLIProxyAPI puts on each turn's `response.created` event.
+  the `cpa_auth_kind` field Provimux puts on each turn's `response.created` event.
 
 An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
 (`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider pi has none for
@@ -304,7 +352,7 @@ key, absent when not known.
 
 How the routes are made:
 
-- **A CLIProxyAPI that lists its credentials** ([router-for-me/CLIProxyAPI#7634](https://github.com/router-for-me/CLIProxyAPI/pull/7634)):
+- **Provimux, or a CLIProxyAPI that lists its credentials** ([router-for-me/CLIProxyAPI#7634](https://github.com/router-for-me/CLIProxyAPI/pull/7634)):
   CLIProxyAPI uses the highest priority that is free in every routing mode and picks among the credentials sharing it
   (round-robin by default; with no priority set, all share 0). So the `upstreams` are the credentials at the highest
   priority, the `fallbacks` the others. An API key whose host CLIProxyAPI names goes by the host (`openrouter.ai`,
@@ -347,3 +395,15 @@ Set `"tps": false` in `~/.pi/agent/cliproxyapi.json` to turn off just this helpe
 - If CPA returns HTTP 200 with zero usable models: login still succeeds; re-run `/login CLIProxyAPI` later after models become available.
 - If the selected model does not provide a non-empty `service_tiers` array: the request is left unchanged; `/fast` and `/ultrafast` still update the global preference and warn when enabling a mode.
 - After `/compact`, threshold compaction, or overflow recovery, the provider closes the reused Codex WebSocket for the current session. CLIProxyAPI binds server-side context to the connection, so a reused socket would keep reporting a near-full `cacheRead` and retrigger proactive compaction even though the client context is now small. SSE is unaffected because it bills from the request body.
+
+## Credits
+
+pi-provimux is a fork of [pi-cliproxyapi-provider](https://github.com/router-for-me/pi-cliproxyapi-provider) by
+[Router-For.ME](https://github.com/router-for-me), released under the MIT license. Nearly everything it does is their
+work: the provider, the login, the model mapping, the cache, the Fast modes and the Codex stream. pi-provimux adds the
+Provimux parts above and merges the original's changes. Thank you to router-for-me for the extension and for
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
