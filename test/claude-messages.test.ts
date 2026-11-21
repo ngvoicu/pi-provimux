@@ -11,6 +11,7 @@ import {
 	fetchModelSources,
 	loadBuiltinClaudeFormatCatalog,
 	loadMappedModels,
+	type ModelsDevCostCatalog,
 	reportedMaxTokens,
 	resolveClaudeMessagesDefault,
 	toPiModel,
@@ -133,6 +134,21 @@ describe("toPiModel with the Claude format", () => {
 		const mapped = toPiModel(model);
 		expect(mapped?.api).toBeUndefined();
 		expect(mapped?.compat).toEqual({ supportsMidConvoEffort: true });
+	});
+
+	it("keeps the standard price under a speed preference, since no speed tier is sent", () => {
+		const fastCapable: CodexClientModel = { ...model, service_tiers: [{ id: "priority" }] };
+		const standard = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
+		const fast = { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 };
+		const entries = [{ providerId: "anthropic", modelId: "claude-opus-5-5", standard, fast }];
+		const costs: ModelsDevCostCatalog = {
+			exact: new Map([["claude-opus-5-5", entries]]),
+			normalized: new Map([["claude-opus-5-5", entries]]),
+		};
+		expect(toPiModel(fastCapable, costs, true, entry)?.cost.input).toBe(5);
+		expect(toPiModel(fastCapable, costs, false, entry)?.cost.input).toBe(5);
+		// On the Codex format the speed tier is sent, and the Fast price applies.
+		expect(toPiModel(fastCapable, costs, true)?.cost.input).toBe(15);
 	});
 });
 

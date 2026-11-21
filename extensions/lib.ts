@@ -621,8 +621,9 @@ export function toPiModel(
 			: undefined) ??
 		DEFAULT_CONTEXT_WINDOW;
 
+	// The Fast price only where a speed tier is sent: Claude-format models go to /v1/messages without one.
 	const cost = costCatalog
-		? matchModelCost(id, costCatalog, fastMode && supportsFastServiceTier(model))
+		? matchModelCost(id, costCatalog, fastMode && !claudeFormat && supportsFastServiceTier(model))
 		: { ...ZERO_COST };
 
 	const maxTokens = reportedMaxTokens(model) ?? DEFAULT_MAX_TOKENS;
