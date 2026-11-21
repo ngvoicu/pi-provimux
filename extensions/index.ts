@@ -189,11 +189,11 @@ class ModelRefreshCoordinator {
 }
 
 function logWarn(message: string): void {
-	console.warn(`[pi-cliproxyapi-provider] ${message}`);
+	console.warn(`[pi-provimux] ${message}`);
 }
 
 function logInfo(message: string): void {
-	console.info(`[pi-cliproxyapi-provider] ${message}`);
+	console.info(`[pi-provimux] ${message}`);
 }
 
 const COMPAT_COORDINATOR_KEY = Symbol.for("pi-cliproxyapi-provider.compat-coordinator");

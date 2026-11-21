@@ -1450,7 +1450,7 @@ export async function loadCliproxyCodexStreams(
 			? mod.closeOpenAICodexWebSocketSessions
 			: () => {
 					console.warn(
-						"[pi-cliproxyapi-provider] patched openai-codex-responses module is missing closeOpenAICodexWebSocketSessions export",
+						"[pi-provimux] patched openai-codex-responses module is missing closeOpenAICodexWebSocketSessions export",
 					);
 				};
 

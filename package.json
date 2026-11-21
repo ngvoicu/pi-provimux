@@ -1,25 +1,23 @@
 {
-	"name": "@router-for-me/pi-cliproxyapi-provider",
-	"version": "1.5.0",
-	"description": "Pi provider extension that auto-registers CLIProxyAPI models, plus TUI elapsed/TPS status",
+	"name": "pi-provimux",
+	"version": "2.0.0",
+	"description": "Provimux's pi extension: registers the models of Provimux or CLIProxyAPI in pi, plus TUI elapsed/TPS status",
 	"type": "module",
 	"keywords": [
 		"pi-package",
 		"pi-extension",
 		"cliproxyapi",
+		"provimux",
 		"tps"
 	],
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/router-for-me/pi-cliproxyapi-provider.git"
+		"url": "git+https://github.com/ngvoicu/pi-provimux.git"
 	},
-	"homepage": "https://github.com/router-for-me/pi-cliproxyapi-provider#readme",
+	"homepage": "https://github.com/ngvoicu/pi-provimux#readme",
 	"bugs": {
-		"url": "https://github.com/router-for-me/pi-cliproxyapi-provider/issues"
-	},
-	"publishConfig": {
-		"access": "public"
+		"url": "https://github.com/ngvoicu/pi-provimux/issues"
 	},
 	"engines": {
 		"node": ">=22.19.0"

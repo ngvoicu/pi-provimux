@@ -276,7 +276,7 @@ export class ProactiveCompactionController {
 			this.closeWebSocketSessions(sessionId);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			console.warn(`[pi-cliproxyapi-provider] failed to close Codex WebSocket for session ${sessionId}: ${message}`);
+			console.warn(`[pi-provimux] failed to close Codex WebSocket for session ${sessionId}: ${message}`);
 		}
 	}
 
