@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0
+## 105.0.1
 
 The extension is now **pi-provimux**, Provimux's pi extension, a fork of
 [router-for-me/pi-cliproxyapi-provider](https://github.com/router-for-me/pi-cliproxyapi-provider). It works with
@@ -36,7 +36,7 @@ plain CLIProxyAPI too.
 - **GPT Responses prompt caching kept**: for `gpt-` models the base prompt is sent as the first `developer` input
   message instead of top-level `instructions`, so the prompt cache keeps being read.
 
-### Already in this fork before 2.0.0
+### Already in this fork before 105.0.1
 
 - Claude models in Claude's own Messages format, automatically where safe (`claudeMessages`).
 - Where each model comes from, at the end of its name, from Provimux's model list.
