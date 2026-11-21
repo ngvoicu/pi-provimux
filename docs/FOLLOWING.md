@@ -1,7 +1,8 @@
 # pi-provimux: following the original, versions, npm, the mirror, the rename
 
-**Status: design.** Nothing here is built yet. It says what the automation around pi-provimux is, so that workers
-build to it; when a build shows the design wrong, this file is corrected.
+**Status: built, in dry run, not merged.** The scripts, the two workflows and the mirror are on the branch `follow`
+(10). `land` and `publish` run as a dry run until the owner's one-time npm steps (4.4) are done; [the dry
+run](#45-the-dry-run-switch) says how to switch it off. When a build shows this file wrong, it is corrected.
 
 - **The original:** `router-for-me/pi-cliproxyapi-provider` (MIT), npm `@router-for-me/pi-cliproxyapi-provider`.
 - **The fork:** `ngvoicu/pi-provimux` on GitHub (today still `ngvoicu/pi-cliproxyapi-provider`), npm `pi-provimux`.
@@ -123,6 +124,12 @@ workflow's `GITHUB_TOKEN` starts no workflow, so `land` then runs `gh workflow r
 **Nothing to do** (green, no issue): `B` is already in `main`; `V` is not newer than the old base; `V` is waiting.
 When `B` is in `main` but npm lacks the version `main` names, `land` only starts `publish.yml` again.
 
+`land` tells `report` what it did: `landed`, `dry-run` (it pushed nothing; `git push --dry-run` checked the push), or
+`moved` (`main` moved since the run started: nothing lands, green, the next run starts from the new `main`).
+
+**Self-test.** `prepare` first runs `.github/follow/test.sh` (11), so a run whose scripts are broken stops before it
+merges anything.
+
 ### 2.5 Three files have a rule instead of a textual merge
 
 The fork and the original both change the same lines of these files at every release, so a textual merge would
@@ -163,6 +170,12 @@ The guard reads git objects only. Any refusal stops the run before the tests.
    the three files it may.
 5. **The version** of `R` decodes to `V` (3).
 
+Built, the guard also refuses: a path `M` changes on `main` that is not on the list (whatever the merge base); a
+symbolic link or submodule the original adds; in the candidate's `package-lock.json`, a package not resolved from
+`https://registry.npmjs.org/` with a `sha512` integrity, or one that gains an install script; a `README.md` that is not
+`main`'s; a change to `vitest.config.ts` or to `scripts`. On the original's paths the shape is read on `main`'s line
+(`git rev-list --first-parent main..R` is `R`, `M`): `main..R` itself also holds the original's commits.
+
 ### 2.7 What the owner is told
 
 One issue per release of the original, `follow: <V> — <state>`, updated in place, with a comment only when the state
@@ -174,7 +187,11 @@ changes (a refusal that repeats every 3 hours says it once). The run is red for 
 | `check failed` | The step that failed (install, typecheck, lint, tests) with its output, and whether the original's own tree fails the same step. |
 | `refused` | Each guard reason, and what accepting it means. |
 | `no release commit` | npm's `latest` has no single bump commit on the original's `main`, or is not a plain `X.Y.Z`. |
-| `landed, not published` | From `publish.yml` (4.3): `main` has the release, npm does not. |
+| `land failed` | The candidate passed, the job `land` did not: see the run. |
+| `error` | The run failed before it had a result (a fetch, npm's registry): see the run. |
+
+A failed publish has its own issue, `publish: <version> — failed`, from `publish.yml` (4.3); the next good publish of
+that version closes it. When a release lands, its open `follow:` issue, if any, becomes `follow: <V> — landed`.
 
 The issue is closed by the first run that finds `B` in `main` and `main`'s version on npm.
 
@@ -239,7 +256,8 @@ pi-provimux's releases on it, from 1. The README says this once.
 **On the code branch** (`pi-provimux` at `20f06a0`, which says `2.0.0`), this numbering changes: `"version"` in
 `package.json`, its two copies in `package-lock.json`, and in `CHANGELOG.md` the heading `## 2.0.0` and the line
 "Already in this fork before 2.0.0". Nothing else: the four internal symbol keys that keep the old name on purpose
-are not part of a version or of the rename.
+are not part of a version or of the rename. Done on the branch `follow` (`105.0.1`); the README's one sentence about
+the numbering is still to write, on the code branch.
 
 Alternatives, for the owner's choice:
 
@@ -326,7 +344,8 @@ One run at a time, never cancelled midway.
 owner chooses the human step of 2.8). Only the job `publish` declares it, and the trusted publisher names it.
 
 **The npm CLI:** Node 24 from `actions/setup-node`, pinned; the job asserts `npm --version` is at least 11.5.1 and
-fails otherwise. No `NODE_AUTH_TOKEN`.
+fails otherwise. No `NODE_AUTH_TOKEN`, and no `registry-url` for `setup-node`: with it, `setup-node` writes an
+`.npmrc` with `_authToken=${NODE_AUTH_TOKEN}` (and a placeholder value), which gets in the way of OIDC.
 
 Every action is one of GitHub's own (`actions/checkout`, `actions/setup-node`, `actions/upload-artifact`,
 `actions/download-artifact`), pinned by full commit SHA.
@@ -367,13 +386,33 @@ Steps 2 to 4 belong together: do them on one day, when the chief says the automa
    ```
    Or on npmjs.com: the package → Settings → Trusted Publisher → GitHub Actions: user `ngvoicu`, repository
    `pi-provimux`, workflow `publish.yml`, environment `npm`, and tick `npm publish` under allowed actions.
-4. **Tell the chief.** A worker then merges the automation with the next version (`<base>.2`); `publish.yml`
-   publishes it from GitHub, which binds the publisher (it must happen within 2 days of step 3). Check the version's
-   page on npmjs.com: it shows "Provenance" with the commit.
+4. **Tell the chief.** A worker then merges the automation with the next version (`<base>.2`) and the commit that
+   switches the dry run off (4.5), in one push; `publish.yml` publishes it from GitHub, which binds the publisher
+   (it must happen within 2 days of step 3). Check the version's page on npmjs.com: it shows "Provenance" with the
+   commit. (Merged without the switch, the push only dry-runs; then
+   `gh workflow run publish.yml -R ngvoicu/pi-provimux -f dry_run=no` publishes it.)
 5. **Close the door to tokens:** the package → Settings → Publishing access → **Require two-factor authentication
    and disallow tokens** → Update Package Settings.
 
 There is no secret to store on GitHub.
+
+### 4.5 The dry-run switch
+
+Both workflows have an input `dry_run` (`yes` or `no`) and the line `DRY_RUN: ${{ inputs.dry_run || 'yes' }}`. A run
+by hand chooses; a scheduled `follow` run and a `push` to `main` have no input and take the fallback, `yes`.
+
+In a dry run everything is checked and nothing changes: `follow`'s `land` fetches and checks the candidate, checks
+the push with `git push --dry-run`, and says what it would push and start; `publish` runs every check and
+`npm publish --dry-run`; `tag` says which tag and release it would make. Issues are still written.
+
+**Switching it off** is one commit, after 4.4 steps 1 to 3: in `.github/workflows/follow.yml` and
+`.github/workflows/publish.yml`, change `default: 'yes'` ("the switch (1 of 2)") and `inputs.dry_run || 'yes'`
+("the switch (2 of 2)") to `'no'`, four lines in all. Switching it back on is the same commit reversed. A single
+live run without the commit: `gh workflow run publish.yml -R ngvoicu/pi-provimux -f dry_run=no` (and
+`follow.yml` likewise).
+
+Before the switch, the environment `npm` must exist with its branch rule (6.3): the first run of `publish.yml`, dry
+or not, declares it, and GitHub creates an environment it does not know with no rule.
 
 ## 5. The Forgejo mirror
 
@@ -385,8 +424,9 @@ There is no secret to store on GitHub.
   file lands **in the same commit as, or before,** the GitHub workflows.
 - **When:** hourly (`cron: '13 * * * *'`), and by hand.
 - **What:** fetches `main` and the `v*` tags from `https://github.com/ngvoicu/pi-provimux.git`. `main` is pushed to
-  the NAS only as a fast-forward; a new tag is pushed; if the NAS has a commit GitHub lacks, or a tag that differs,
-  the job fails and changes nothing. No force, no merge commit.
+  the NAS only as a fast-forward; a new tag is pushed; if the NAS has a commit GitHub lacks, or a `v*` tag that
+  GitHub has differently or not at all, the job fails and changes nothing (every check comes before any push). No
+  force, no merge commit.
 - **Permissions:** `contents: write` on the NAS's own repository. It runs git only, on a public address, with no
   secret.
 - **Other branches** are not mirrored.
@@ -593,29 +633,73 @@ entry by itself.)
   scripts, access tokens, 2FA for packages. `npm trust --help` and `npm stage --help` on npm 11.19.0.
 - GitHub's documentation: renaming a repository, events that trigger workflows, environments.
 
-**Not verified; a worker confirms each while building, and corrects this file where it is wrong:**
+**What was not verified at design time, as checked while building (2026-11-22):**
 
-1. **npm and the environment.** The documentation calls the environment optional and does not say that npm refuses
-   a job without the one the publisher names. The design sets it on both sides and relies on GitHub admitting only
-   `main` to it; it does not rely on npm enforcing it.
-2. **npm and the trigger.** The documentation lists no allowed events. `publish.yml` runs on `push` and
-   `workflow_dispatch`; the first automatic release (4.4, step 4) is the test. Its examples use a tag push and a
-   release event.
-3. **How many trusted publishers.** One page says up to 10 per package, another says one. The design needs one.
-4. **Whether staging counts** as the publish that binds a new trusted publisher. The design does not stage.
-5. **Node 24's npm** is at least 11.5.1 on the runner; the job asserts it.
-6. **pi 1.6.0** (the owner's) updates git and npm installs as 1.3.0 does. Only 1.3.0 was read.
-7. **Forgejo:** that a renamed repository redirects, and that Actions prefers `.forgejo/workflows/` over
-   `.github/workflows/`. The first is not relied on; the second is taken from the site's working setup.
-8. **`GITHUB_TOKEN` and workflow files.** The candidate changes none (the guard refuses them), and the original's
-   history has never had a `.github/` path, so the push by `land` is not one GitHub refuses. If the original ever
-   adds a workflow file, the guard stops it and the owner merges by hand, with his own credentials.
+1. **npm and the environment: npm compares it, both ways.** npm's page still calls the field optional and says
+   nothing more, but projects report both failures: a publisher that names an environment refuses a job that
+   declares none (GitHub then puts no `environment` claim in the token; `j-256/reorg` `6904ada`), and a job that
+   declares one fails against a publisher that names none (`Adyen/adyen-node-api-library` #1705,
+   `Get-Concord-AI/concord-mcp` `5210c44`), both as a misleading E404. So `npm` must be named on both sides, exactly,
+   as designed; the design still relies on GitHub's branch rule, not on npm.
+2. **npm and the trigger: no event is excluded.** npm's page names none; what it checks is the workflow file of the
+   run (`workflow_ref`), the repository, the environment. A `workflow_dispatch` started by another workflow is a run
+   of `publish.yml` itself, so `publish.yml` is what is checked (projects publish this way, e.g.
+   `citrusquant/citrusquant`'s `publish-wasm-npm.yml`, started by `gh workflow run`). npm's warning about
+   "`workflow_call` or `workflow_dispatch`" concerns a publish inside a *called* (reusable) workflow, where the
+   caller's file is checked: `publish.yml` calls nothing. GitHub confirms that `workflow_dispatch` (and
+   `repository_dispatch`) are the events a `GITHUB_TOKEN` may still start. The first live release stays the test.
+3. **How many trusted publishers: up to 10** per package (npm's trusted-publishers page, twice). One is used.
+4. **Whether a staged publish binds a new publisher:** still not said anywhere (the staged-publishing page is
+   silent; the trusted-publishers page says "the first successful publish"). The design does not stage. New: a
+   publisher created now allows `npm stage publish` always and `npm publish` only when chosen
+   (`npm trust github … --allow-publish`, npm 11.15 or later), as 4.1 says.
+5. **Node 24's npm:** Node 24.22.0 (2026-10-14) bundles npm 11.19.1; 24.22.3 is the current 24. The job still
+   asserts 11.5.1.
+6. **pi 1.6.0** (read in the owner's install, `dist/core/package-manager.js`): the same as 1.3.0. A git update
+   fetches, `git reset --hard`, `git clean -fdx`, then `npm install --omit=dev --legacy-peer-deps`; an npm update asks
+   `npm view <name> version --json` and installs when it is greater (`gt`). Dev dependencies are not installed for a
+   git install, so the lockfile check of 2.6 protects the CI jobs, not users.
+7. **Forgejo:** the precedence is now in Forgejo's documentation ("In the absence of a `.forgejo/workflows`
+   directory, workflows will be looked up in the `.github/workflows` directory"). The redirect after a rename is
+   still not checked and still not relied on.
+8. **`GITHUB_TOKEN` and workflow files:** GitHub refuses such a push ("refusing to allow a GitHub App to create or
+   update workflow … without `workflows` permission"), as expected; the guard refuses every `.github/` path first.
+
+Also confirmed: `actions/checkout` v7.0.1 (`3d3c42e`), `actions/setup-node` v7.1.0 (`949feb2`) and
+`actions/upload-artifact` v7.0.2 (`cf430e0`) are each action's newest release and the commits pinned. Scheduled
+workflows of a public repository are still disabled after 60 days without activity.
 
 ## 10. Build order
 
-1. `.github/follow/`: `follow.sh` (`select`, `merge`, `stamp`, `guard`, `report`), `manifest.mjs`, `paths.txt`, with
-   tests that run them on a throwaway repository (a clean release, a conflict, each guard refusal, a README change,
-   a release that is waiting, a rerun giving the same commits).
-2. `follow.yml` and `publish.yml`, first with `land` and `publish` behind a dry-run input.
-3. `.forgejo/workflows/follow-github.yml`.
+1. Done. `.github/follow/`: `follow.sh` (`select`, `merge`, `stamp`, `guard`, `report`, and for the workflows
+   `prepare`, `fetch-candidate`, `plan`, `report-publish`), `manifest.mjs`, `paths.txt`, `test.sh`.
+2. Done. `follow.yml` and `publish.yml`, with `land` and `publish` behind the dry run (4.5).
+3. Done. `.forgejo/workflows/follow-github.yml`.
 4. The runbook of 7, with the owner's steps of 4.4.
+
+## 11. The tests
+
+`bash .github/follow/test.sh` (or `test.sh clean conflict …` for some) builds an "original" with releases and a
+"fork" built on its 1.5.0 in a temporary folder, with a stub npm registry (`FOLLOW_NPM_DIR`) and a stub `gh`; no
+network. It runs on macOS's bash 3.2 and on Linux (bash 5, GNU tools), and `follow.yml` runs it before every
+`prepare`. It is not part of `npm run check`, which only `package.json`'s `scripts` decide.
+
+| Case | What it shows |
+|---|---|
+| `numbers` | `1.5.0` → `105.0`, `2.0.3` → `200.3`, back again; a minor of 100 and other forms refused. |
+| `clean` | A clean release: `M` (main and `B`), `R` (`105.1.1`, the changelog entry with the subjects escaped and the bump commits left out), the bot and `B`'s date, README the fork's, the bundle; by hand (`merge`, `stamp`, `guard`) the same commits. |
+| `rerun` | Two runs, and a copy at another hour, give the same candidate. |
+| `waiting` | A release 2 hours old waits, with the time it is taken; `no_wait` and a shorter wait take it. |
+| `states` | Up to date, not newer, not on npm, not plain, no bump commit, two bump commits, a minor of 100. |
+| `conflict` | A conflict in a source file lands nothing and leaves the work tree alone; by hand it stops, and after resolving `stamp` and `guard` finish. |
+| `manifest_conflict`, `manifest_merge` | `devDependencies` changed on both sides stops; changed on one side each merges key by key, the lockfile takes the original's entry, `description` stays the fork's, tabs kept. |
+| `refusals` | Each refusal: `LICENSE`, a workflow, a new top-level file, `vitest.config.ts`, `.npmrc`, `docs/`, a symbolic link, `dependencies`, a `postinstall`, `license`, a new key, `pi`, `files`, a package from another registry, a new install script. |
+| `shape` | Candidates spoiled after the merge: the fork's own test changed, README changed, `R` changing another file or more than the version, a wrong version, a third commit, no merge. |
+| `readme` | The original's README change: the fork's README byte for byte, the diff kept; both sides changing it is no conflict. |
+| `report` | A conflict opens the issue and the README issue; a rerun writes no comment; a new state renames it with one comment; check failed with its log in a longer fence; dry run green; land failed; landed; up to date and published closes it; the publish issue opens and closes. |
+| `plan` | The publish guard: to publish, already published, first publish, a version of another form or base, a lifecycle script, an untracked file in the tarball, a dirty tree, an `.npmrc`. |
+
+The real history was also replayed: from `59e0947` (before the fork merged 1.5.0), `prepare` with `1.5.0` resolves
+`package.json`, `package-lock.json` and `README.md` by rule and stops on a real conflict in `extensions/lib.ts`; taking
+the worker's resolution of it, `stamp` and `guard` finish, and the tree equals the worker's merge `12034ae` but for
+the version, `105.0.1`.
