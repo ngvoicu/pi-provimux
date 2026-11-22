@@ -48,10 +48,12 @@ plain CLIProxyAPI too.
   `llama-3.3-70b-versatile`).
 - **Needs pi 0.99.0 or newer** (was 0.82.0). On older pi, `model-upstreams:answered` was never sent for Codex
   WebSocket turns, as pi only passes their events to extensions (`provider_stream_event`) from 0.99.0.
-- **A hook's removal of the GPT system prompt is honoured.** When an extension's `before_provider_request` hook
-  deletes `instructions` (or sets them to `undefined`), the base prompt is no longer put back as the first developer
-  message: the request goes as the hook left it, for example with only the hook's own replacement. A hook that
-  changes `instructions` still has its text moved, and without a hook the caching fix from 1.5.0 is unchanged.
+- **A hook's removal of the GPT system prompt is honoured, on pi before 1.6.0.** When an extension's
+  `before_provider_request` hook deletes `instructions` (or sets them to `undefined`), the base prompt is no longer
+  put back as the first developer message: the request goes as the hook left it, for example with only the hook's
+  own replacement. A hook that changes `instructions` still has its text moved, and without a hook the caching fix
+  from 1.5.0 is unchanged. On pi 1.6.0 there are no `instructions` to remove: pi puts the system prompt in the first
+  input item itself, before the hook runs, so a hook that wants it gone has to remove that item.
 - **Claude Messages models keep their standard price under `/fast` and `/ultrafast`.** They are sent to
   `/v1/messages` without a speed tier, so the Fast price from models.dev no longer applies to them.
 - **A thinking level the model doesn't have is refused in `pi -p`, never changed silently.** `pi -p --thinking low`
@@ -65,7 +67,8 @@ plain CLIProxyAPI too.
 - **Ultra Fast mode**: `/ultrafast` sends `service_tier: "ultrafast"` on models that offer it. `/fast` and
   `/ultrafast` exclude each other, and `fast` in `cliproxyapi.json` may now also be `"ultrafast"`.
 - **GPT Responses prompt caching kept**: for `gpt-` models the base prompt is sent as the first `developer` input
-  message instead of top-level `instructions`, so the prompt cache keeps being read.
+  message instead of top-level `instructions`, so the prompt cache keeps being read. This is for pi before 1.6.0;
+  pi 1.6.0 does it itself, for every model, and its request is sent as pi built it.
 
 ### Already in this fork before 105.0.1
 
