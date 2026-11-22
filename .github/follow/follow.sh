@@ -219,14 +219,34 @@ old_base() {
 }
 
 # --- npm ---------------------------------------------------------------------------------------------------------
-# npm, from a neutral folder, with no user or global configuration, against the public registry.
-npm_neutral() {
-	mkdir -p "$TMP/npm"
+# npm_env ARGS…: npm with an empty environment plus only what it needs: PATH, a throwaway HOME, empty user and
+# global configuration, scripts off, the public registry; from a neutral folder. No GH_TOKEN, GITHUB_TOKEN,
+# NODE_AUTH_TOKEN, ACTIONS_* or any other variable of the caller reaches npm, or a script npm might start from an
+# upstream tree (npm 10 starts prepare on pack --dry-run --ignore-scripts). Every npm call of this script goes
+# through here.
+npm_env() {
+	mkdir -p "$TMP/npm/home"
 	: >"$TMP/npm/user-npmrc"
 	: >"$TMP/npm/global-npmrc"
-	(cd "$TMP/npm" && npm_config_userconfig="$TMP/npm/user-npmrc" npm_config_globalconfig="$TMP/npm/global-npmrc" \
-		npm "$@" --registry="$REGISTRY")
+	(cd "$TMP/npm" && env -i PATH="$PATH" HOME="$TMP/npm/home" npm_config_userconfig="$TMP/npm/user-npmrc" \
+		npm_config_globalconfig="$TMP/npm/global-npmrc" npm_config_ignore_scripts=true npm_config_registry="$REGISTRY" \
+		npm "$@")
 }
+
+# need_npm: npm 11.5.1 or later, else the run stops before npm touches any tree. npm 10 starts a package's prepare
+# script on pack --dry-run even with --ignore-scripts; npm 11.5.1 is also what trusted publishing needs (4.1).
+NPM_MIN=11.5.1
+need_npm() {
+	local v
+	v=$(npm_env --version 2>/dev/null) || die "npm cannot be run (npm $NPM_MIN or later is needed)"
+	v=$(printf '%s' "$v" | head -n 1 | LC_ALL=C tr -cd '0-9A-Za-z.+-' | cut -c1-40)
+	if [[ ! $v =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || [[ $(ver_cmp "$v" "$NPM_MIN") == -1 ]]; then
+		die "npm ${v:-?} is older than $NPM_MIN or not a plain version: npm 10 runs an upstream tree's prepare script on pack --dry-run despite --ignore-scripts; use npm $NPM_MIN or later (Node 24) (docs/FOLLOWING.md 2.1)"
+	fi
+}
+
+# npm_neutral ARGS…: npm_env against the public registry.
+npm_neutral() { npm_env "$@" --registry="$REGISTRY"; }
 
 # FOLLOW_NPM_DIR (the tests) names a folder of stub registry data: <pkg>.json ({"dist-tags", "time"}) and
 # <pkg>@<version>.dist.json ({"tarball": a file path, "integrity"}), "/" and "@" in names read as "_".
@@ -1408,6 +1428,10 @@ cmd_report_publish() {
 # --- main --------------------------------------------------------------------------------------------------------
 cmd=${1:-}
 [[ $# -eq 0 ]] || shift
+# Every command that runs npm (on an upstream tree, or the registry's data) checks its version first.
+case $cmd in
+select | prepare | recheck | land | plan | tag | report-publish) need_npm ;;
+esac
 case $cmd in
 select) cmd_select "$@" ;;
 merge) cmd_merge "$@" ;;

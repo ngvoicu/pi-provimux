@@ -13,13 +13,17 @@ export const npmTar = () => {
 	const scratch = mkdtempSync(join(tmpdir(), "follow-npm-"));
 	writeFileSync(join(scratch, "user-npmrc"), "");
 	writeFileSync(join(scratch, "global-npmrc"), "");
-	// npm with no user or global configuration and no prefix from the environment: its own install's global root.
+	// npm with an empty environment plus PATH, a throwaway HOME, no user or global configuration and scripts off
+	// (as follow.sh's npm_env): no token or prefix of the caller's reaches it; its own install's global root.
+	mkdirSync(join(scratch, "home"));
 	const env = {
-		...process.env,
+		PATH: process.env.PATH ?? "",
+		HOME: join(scratch, "home"),
 		npm_config_userconfig: join(scratch, "user-npmrc"),
 		npm_config_globalconfig: join(scratch, "global-npmrc"),
+		npm_config_ignore_scripts: "true",
+		npm_config_registry: "https://registry.npmjs.org/",
 	};
-	for (const k of Object.keys(env)) if (/^npm_config_prefix$/i.test(k) || k === "PREFIX") delete env[k];
 	const run = (args) => execFileSync("npm", args, { cwd: scratch, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
 	const npmVersion = run(["--version"]);
 	const npmDir = join(run(["root", "-g"]), "npm");

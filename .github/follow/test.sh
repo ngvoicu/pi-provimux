@@ -1281,7 +1281,9 @@ t_f8_recovery() {
 	change .npmrc "registry=https://evil.invalid/" "chore: npmrc"
 	FOLLOW_NPM_DIR='' PATH="$T/fakenpm:$PATH" run plan
 	eq "$RUN_RC" 4 "an .npmrc: refused"
-	eq "$(wc -l <"$T/fakenpm/log" | tr -d ' ')" 0 "npm never ran"
+	# Only the version check (npm 11.5.1 or later), from the neutral folder; npm never ran on the tree.
+	eq "$(cut -d' ' -f2- "$T/fakenpm/log" | tr '\n' ' ')" "--version " "npm never ran but --version"
+	hasnt "$(cut -d' ' -f1 "$T/fakenpm/log")" "$F" "the version check not from the tree"
 	# Without one, npm runs from a neutral folder against the public registry.
 	git rm -q .npmrc && commit "chore: no npmrc"
 	FOLLOW_NPM_DIR='' PATH="$T/fakenpm:$PATH" run plan
@@ -1828,11 +1830,112 @@ t_plan() {
 	has "$RUN_OUT" ".npmrc: the tree has one" ".npmrc"
 }
 
+# --- npm's boundary: npm 11.5.1 or later, and npm with an empty environment -----------------------------------
+# fake_npm_as DIR VERSION: an npm on PATH that says VERSION. Each other call is logged (DIR/calls) with its
+# environment (DIR/env.<n>); for pack, it starts the packed folder's prepare script with that environment, as
+# npm 10 does even with --ignore-scripts; then it runs the real npm.
+fake_npm_as() {
+	local d=$1 v=$2 real
+	real=$(command -v npm)
+	mkdir -p "$d/bin"
+	: >"$d/calls"
+	cat >"$d/bin/npm" <<-SH
+		#!/bin/sh
+		if [ "\$1" = --version ]; then echo $v; exit 0; fi
+		n=\$(wc -l <"$d/calls" | tr -d ' ')
+		echo "\$*" >>"$d/calls"
+		env >"$d/env.\$n"
+		if [ "\$1" = pack ]; then
+			last=''
+			for a in "\$@"; do if [ -f "\$a/package.json" ]; then last=\$a; fi; done
+			if [ -n "\$last" ]; then
+				s=\$(node -e 'const p=require(process.argv[1]);process.stdout.write((p.scripts&&p.scripts.prepare)||"")' "\$last/package.json")
+				[ -z "\$s" ] || (cd "\$last" && sh -c "\$s") >/dev/null 2>&1 || true
+			fi
+		fi
+		exec "$real" "\$@"
+	SH
+	chmod +x "$d/bin/npm"
+}
+# with_tokens CMD…: CMD with synthetic credentials in its environment, as a maintainer's shell or a job may have.
+with_tokens() {
+	GH_TOKEN=synthetic-gh GITHUB_TOKEN=synthetic-github NODE_AUTH_TOKEN=synthetic-node-auth NPM_TOKEN=synthetic-npm \
+		ACTIONS_RUNTIME_TOKEN=synthetic-runtime ACTIONS_ID_TOKEN_REQUEST_TOKEN=synthetic-oidc \
+		ACTIONS_ID_TOKEN_REQUEST_URL=https://synthetic.invalid/ FOLLOW_TEST_OTHER=synthetic-other "$@"
+}
+# with_prepare FILE: the current repository's package.json gets a prepare script that writes its environment to FILE.
+with_prepare() {
+	jq --tab --arg s "env > '$1'" '.scripts.prepare = $s' package.json >p.tmp && mv p.tmp package.json
+}
+t_npm_boundary() {
+	local B=$T/npm-boundary v n keys
+	rm -rf "$B"
+	mkdir -p "$B"
+	# Lock 2: npm older than 11.5.1 is refused before any npm call touches a tree. The review's case: npm 10 on the
+	# upstream release (prepare) and on the fork (plan), each tree with a prepare script, a token in the environment.
+	fresh npm-old
+	with_prepare "$B/hook-old.env"
+	release 1.5.1
+	fake_npm_as "$B/npm10" 10.9.3
+	PATH="$B/npm10/bin:$PATH" with_tokens run prepare
+	eq "$RUN_RC" 1 "npm 10.9.3: prepare stops"
+	has "$RUN_OUT" "npm 10.9.3 is older than 11.5.1" "says why"
+	has "$RUN_OUT" "runs an upstream tree's prepare script" "and the reason"
+	CASE=npm-old-plan
+	with_prepare "$B/hook-old.env"
+	git add package.json && commit "chore: a prepare"
+	PATH="$B/npm10/bin:$PATH" with_tokens run plan
+	eq "$RUN_RC" 1 "npm 10.9.3: plan stops"
+	has "$RUN_OUT" "npm 10.9.3 is older than 11.5.1" "plan says why"
+	eq "$(wc -l <"$B/npm10/calls" | tr -d ' ')" 0 "npm 10: no call but --version"
+	yes_ test ! -e "$B/hook-old.env"
+	# The bound itself: 11.5.0 is refused, 11.5.1 runs.
+	for v in 11.5.0 11.5.1; do
+		fake_npm_as "$B/npm-$v" "$v"
+		PATH="$B/npm-$v/bin:$PATH" run plan
+		if [[ $v == 11.5.0 ]]; then has "$RUN_OUT" "npm 11.5.0 is older than 11.5.1" "11.5.0 refused"; else hasnt "$RUN_OUT" "is older than" "11.5.1 runs"; fi
+	done
+	# Lock 1: every npm call gets an empty environment plus PATH, a throwaway HOME, empty configuration, scripts off
+	# and the registry. An npm that starts prepare as npm 10 does (the fake, saying 11.99.0) still hands it no token.
+	fresh npm-env
+	with_prepare "$B/hook-upstream.env"
+	release 1.5.1
+	with_prepare "$B/hook-fork.env"
+	setver 105.0.2 && git add -A && commit "chore: 105.0.2 with a prepare"
+	fake_npm_as "$B/npm-env" 11.99.0
+	PATH="$B/npm-env/bin:$PATH" with_tokens run prepare
+	has "$(cat "$B/npm-env/calls")" "pack --dry-run --ignore-scripts" "the upstream tree was dry-packed"
+	PATH="$B/npm-env/bin:$PATH" with_tokens run plan
+	yes_ test -s "$B/hook-upstream.env"
+	yes_ test -s "$B/hook-fork.env"
+	for f in "$B/hook-upstream.env" "$B/hook-fork.env" "$B"/npm-env/env.*; do
+		hasnt "$(cat "$f")" "synthetic" "no token in $(basename "$f")"
+		hasnt "$(cat "$f")" "FOLLOW_" "no other variable in $(basename "$f")"
+	done
+	n=0
+	for f in "$B"/npm-env/env.*; do
+		n=$((n + 1))
+		keys=$(cut -d= -f1 "$f" | grep -Ev '^(PWD|OLDPWD|SHLVL|_)$' | LC_ALL=C sort | tr '\n' ' ')
+		eq "$keys" "HOME PATH npm_config_globalconfig npm_config_ignore_scripts npm_config_registry npm_config_userconfig " "npm's environment ($(basename "$f"))"
+		has "$(cat "$f")" "npm_config_ignore_scripts=true" "scripts off"
+		has "$(cat "$f")" "npm_config_registry=https://registry.npmjs.org/" "the registry"
+	done
+	yes_ test "$n" -ge 2
+	# The real npm on PATH (11.5.1 or later), a token in the caller's environment, a prepare that prints its
+	# environment: npm starts no hook, and if one ever ran, it would see no token.
+	fresh npm-real
+	with_prepare "$B/hook-real.env"
+	release 1.5.1
+	with_tokens run prepare
+	hasnt "$RUN_OUT" "is older than" "the real npm is new enough"
+	if [[ -e $B/hook-real.env ]]; then hasnt "$(cat "$B/hook-real.env")" "synthetic" "real npm: no token"; else ok; fi
+}
+
 # --- run ----------------------------------------------------------------------------------------------------------
 build_fixture >/dev/null
 ALL='numbers clean rerun waiting states conflict manifest_conflict manifest_merge refusals shape readme report plan
 f2_release f3_strings f3_handoff f3_links f3_checker f4_deps f4_dev_lands f5_paths f5_pack f5_load f5_order f6_refs f8_recovery
-f9_issues f10_publish f10_land f11_mirror workflows f12_history'
+f9_issues f10_publish f10_land f11_mirror workflows f12_history npm_boundary'
 # shellcheck disable=SC2086 # the names
 [[ $# -gt 0 ]] || set -- $ALL
 for t in "$@"; do

@@ -238,6 +238,11 @@ jobs:
           ref: ${{ github.sha }}
           sparse-checkout: .github/follow
           persist-credentials: false
+      # follow.sh needs npm 11.5.1 or later (docs/FOLLOWING.md 2.1): Node 24's.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: The publish issue
         env:
           GH_TOKEN: ${{ github.token }}

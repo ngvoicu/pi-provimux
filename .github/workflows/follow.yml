@@ -86,6 +86,11 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      # follow.sh needs npm 11.5.1 or later (docs/FOLLOWING.md 2.1): Node 24's.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
       # Both ways: with GITHUB_ACTIONS unset and set to true, side by side.
       - name: Self-test of the follow scripts and workflows (throwaway repositories)
         run: bash .github/follow/test.sh
@@ -241,6 +246,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+      # follow.sh needs npm 11.5.1 or later (docs/FOLLOWING.md 2.1): Node 24's.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: Land
         id: land
         env:
