@@ -35,14 +35,17 @@ plain CLIProxyAPI too.
   "route not known". It is sent only once the proxy is known to name answers: such an answer is not reported while
   the credential list is still loading (or could not be read) and nothing was named before in the session. Plain
   CLIProxyAPI, which names no answer, still gets no report. Only the kind, from an older Provimux: the guess from the
-  credential list, as before, so such an answer is not reported until the list has loaded.
+  credential list, as before, so such an answer is not reported until the list has loaded; it still shows that the
+  proxy names answers, so the next answer that names nobody is reported as `[]`.
   [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) reads `[]` as "route not known" from its next
   release, 0.7.0, on; older versions ignore it.
 - **More credentials map to pi's providers:** the kimi.com login to `kimi-coding`, xAI to `xai`, Vertex to
   `google-vertex`, and API keys by host to `xai`, `meta`, `kimi-coding`, `moonshotai`, `moonshotai-cn`, `deepseek`,
   `mistral`, `groq`, `cerebras`, `fireworks`, `together`, `nvidia` and `xiaomi`. A host or provider such as
   `constructor` is named as given. The model id is the provider's own, as pi's catalog has it, in the routes and in
-  what answered: only a prefix the proxy added is left out (`openai/gpt-oss-120b` at Groq stays as it is).
+  what answered: a prefix (the proxy's, or a configured one) is left out unless what is left is not in the catalog
+  and the id with it is (`openai/gpt-oss-120b` at Groq stays as it is; `openai/llama-3.3-70b-versatile` there is
+  `llama-3.3-70b-versatile`).
 - **Needs pi 0.99.0 or newer** (was 0.82.0). On older pi, `model-upstreams:answered` was never sent for Codex
   WebSocket turns, as pi only passes their events to extensions (`provider_stream_event`) from 0.99.0.
 - **A hook's removal of the GPT system prompt is honoured.** When an extension's `before_provider_request` hook
