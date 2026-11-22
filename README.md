@@ -66,7 +66,12 @@ pi -e /absolute/path/to/pi-provimux
 ```
 
 The version names the original release it is built on, then a count of its own: 105.0.1 is pi-provimux's first
-release on the original's 1.5.0 (major × 100 + minor, then patch).
+release on the original's 1.5.0 (major × 100 + minor, then patch), 105.0.2 its second, and 105.1.1 would be the first
+on the original's 1.5.1.
+
+Versions on npm are published from this repository's `main` by GitHub Actions, with npm provenance. A workflow
+follows the original's releases: once a day old, one that merges cleanly and passes every check is merged into `main`
+and released. [docs/FOLLOWING.md](docs/FOLLOWING.md) says how, what that accepts, and whether it is switched on yet.
 
 It needs pi 0.99.0 or newer: the Codex WebSocket reports which kind of account answered through pi's
 `provider_stream_event`, which older pi does not have.
