@@ -1228,7 +1228,7 @@ t_f5_order() {
 				#!/usr/bin/env bash
 				case "\$1" in
 				ci) mkdir -p node_modules && cp -R "$d/pi/@earendil-works" node_modules/ && printf '{"generated": true}\n' >extensions/generated-settings.json ;;
-				run) exit 0 ;;
+				run | install | ls) exit 0 ;;
 				*) exec "$(command -v npm)" "\$@" ;;
 				esac
 			SH
@@ -1819,7 +1819,22 @@ t_workflows() {
 	for j in "$f test-candidate" "$f test-original" "$p test"; do
 		# shellcheck disable=SC2086
 		b=$(job $j | grep -v '^ *#' | grep -v -- '- name:')
-		eq "$(grep -cE 'npm (ci|install)' <<<"$b")" "$(grep -c '"$NODE_IMAGE" npm ci$' <<<"$b")" "deps: $j installs only in the container"
+		# shellcheck disable=SC2086
+		eq "$(grep -cE 'npm (ci|install)' <<<"$b")" "$(job_containers $j | grep -cE '^npm (ci|install --no-save --ignore-scripts)( |$)')" \
+			"deps: $j installs only in the container (npm ci, or pi 1.6.0 without saving or scripts)"
+	done
+	# The checks on pi 1.3.0 (the lockfile's) and then on pi 1.6.0, before landing and before publishing: the container
+	# steps in this order (t_f5_order runs them).
+	for j in "$f test-candidate" "$p test"; do
+		# shellcheck disable=SC2086
+		eq "$(job_containers $j | awk '
+			/^npm pack --ignore-scripts --pack-destination \/pack$/ { print "pack"; next }
+			/^npm ci$/ { print "ci"; next }
+			/node \/follow\/load.mjs/ { print "load"; next }
+			/^npm run check$/ { print "check"; next }
+			/^npm install --no-save --ignore-scripts @earendil-works\/pi-ai@1.6.0 @earendil-works\/pi-coding-agent@1.6.0$/ { print "pi-1.6.0"; next }
+			/^sh -c .npm ls @earendil-works\/pi-ai @earendil-works\/pi-coding-agent && npm run check.$/ { print "check"; next }
+			{ print "other" }' | tr '\n' ' ')" "pack ci load check pi-1.6.0 load check " "pi versions: $j loads and checks on pi 1.3.0, then on 1.6.0"
 	done
 	eq "$(grep -vE '^\s*(#|echo|refuse|say)' "$SCRIPTS/follow.sh" | grep -cE '\bnpm(_neutral)? +(ci|install|rebuild)\b' || true)" 0 "deps: follow.sh installs nothing"
 	eq "$(grep -vE '^\s*(#|echo|refuse|say)' "$SCRIPTS/follow.sh" | grep -E '\bnpm(_neutral)? +(pack|publish)\b' | grep -vc -- '--ignore-scripts' || true)" 0 \
@@ -1843,6 +1858,17 @@ t_workflows() {
 }
 
 # --- finding 12: no revision runs GitHub's workflows on Forgejo --------------------------------------------------
+# A revision with .github/workflows but no .forgejo/workflows (Forgejo then reads .github/workflows) passes only when
+# every job of every workflow file there runs on GitHub only: main's 105.0.1 revisions, with a publish.yml whose two
+# jobs say so, are public and stay as they are.
+github_only() { # github_only COMMIT: every job of .github/workflows/* at COMMIT starts with the server check
+	local f jobs ifs
+	for f in $(git -C "$TREE" ls-tree --name-only "$1:.github/workflows"); do
+		jobs=$(git -C "$TREE" show "$1:.github/workflows/$f" | awk '/^jobs:/{on=1; next} on && /^[^ #]/{on=0} on && /^  [A-Za-z0-9_-]+:$/' | wc -l | tr -d ' ')
+		ifs=$(git -C "$TREE" show "$1:.github/workflows/$f" | grep -cE "^    if: github\.server_url == 'https://github\.com'( |$)" || true)
+		[[ $jobs -gt 0 && $jobs == "$ifs" ]] || return 1
+	done
+}
 t_f12_history() {
 	CASE=f12-history
 	local c n=0
@@ -1851,12 +1877,27 @@ t_f12_history() {
 		return 0
 	fi
 	for c in $(git -C "$TREE" rev-list HEAD); do
-		if git -C "$TREE" cat-file -e "$c:.github/workflows" 2>/dev/null && ! git -C "$TREE" cat-file -e "$c:.forgejo/workflows" 2>/dev/null; then
-			bad "12: $c has .github/workflows without .forgejo/workflows"
+		if git -C "$TREE" cat-file -e "$c:.github/workflows" 2>/dev/null && ! git -C "$TREE" cat-file -e "$c:.forgejo/workflows" 2>/dev/null &&
+			! github_only "$c"; then
+			bad "12: $c has .github/workflows without .forgejo/workflows, and a job that may run off GitHub"
 			n=$((n + 1))
 		fi
 	done
 	if ((n == 0)); then ok; fi
+	# The exception, on a throwaway repository: a job without the server check, or a workflow with no job, fails it.
+	local g=$T/f12-github-only
+	rm -rf "$g"
+	git init -q "$g"
+	mkdir -p "$g/.github/workflows"
+	printf "on: push\njobs:\n  a:\n    if: github.server_url == 'https://github.com'\n    runs-on: x\n  b:\n    if: github.server_url == 'https://github.com'\n    runs-on: x\n" >"$g/.github/workflows/w.yml"
+	(cd "$g" && git add -A && commit "two GitHub-only jobs")
+	if TREE=$g github_only HEAD; then ok; else bad "12: two GitHub-only jobs pass"; fi
+	printf "  c:\n    runs-on: x\n" >>"$g/.github/workflows/w.yml"
+	(cd "$g" && git add -A && commit "a job that may run anywhere")
+	if TREE=$g github_only HEAD; then bad "12: a job without the server check passes"; else ok; fi
+	printf "on: push\n" >"$g/.github/workflows/w.yml"
+	(cd "$g" && git add -A && commit "no job")
+	if TREE=$g github_only HEAD; then bad "12: a workflow with no job passes"; else ok; fi
 }
 
 t_plan() {
