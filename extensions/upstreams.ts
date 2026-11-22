@@ -434,10 +434,19 @@ interface ModelList {
 	getAll(): Array<{ provider: string; id: string }>;
 }
 
-/** Tells other extensions where this provider's models come from, and what answered each request. */
+/**
+ * Tells other extensions where this provider's models come from, and what answered each request.
+ *
+ * Everything it says belongs to the session it was loaded in. pi disposes of an extension's `pi` when its session
+ * shuts down (quit, `/reload`, a new or resumed session), and `pi.events.emit` then throws: from a lookup's `await`,
+ * an unhandled rejection that ends pi. So on `session_shutdown` the lookup in flight is aborted and every result
+ * still to come is dropped, and nothing is emitted through a disposed `pi`.
+ */
 export class UpstreamsAnnouncer {
 	private listed: ModelAccounts | undefined;
 	private running: Promise<void> | undefined;
+	/** The session's lookups: aborted, and their results dropped, when it shuts down. */
+	private session = new AbortController();
 	/** Whether an extension asked: nothing is fetched for nobody. */
 	private wanted = false;
 	/** Whether the proxy named what answered a request in this session: it is one that names answers. */
@@ -496,7 +505,12 @@ export class UpstreamsAnnouncer {
 		// pi without a bus between extensions (older, or a test's stand-in): nobody to tell.
 		if (!this.pi.events) return;
 		void this.loadBuiltin();
-		this.pi.on("session_start", (_event, ctx) => this.keepRegistry(ctx));
+		this.pi.on("session_start", (_event, ctx) => {
+			// A session after one that shut down, with this same copy: a new start, with nothing of the last one's.
+			if (this.session.signal.aborted) this.session = new AbortController();
+			this.keepRegistry(ctx);
+		});
+		this.pi.on("session_shutdown", () => this.shutdown());
 		this.pi.events.on(REQUEST_EVENT, () => {
 			this.wanted = true;
 			void this.announce();
@@ -542,7 +556,28 @@ export class UpstreamsAnnouncer {
 			if (!this.listed) return;
 			upstreams = answeredUpstreams(modelId, kind, this.listed, this.catalog) ?? [];
 		}
-		if (upstreams) this.pi.events.emit(ANSWERED_EVENT, { provider: this.providerId, model: modelId, upstreams });
+		if (upstreams) this.emit(ANSWERED_EVENT, { provider: this.providerId, model: modelId, upstreams });
+	}
+
+	/** The session shut down: what it asked for is dropped, the lookup in flight aborted. */
+	shutdown(): void {
+		this.session.abort();
+		this.running = undefined;
+		this.wanted = false;
+		this.namedBefore = false;
+		this.listed = undefined;
+		this.registry = undefined;
+	}
+
+	/** Tells the session's listeners; nothing once it shut down, and never a throw from a disposed `pi`. */
+	private emit(channel: string, data: unknown, signal: AbortSignal = this.session.signal): void {
+		if (signal.aborted) return;
+		try {
+			this.pi.events.emit(channel, data);
+		} catch {
+			// pi disposed of this copy without a session_shutdown it heard: it is done.
+			this.shutdown();
+		}
 	}
 
 	/** After the model list was fetched again: tells the routes again, if an extension asked for them. */
@@ -552,27 +587,38 @@ export class UpstreamsAnnouncer {
 
 	/** Asks CLIProxyAPI for its credentials and tells the routes. When it does not answer, nothing is said. */
 	announce(): Promise<void> {
-		this.running ??= (async () => {
+		if (this.running) return this.running;
+		const signal = this.session.signal;
+		if (signal.aborted) return Promise.resolve();
+		const running: Promise<void> = (async () => {
 			const connection = this.connection();
 			if (!connection) return;
+			let listed: ModelAccounts;
 			try {
-				[this.listed] = await Promise.all([
-					this.fetchAccounts(connection.baseUrlInput, connection.apiKey),
+				[listed] = await Promise.all([
+					this.fetchAccounts(connection.baseUrlInput, connection.apiKey, signal),
 					this.givenCatalog ? undefined : this.loadBuiltin(),
 				]);
 			} catch {
 				return;
 			}
-			const listed = this.listed;
+			// The session shut down while the list was on its way: a late answer, for nobody.
+			if (signal.aborted) return;
+			this.listed = listed;
 			const ids = new Set([...Object.keys(listed.owners), ...Object.keys(listed.accounts)]);
 			// fromEntries: a model called `__proto__` is an entry, not the object's prototype.
 			const models: Record<string, Route> = Object.fromEntries(
 				[...ids].map((id) => [id, routeOf(id, listed, this.catalog)]),
 			);
-			this.pi.events.emit(UPSTREAMS_EVENT, { provider: this.providerId, models });
-		})().finally(() => {
-			this.running = undefined;
-		});
-		return this.running;
+			this.emit(UPSTREAMS_EVENT, { provider: this.providerId, models }, signal);
+		})()
+			.catch(() => {
+				// Nothing said: a lookup never ends pi.
+			})
+			.finally(() => {
+				if (this.running === running) this.running = undefined;
+			});
+		this.running = running;
+		return running;
 	}
 }

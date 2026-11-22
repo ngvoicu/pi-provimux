@@ -675,6 +675,128 @@ describe("the events", () => {
 		expect(emitted).toEqual([unnamed, unnamed]);
 	});
 
+	/**
+	 * pi as it disposes of an extension: once its session shut down (quit, /reload, another session), `pi.events.emit`
+	 * throws, as pi's own `assertActive` does. `shutdown()` runs the session_shutdown handlers, then disposes.
+	 */
+	function disposablePi() {
+		const registered = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+		const listeners = new Map<string, (data: unknown) => void>();
+		const emitted: Array<[string, unknown]> = [];
+		let disposed = false;
+		const pi = {
+			on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) =>
+				registered.set(name, [...(registered.get(name) ?? []), handler]),
+			events: {
+				emit: (channel: string, data: unknown) => {
+					if (disposed) throw new Error("This extension ctx is stale after session replacement or reload.");
+					emitted.push([channel, data]);
+				},
+				on: (channel: string, handler: (data: unknown) => void) => {
+					listeners.set(channel, handler);
+					return () => {};
+				},
+			},
+		} as unknown as ExtensionAPI;
+		const fire = (name: string, event: unknown = {}) => {
+			for (const handler of registered.get(name) ?? []) handler(event, {});
+		};
+		return {
+			pi,
+			listeners,
+			emitted,
+			fire,
+			shutdown: (heard = true) => {
+				if (heard) fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
+				disposed = true;
+			},
+		};
+	}
+	/** A credential list the test hands over when it chooses, whatever the signal says (a late answer). */
+	function lateList() {
+		let release!: (value: ModelAccounts) => void;
+		const answer = new Promise<ModelAccounts>((resolve) => {
+			release = resolve;
+		});
+		const signals: Array<AbortSignal | undefined> = [];
+		const fetchAccounts = vi.fn(async (_base: string, _key: string, signal?: AbortSignal) => {
+			signals.push(signal);
+			return answer;
+		});
+		return { fetchAccounts, signals, release: () => release(accounts) };
+	}
+
+	it("a lookup out when the session shuts down: aborted, its late answer dropped, nothing emitted or thrown", async () => {
+		const session = disposablePi();
+		const list = lateList();
+		const announcer = new UpstreamsAnnouncer(
+			session.pi,
+			"cliproxyapi",
+			() => ({ baseUrlInput: "x", apiKey: "k" }),
+			list.fetchAccounts,
+		);
+		announcer.register();
+		session.fire("session_start", { type: "session_start", reason: "startup" });
+		session.listeners.get(REQUEST_EVENT)!({});
+		const lookup = announcer.announce();
+		expect(list.fetchAccounts).toHaveBeenCalledTimes(1);
+
+		// pi -p printed its answer and quits; the list arrives after.
+		session.shutdown();
+		expect(list.signals[0]?.aborted).toBe(true);
+		list.release();
+		await expect(lookup).resolves.toBeUndefined();
+		expect(session.emitted).toEqual([]);
+
+		// Nothing of the session is left: no refresh, no answer report, no new lookup, and nothing throws.
+		await expect(announcer.refreshed()).resolves.toBeUndefined();
+		await expect(announcer.announce()).resolves.toBeUndefined();
+		expect(list.fetchAccounts).toHaveBeenCalledTimes(1);
+		expect(session.emitted).toEqual([]);
+	});
+
+	it("a disposed pi that throws on emit, without a shutdown heard first: the throw is kept from pi", async () => {
+		const session = disposablePi();
+		const list = lateList();
+		const announcer = new UpstreamsAnnouncer(
+			session.pi,
+			"cliproxyapi",
+			() => ({ baseUrlInput: "x", apiKey: "k" }),
+			list.fetchAccounts,
+		);
+		announcer.register();
+		session.listeners.get(REQUEST_EVENT)!({});
+		const lookup = announcer.announce();
+		session.shutdown(false);
+		list.release();
+		await expect(lookup).resolves.toBeUndefined();
+		expect(session.emitted).toEqual([]);
+	});
+
+	it("the same copy in a new session after a shutdown: asked again, it tells that session", async () => {
+		const session = disposablePi();
+		const list = lateList();
+		const announcer = new UpstreamsAnnouncer(
+			session.pi,
+			"cliproxyapi",
+			() => ({ baseUrlInput: "x", apiKey: "k" }),
+			list.fetchAccounts,
+		);
+		announcer.register();
+		session.listeners.get(REQUEST_EVENT)!({});
+		const old = announcer.announce();
+		session.fire("session_shutdown", { type: "session_shutdown", reason: "new" });
+		session.fire("session_start", { type: "session_start", reason: "new" });
+		session.listeners.get(REQUEST_EVENT)!({});
+		const current = announcer.announce();
+		expect(list.fetchAccounts).toHaveBeenCalledTimes(2);
+		expect(list.signals.map((signal) => signal?.aborted)).toEqual([true, false]);
+		list.release();
+		await Promise.all([old, current]);
+		// One announcement: the new session's; the old session's late answer said nothing.
+		expect(session.emitted.map(([channel]) => channel)).toEqual([UPSTREAMS_EVENT]);
+	});
+
 	it("over the Codex WebSocket, what answered comes from response.created, which has no headers", async () => {
 		const { pi, handlers, listeners, emitted } = fakePi();
 		const announcer = new UpstreamsAnnouncer(
