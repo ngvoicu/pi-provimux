@@ -1626,6 +1626,26 @@ t_f10_publish() {
 	DRY_RUN=no gh_run tag 105.0.1 "$main" true
 	eq "$RUN_RC" 1 "a gitHead that names another version: not tagged"
 	rm -f "$FOLLOW_NPM_DIR/pi-provimux@105.0.1.githead"
+	# npm itself, for a version published from a tarball file, which records no gitHead: npm view … gitHead version
+	# --json then prints the bare string "105.0.1", not an object. The existing tag is taken, as for a missing gitHead.
+	local fake=$T/f10-publish/npm-view
+	mkdir -p "$fake/bin"
+	cat >"$fake/bin/npm" <<-'SH'
+		#!/bin/sh
+		[ "$1" = --version ] && { echo 11.20.0; exit 0; }
+		[ "$1" = view ] || exit 1
+		case " $* " in
+		*" pi-provimux@105.0.1 gitHead "*) echo '"105.0.1"' ;;
+		*" pi-provimux@105.0.1 "*) echo '{"name": "pi-provimux", "version": "105.0.1", "dist": {}}' ;;
+		*) echo '{"error": {"code": "E404"}}'; exit 1 ;;
+		esac
+	SH
+	chmod +x "$fake/bin/npm"
+	jq -n --arg s "$main" '{"v105.0.1": {type: "commit", sha: $s}}' >"$GH_DIR/tags.json"
+	: >"$GH_DIR/releases"
+	PATH="$fake/bin:$PATH" FOLLOW_NPM_DIR='' DRY_RUN=no gh_run tag 105.0.1 "$main" true
+	eq "$RUN_RC" 0 "npm without a gitHead (a bare string from npm view): the existing tag is taken: $RUN_OUT"
+	eq "$(cat "$GH_DIR/releases")" "v105.0.1" "and the release is made"
 	unset FOLLOW_UPSTREAM_URL
 	# plan names the version even when it refuses before npm runs, so that notify reports it.
 	fresh f10-plan-early

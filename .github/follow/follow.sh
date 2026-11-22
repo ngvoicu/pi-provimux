@@ -324,7 +324,9 @@ npm_githead() {
 		if [[ -f $(stub "$1" "@$2.githead") ]]; then cat "$(stub "$1" "@$2.githead")"; fi
 		return 0
 	fi
-	npm_json "$1@$2" gitHead version | jq -r '.gitHead // ""'
+	# The whole manifest, an object: asked for named fields, npm prints a bare value, not an object, when only one of
+	# them exists (a version published from a tarball file has no gitHead), and npm_json refuses that.
+	npm_json "$1@$2" | jq -r 'if type == "object" then (.gitHead // "" | tostring) else "" end'
 }
 
 # ships_of COMMIT: the files npm packs from COMMIT's tree, sorted, in $TMP/ships. The tree's regular files are
