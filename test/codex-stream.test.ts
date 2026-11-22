@@ -20,6 +20,18 @@ import {
 	wellKnownCodexModuleCandidates,
 	writePatchedModuleCache,
 } from "../extensions/codex-stream.ts";
+import { PI_AI_NATIVE_CODEX_PROMPT_AND_EFFORT, piAiAtLeast } from "./pi-ai-version.ts";
+
+/**
+ * pi-ai 1.6.0 and later put the system prompt in a leading developer item themselves and carry thinking level
+ * changes natively: the extension's prompt move and mid-convo patch apply to pi before 1.6.0 (pi-ai-version.ts).
+ */
+const PI_NATIVE = piAiAtLeast(PI_AI_NATIVE_CODEX_PROMPT_AND_EFFORT);
+
+/** The developer item pi-ai 1.6.0 builds from the system prompt. */
+function piDeveloperItem(text: string) {
+	return { role: "developer", content: text };
+}
 
 const tempDirs: string[] = [];
 
@@ -672,9 +684,19 @@ describe("patchCodexSource mid-convo effort", () => {
 		return readFileSync(path, "utf8");
 	}
 
-	it("injects the configuration_update machinery into the installed codex source", () => {
+	it("finds pi's own configuration_update wiring in the installed source from pi-ai 1.6.0 on, and none before", () => {
+		expect(hasNativeMidConvoEffort(installedSource())).toBe(PI_NATIVE);
+	});
+
+	it("injects the configuration_update machinery before pi-ai 1.6.0, and keeps pi's own from 1.6.0 on", () => {
 		const patched = patchCodexSource(installedSource(), ["cliproxyapi"], { supportsConfigurationUpdate: true });
 
+		if (PI_NATIVE) {
+			expect(patched).toContain("const configurationUpdateEffort = getConfigurationUpdateEffort(");
+			expect(patched).not.toContain("cpaGetConfigurationUpdateEffort");
+			expect(patched).not.toContain("CPA_CONFIGURATION_UPDATE_REQUEST_EFFORT");
+			return;
+		}
 		expect(patched).toContain("cpaGetConfigurationUpdateEffort");
 		expect(patched).toContain("CPA_CONFIGURATION_UPDATE_REQUEST_EFFORT");
 		expect(patched).toContain("providerThinkingLevel: cpaConfigurationUpdateEffort");
@@ -694,11 +716,11 @@ describe("patchCodexSource mid-convo effort", () => {
 	});
 
 	it("loads a legacy-shaped source without the transcript anchors", () => {
-		// Pre-1.3.0 hosts build the body from `context`, not normalizedContext.
-		const legacy = installedSource().replace(
-			"buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties)",
-			"buildRequestBody(model, context, options, codexSessionId, grammarToolInputProperties)",
-		);
+		// Pre-1.3.0 hosts build the body from `context`, not normalizedContext. pi-ai 1.6.0 passes its own effort too.
+		const call = PI_NATIVE
+			? "buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties, configurationUpdateEffort)"
+			: "buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties)";
+		const legacy = installedSource().replace(call, call.replace("normalizedContext", "context"));
 		expect(legacy).not.toBe(installedSource());
 		expect(() => patchCodexSource(legacy, ["cliproxyapi"])).not.toThrow();
 	});
@@ -707,6 +729,13 @@ describe("patchCodexSource mid-convo effort", () => {
 		const patched = patchCodexSource(installedSource(), ["cliproxyapi-getConfigurationUpdateEffort"], {
 			supportsConfigurationUpdate: true,
 		});
+		expect(patched).toContain('"cliproxyapi-getConfigurationUpdateEffort"');
+		if (PI_NATIVE) {
+			// pi-ai 1.6.0's own wiring is what counts as native, never the provider id: nothing is injected.
+			expect(patched).toContain("const configurationUpdateEffort = getConfigurationUpdateEffort(");
+			expect(patched).not.toContain("function cpaGetConfigurationUpdateEffort");
+			return;
+		}
 		expect(patched).toContain("function cpaGetConfigurationUpdateEffort");
 	});
 });
@@ -1173,6 +1202,12 @@ describe("GPT Responses prompt caching", () => {
 		expect(body.prompt_cache_key).toBe("gpt-prompt-test");
 		expect(body.tools).toEqual([expect.objectContaining({ type: "function", name: "read" })]);
 		const user = { role: "user", content: [{ type: "input_text", text: "question" }] };
+		if (PI_NATIVE) {
+			// pi-ai 1.6.0 puts the prompt, as given, in its own leading developer item for every model; it is sent as is.
+			expect(body).not.toHaveProperty("instructions");
+			expect(body.input).toEqual([piDeveloperItem(prompt), user]);
+			return;
+		}
 		if (developer === undefined) {
 			expect(body.instructions).toBe(prompt);
 			expect(body.input).toEqual([user]);
@@ -1252,6 +1287,8 @@ describe("GPT Responses prompt caching", () => {
 		const { body } = captured[0];
 		expect(body).not.toHaveProperty("instructions");
 		expect(body.input).toEqual([
+			// pi-ai 1.6.0 builds no instructions: the base prompt is already its first input item, which the hook kept.
+			...(PI_NATIVE ? [piDeveloperItem(systemPrompt)] : []),
 			{ role: "developer", content: extra },
 			{ role: "user", content: [{ type: "input_text", text: "question" }] },
 		]);
@@ -1269,7 +1306,7 @@ describe("GPT Responses prompt caching", () => {
 					...sseOptions(captured),
 					onPayload: (payload) => {
 						const { instructions, ...rest } = payload as Record<string, any>;
-						expect(instructions).toBe(systemPrompt);
+						expect(instructions).toBe(PI_NATIVE ? undefined : systemPrompt);
 						return { ...rest, input: [replacement, ...rest.input] };
 					},
 				},
@@ -1279,7 +1316,12 @@ describe("GPT Responses prompt caching", () => {
 		expect(result.errorMessage).toBeUndefined();
 		const { body } = captured[0];
 		expect(body).not.toHaveProperty("instructions");
-		expect(body.input).toEqual([replacement, { role: "user", content: [{ type: "input_text", text: "question" }] }]);
+		expect(body.input).toEqual([
+			replacement,
+			// From pi-ai 1.6.0 the base prompt is pi's own input item, which this hook keeps.
+			...(PI_NATIVE ? [piDeveloperItem(systemPrompt)] : []),
+			{ role: "user", content: [{ type: "input_text", text: "question" }] },
+		]);
 	});
 
 	it("still moves the base prompt when a hook rewrites the body but leaves instructions as built", async () => {
@@ -1301,7 +1343,7 @@ describe("GPT Responses prompt caching", () => {
 		expect(body).not.toHaveProperty("instructions");
 		expect(body.metadata).toEqual({ tagged: "yes" });
 		expect(body.input).toEqual([
-			developerItem(systemPrompt),
+			PI_NATIVE ? piDeveloperItem(systemPrompt) : developerItem(systemPrompt),
 			{ role: "user", content: [{ type: "input_text", text: "question" }] },
 		]);
 	});
@@ -1309,24 +1351,32 @@ describe("GPT Responses prompt caching", () => {
 	const additionalTools = { type: "additional_tools", role: "developer", tools: [] };
 	const explicitDeveloper = developerItem(systemPrompt);
 	const implicitDeveloper = { role: "developer", content: systemPrompt };
+	// From pi-ai 1.6.0 the hook finds no instructions and pi's developer item first: what it adds goes before that
+	// item, which stays. When the first item is then not a developer message (the tool item), the extension puts its
+	// default base prompt in front, as it does for any GPT request that starts without one.
+	const piBase = piDeveloperItem(systemPrompt);
+	const defaultBase = developerItem("You are a helpful assistant.");
 	it.each([
-		{ name: "instructions are deleted", remove: true, prefix: [], expected: [] },
+		{ name: "instructions are deleted", remove: true, prefix: [], expected: [], native: [piBase] },
 		{
 			name: "instructions are unset and a developer-role tool item leads",
 			prefix: [additionalTools],
 			expected: [additionalTools],
+			native: [defaultBase, additionalTools, piBase],
 		},
 		{
 			name: "the base is moved to a typed developer message",
 			prefix: [explicitDeveloper],
 			expected: [explicitDeveloper],
+			native: [explicitDeveloper, piBase],
 		},
 		{
 			name: "the base is moved to an untyped developer message",
 			prefix: [implicitDeveloper],
 			expected: [implicitDeveloper],
+			native: [implicitDeveloper, piBase],
 		},
-	])("sends what an in-place hook left when $name", async ({ remove, prefix, expected }) => {
+	])("sends what an in-place hook left when $name", async ({ remove, prefix, expected, native }) => {
 		const streams = await loadCliproxyCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const result = await streams
@@ -1348,7 +1398,10 @@ describe("GPT Responses prompt caching", () => {
 		expect(result.errorMessage).toBeUndefined();
 		const { body } = captured[0];
 		expect(body).not.toHaveProperty("instructions");
-		expect(body.input).toEqual([...expected, { role: "user", content: [{ type: "input_text", text: "question" }] }]);
+		expect(body.input).toEqual([
+			...(PI_NATIVE ? native : expected),
+			{ role: "user", content: [{ type: "input_text", text: "question" }] },
+		]);
 	});
 
 	it("keeps text input supplied by a raw stream payload hook", async () => {
@@ -1497,7 +1550,8 @@ describe("mid-convo effort streams", () => {
 			.result();
 
 		expect(result.errorMessage).toBeUndefined();
-		expect(result.providerThinkingLevel).toBeUndefined();
+		// pi-ai 1.6.0 records the level it sent, "none", on the reply; the request is the same on both.
+		expect(result.providerThinkingLevel).toBe(PI_NATIVE ? "none" : undefined);
 		expect(captured).toHaveLength(1);
 		expect(captured[0].body.reasoning?.effort).toBe("none");
 		expect(configurationUpdates(captured[0].body)).toEqual([]);
@@ -1635,7 +1689,8 @@ describe("mid-convo effort streams", () => {
 				expect(first.reasoning?.effort).toBe("low");
 				expect(configurationUpdates(first)).toEqual([]);
 				expect(first).not.toHaveProperty("previous_response_id");
-				expect(first.input[0]).toEqual(developerItem(prompt));
+				const baseItem = (text: string) => (PI_NATIVE ? piDeveloperItem(text) : developerItem(text));
+				expect(first.input[0]).toEqual(baseItem(prompt));
 				expect(wireUserItemIndex(first, "first question")).toBe(1);
 
 				const second = await turn("second question", "high");
@@ -1654,7 +1709,7 @@ describe("mid-convo effort streams", () => {
 					[fourth, "fourth question"],
 				] as const) {
 					expect(frame).not.toHaveProperty("previous_response_id");
-					expect(frame.input[0]).toEqual(developerItem(prompt));
+					expect(frame.input[0]).toEqual(baseItem(prompt));
 					expect(wireUserItemIndex(frame, "first question")).toBe(1);
 					expect(wireUserItemIndex(frame, latestQuestion)).toBe(frame.input.length - 1);
 				}
