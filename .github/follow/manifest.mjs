@@ -80,6 +80,18 @@ const prodReach = (pkgs) => {
 	return seen;
 };
 
+// What a declaration asks the registry for: "npm:<name>[@range]" names <name> (an alias); a range or a tag names the
+// declared name itself; any other source (file:, link:, git, a URL, a path, owner/repo) is null.
+const requested = (declared, spec) => {
+	if (typeof spec !== "string") return null;
+	if (spec.startsWith("npm:")) {
+		const m = /^npm:((?:@[^/@\s]+\/)?[^/@\s]+)(?:@[^\s]*)?$/.exec(spec);
+		return m ? m[1] : null;
+	}
+	if (/^(?:[a-z+]+:|\.|\/|~\/)/i.test(spec) || /^[^@\s/]+\/\S+$/.test(spec)) return null;
+	return declared;
+};
+
 // The package name an entry's key installs: the last node_modules/<name> of a node_modules path, else null.
 const KEY = /^node_modules\/((?:@[^/]+\/)?[^/]+)(?:\/node_modules\/((?:@[^/]+\/)?[^/]+))*$/;
 const nameAt = (key) => {
@@ -303,6 +315,28 @@ try {
 					for (const n of Object.keys(root[k]))
 						if (!Object.hasOwn(all, `node_modules/${n}`) && !(k === "peerDependencies" && optionalPeer(n)))
 							bad.push(`package-lock.json: the root's ${k} ${name(n)} has no entry node_modules/${n}`);
+		}
+		// Every declaration that the lock resolves to an entry asks for that entry's own package, from the registry:
+		// an entry that installs another package than its key names ("name") must be asked for as that alias
+		// ("npm:<name>@…"), and an ordinary declaration must find the package it names.
+		const declaring = [["", all[""], DEP_KEYS]];
+		for (const [k, e] of Object.entries(all)) if (k !== "" && isObj(e)) declaring.push([k, e, PROD_KEYS]);
+		for (const [from, e, maps] of declaring) {
+			if (!isObj(e)) continue;
+			for (const m of maps) {
+				if (!isObj(e[m])) continue;
+				for (const [n, spec] of Object.entries(e[m])) {
+					const to = resolveIn(all, from, n);
+					if (to === null || !isObj(all[to])) continue;
+					const real = typeof all[to].name === "string" ? all[to].name : nameAt(to);
+					const want = requested(n, spec);
+					const who = from === "" ? `the root's ${m}` : `${name(from)}'s ${m}`;
+					if (want === null)
+						bad.push(`${at(to)}: ${who} asks for ${name(n)} as ${name(spec)}, not from the registry`);
+					else if (want !== real)
+						bad.push(`${at(to)}: installs ${name(real)}, but ${who} asks for ${name(want)} (${name(n)}: ${name(spec)})`);
+				}
+			}
 		}
 		// What users would get, by the lock's own graph, before and after: never by the "dev" flag.
 		const prodNow = prodReach(all);

@@ -1246,7 +1246,10 @@ cmd_report() {
 			;;
 		esac
 		say "$state"
-		if ((red == 0)) && [[ $(jq -r '.fork_published' "$res") == true && $state != waiting ]]; then
+		# A dry run never closes an issue (4.5): only a live run, with main's release on npm, does.
+		if ((red == 0)) && [[ $(jq -r '.fork_published' "$res") == true && $state != waiting && ${DRY_RUN:-yes} != no ]]; then
+			say "dry run: no issue is closed"
+		elif ((red == 0)) && [[ $(jq -r '.fork_published' "$res") == true && $state != waiting ]]; then
 			close_followed "$(jq -r '.base_version // ""' "$res")" "main has the release and npm has $PKG $(shown "$(jq -r .fork_version "$res")")." || failed=1
 		fi
 		;;

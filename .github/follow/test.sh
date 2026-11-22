@@ -113,10 +113,62 @@ pack_release() {
 	mkdir -p "$dir"
 	tgz=$dir/_router-for-me_pi-cliproxyapi-provider@$v.tgz
 	git -C "$O" ls-tree -r "$c" | awk -F'\t' -v skip="$skip" '$1 ~ /^100(644|755) / && $2 != skip && $2 !~ /(^|\/)\.npm(rc|ignore)$/ && ($2 ~ /^extensions\// || $2 == "package.json" || $2 == "README.md" || $2 == "LICENSE") { print $2 }' >"$T/pack.list"
-	# shellcheck disable=SC2046 # one path per word: the fixture's names have no spaces
-	git -C "$O" archive --format=tar --prefix=package/ "$c" -- $(cat "$T/pack.list") | gzip -n >"$tgz"
+	node "$T/mktar.mjs" "$tgz" "${PACK_MODE:-plain}" "$O" "$c" "$T/pack.list"
 	jq -n --arg t "$tgz" --arg i "$(sri "$tgz")" '{tarball: $t, integrity: $i}' >"$dir/_router-for-me_pi-cliproxyapi-provider@$v.dist.json"
 }
+
+# mktar.mjs OUT MODE REPO COMMIT LIST: a gzipped tar as npm makes it (plain ustar, package/<path>, regular files),
+# of the files of LIST at COMMIT. MODE plain, or one extended header for extensions/lib.ts: pax-size (a PAX "size"
+# longer than the base header's, the extra bytes after git's: node-tar installs them, a reader of the base size
+# sees git's bytes), x (a PAX path), g (a PAX global header), L (a GNU long name), K (a GNU long link name).
+cat >"$T/mktar.mjs" <<-'JS'
+	import { execFileSync } from "node:child_process";
+	import { readFileSync, writeFileSync } from "node:fs";
+	import { gzipSync } from "node:zlib";
+	const [out, mode, repo, commit, list] = process.argv.slice(2);
+	const header = (name, size, type) => {
+		const h = Buffer.alloc(512);
+		h.write(name, 0, 100, "utf8");
+		h.write("0000644\0", 100, "latin1");
+		h.write("0000000\0", 108, "latin1");
+		h.write("0000000\0", 116, "latin1");
+		h.write(`${size.toString(8).padStart(11, "0")}\0`, 124, "latin1");
+		h.write("00000000000\0", 136, "latin1");
+		h.write("        ", 148, "latin1");
+		h[156] = type.charCodeAt(0);
+		h.write("ustar\u000000", 257, "latin1");
+		let s = 0;
+		for (const b of h) s += b;
+		h.write(`${s.toString(8).padStart(6, "0")}\0 `, 148, "latin1");
+		return h;
+	};
+	const pad = (b) => Buffer.concat([b, Buffer.alloc((512 - (b.length % 512)) % 512)]);
+	const record = (kv) => {
+		let n = kv.length + 3;
+		while (`${n} ${kv}\n`.length !== n) n = `${n} ${kv}\n`.length;
+		return Buffer.from(`${n} ${kv}\n`);
+	};
+	const parts = [];
+	const ext = (type, data) => parts.push(header("PaxHeader", data.length, type), pad(data));
+	if (mode === "g") ext("g", record("comment=x"));
+	for (const p of readFileSync(list, "utf8").split("\n").filter(Boolean)) {
+		let data = execFileSync("git", ["-C", repo, "cat-file", "blob", `${commit}:${p}`]);
+		const name = `package/${p}`;
+		let size = data.length;
+		if (p === "extensions/lib.ts") {
+			if (mode === "pax-size") {
+				data = Buffer.concat([data, Buffer.from(";globalThis.stolen = 1;\n")]);
+				ext("x", record(`size=${data.length}`));
+			} else if (mode === "x") ext("x", record(`path=${name}`));
+			else if (mode === "L") ext("L", Buffer.from(`${name}\0`));
+			else if (mode === "K") ext("K", Buffer.from("x\0"));
+			if (mode !== "pax-size") size = data.length;
+		}
+		parts.push(header(name, size, "0"), pad(data));
+	}
+	parts.push(Buffer.alloc(1024));
+	writeFileSync(out, gzipSync(Buffer.concat(parts)));
+JS
 
 # --- the fixture --------------------------------------------------------------------------------------------------
 build_fixture() {
@@ -659,6 +711,22 @@ t_f2_release() {
 	eq "$(state)" refused "a tarball without a file the commit ships: refused"
 	has "$(field reasons)" 'tarball: the commit ships "extensions/lib.ts", npm'"'"'s tarball lacks it' "says which file"
 	no_bundle "lacks"
+	# Extended tar headers, which npm's node-tar applies and a plain reader would not: refused, whatever they say.
+	# pax-size is the third review's case: a PAX size longer than the base header's, so npm installs git's bytes and
+	# a hidden line after them, while a reader of the base size would see only git's.
+	local mode
+	for mode in pax-size x g L K; do
+		fresh "f2-header-$mode"
+		change extensions/lib.ts 'export const x = 82;' "fix: x is 82"
+		release 1.5.1
+		cd "$O"
+		PACK_MODE=$mode pack_release "$(git rev-parse HEAD)" 1.5.1
+		cd "$F"
+		run prepare
+		eq "$(state)" refused "a tarball with a $mode header: refused"
+		has "$(field reasons)" "not read as npm reads it" "$mode: says why"
+		no_bundle "header-$mode"
+	done
 	# The bytes are not what the registry's integrity says.
 	fresh f2-integrity
 	release 1.5.1
@@ -813,6 +881,16 @@ t_f4_deps() {
 	# A local-file development dependency with a matching root map and no entry.
 	refused filedev "the root's devDependencies \"x\" has no entry node_modules/x" \
 		o_both '.devDependencies.x = "file:../x"' '.packages[""].devDependencies.x = "file:../x"'
+	# An entry that installs another package than the declaration asks for (the third review's stale same-version
+	# alias): the root asks for a@1.0.0, the entry at node_modules/a installs evil@1.0.0 from the registry.
+	refused stalealias 'packages["node_modules/a"]: installs "evil", but the root'"'"'s devDependencies asks for "a"' \
+		o_lock '.packages["node_modules/a"] += {name: "evil", resolved: "https://registry.npmjs.org/evil/-/evil-1.0.0.tgz"}'
+	# An alias declaration whose entry installs the alias's own name, not the package it names.
+	refused aliasnoname 'packages["node_modules/al"]: installs "al", but the root'"'"'s devDependencies asks for "a"' \
+		o_both '.devDependencies.al = "npm:a@1.0.0"' '.packages[""].devDependencies.al = "npm:a@1.0.0" | .packages["node_modules/al"] = (.packages["node_modules/a"] + {resolved: "https://registry.npmjs.org/al/-/al-1.0.0.tgz"})'
+	# A declaration of another source (git), resolved to a registry entry.
+	refused gitsource 'packages["node_modules/b"]: "node_modules/a"'"'"'s dependencies asks for "b" as "github:x/b", not from the registry' \
+		o_lock '.packages["node_modules/a"].dependencies = {b: "github:x/b"}'
 	# The checker itself, on a lock with no root entry (the merge rule would keep the fork's root).
 	CASE=f4-noroot
 	local L=$T/f4-noroot
@@ -897,15 +975,11 @@ t_f5_pack() {
 	eq "$RUN_RC" 0 "a comment naming a file that is gone: no refusal: $RUN_OUT"
 }
 
-# The delivered package, loaded: load.mjs unpacks npm's tarball into a consumer of its own and has pi's loader (here
-# a stub of discoverAndLoadExtensions that imports each registered extension and calls it) load it. A file the
-# extension imports by a template literal and the tarball lacks fails; the same package with it loads.
-t_f5_load() {
-	CASE=f5-load
-	local d=$T/f5-load pi
-	rm -rf "$d"
-	pi=$d/nm/@earendil-works/pi-coding-agent
-	mkdir -p "$d/pkg/extensions" "$pi" "$d/out"
+# pi_stub DIR: a stub of @earendil-works/pi-coding-agent in DIR whose discoverAndLoadExtensions imports each
+# extension the package registers and calls it, as pi's loader does.
+pi_stub() {
+	local pi=$1
+	mkdir -p "$pi"
 	printf '{"name": "@earendil-works/pi-coding-agent", "version": "0.0.0", "type": "module", "exports": {".": "./index.js"}}\n' >"$pi/package.json"
 	cat >"$pi/index.js" <<-'JS'
 		import { readFileSync } from "node:fs";
@@ -930,6 +1004,18 @@ t_f5_load() {
 			return { extensions, errors, warnings: [] };
 		}
 	JS
+}
+
+# The delivered package, loaded: load.mjs unpacks npm's tarball into a consumer of its own and has pi's loader (here
+# a stub of discoverAndLoadExtensions that imports each registered extension and calls it) load it. A file the
+# extension imports by a template literal and the tarball lacks fails; the same package with it loads.
+t_f5_load() {
+	CASE=f5-load
+	local d=$T/f5-load pi
+	rm -rf "$d"
+	pi=$d/nm/@earendil-works/pi-coding-agent
+	mkdir -p "$d/pkg/extensions" "$pi" "$d/out"
+	pi_stub "$pi"
 	printf 'const name = "lib";\nconst lib = await import(`./${name}.js`);\nexport default function () {\n\treturn lib.value;\n}\n' >"$d/pkg/extensions/index.js"
 	printf 'export const value = 1;\n' >"$d/pkg/extensions/lib.js"
 	pk() { # pk FILES_JSON: the package with that files list, packed by npm into $d/out
@@ -954,6 +1040,66 @@ t_f5_load() {
 	pk '["extensions"]'
 	runc node "$SCRIPTS/load.mjs" "$d/out/pkg-under-test-1.0.0.tgz" "$d/nm"
 	eq "$RUN_RC" 4 "a development dependency is not there for the delivered package"
+}
+
+# The test jobs' container steps, run in the workflow's own order (the third review's generated-asset case). Each
+# docker run of the job is replayed on the host with its mounts mapped to local folders (/w the exported tree, /pack
+# the archive folder, /follow this run's scripts, /tmp/pack a scratch folder); npm ci is a fake that installs pi (a
+# stub) and, as a development install can, writes extensions/generated-settings.json, which the extension needs and
+# git does not have. The package npm publishes from the commit lacks that file, so the job must fail at the load;
+# with the file in the commit, the job passes.
+job_containers() { # job_containers FILE JOB: each docker run's command after the image, one per line, in order
+	job "$1" "$2" | awk '
+		/^      - / { if (cmd != "") print cmd; cmd = ""; inrun = 0 }
+		/^        run: >-$/ { inrun = 1; next }
+		inrun && /^          / { sub(/^ +/, ""); cmd = cmd (cmd == "" ? "" : " ") $0; next }
+		{ inrun = 0 }
+		END { if (cmd != "") print cmd }' | grep -F 'docker run' | sed 's/.*"\$NODE_IMAGE" //'
+}
+t_f5_order() {
+	CASE=f5-order
+	local d=$T/f5-order j cmd n rc
+	local f=$TREE/.github/workflows/follow.yml p=$TREE/.github/workflows/publish.yml
+	for j in "$f test-candidate" "$p test"; do
+		for committed in no yes; do
+			rm -rf "$d"
+			mkdir -p "$d/tree/extensions" "$d/pack" "$d/bin" "$d/pi"
+			# The package: its extension reads a JSON file next to it.
+			jq -n '{name: "pkg-under-test", version: "1.0.0", type: "module", files: ["extensions"],
+				pi: {extensions: ["./extensions/index.js"]}, peerDependencies: {"@earendil-works/pi-coding-agent": "*"}}' >"$d/tree/package.json"
+			printf 'import { readFileSync } from "node:fs";\nconst s = JSON.parse(readFileSync(new URL("./generated-settings.json", import.meta.url), "utf8"));\nexport default function () {\n\treturn s;\n}\n' >"$d/tree/extensions/index.js"
+			if [[ $committed == yes ]]; then printf '{"generated": false}\n' >"$d/tree/extensions/generated-settings.json"; fi
+			# pi's loader, a stub (as in t_f5_load), and the fake npm ci that installs it and generates the asset.
+			pi_stub "$d/pi/@earendil-works/pi-coding-agent"
+			cat >"$d/bin/npm" <<-SH
+				#!/usr/bin/env bash
+				case "\$1" in
+				ci) mkdir -p node_modules && cp -R "$d/pi/@earendil-works" node_modules/ && printf '{"generated": true}\n' >extensions/generated-settings.json ;;
+				run) exit 0 ;;
+				*) exec "$(command -v npm)" "\$@" ;;
+				esac
+			SH
+			chmod +x "$d/bin/npm"
+			n=0 rc=0
+			# shellcheck disable=SC2086 # file and job
+			while IFS= read -r cmd; do
+				n=$((n + 1))
+				cmd=$(sed -e 's|/tmp/pack|@TP@|g' -e 's|/pack|@PK@|g' -e 's|/follow|@FO@|g' -e 's|/w/|@W@/|g' <<<"$cmd")
+				cmd=${cmd//@TP@/$d/tmppack}
+				cmd=${cmd//@PK@/$d/pack}
+				cmd=${cmd//@FO@/$SCRIPTS}
+				cmd=${cmd//@W@/$d/tree}
+				RUN_OUT=$(cd "$d/tree" && PATH="$d/bin:$PATH" bash -c "$cmd" 2>&1) || rc=$?
+				((rc == 0)) || break
+			done < <(job_containers $j)
+			if [[ $committed == yes ]]; then
+				eq "$rc" 0 "$j: the asset in the commit: the job passes: $RUN_OUT"
+			else
+				yes_ test "$rc" -ne 0
+				has "$RUN_OUT" "pi could not load it" "$j: an asset only an install generates: the load fails (step $n)"
+			fi
+		done
+	done
 }
 
 # --- finding 6: refs and inputs (the workflows: t_workflows) ----------------------------------------------------
@@ -1159,9 +1305,15 @@ t_report() {
 	eq "$(bot "follow:" | jq -r '.[0].title')" "follow: 1.5.1 — landed" "landed"
 	jq '.state = "up-to-date" | .base_version = "1.5.1" | .fork_published = "true" | .fork_version = "105.1.1"' "$OUT/result.json" >"$OUT/r" &&
 		mv "$OUT/r" "$OUT/result.json"
-	gh_run report
+	DRY_RUN=yes gh_run report
 	eq "$RUN_RC" 0 "up to date is green"
-	eq "$(bot "follow:" | jq -r '.[0].state')" closed "closed"
+	eq "$(bot "follow:" | jq -r '.[0].state')" open "a dry run closes nothing (the third review's case)"
+	has "$RUN_OUT" "dry run: no issue is closed" "says so"
+	gh_run report
+	eq "$(bot "follow:" | jq -r '.[0].state')" open "DRY_RUN unset is a dry run: closes nothing"
+	DRY_RUN=no gh_run report
+	eq "$RUN_RC" 0 "up to date is green"
+	eq "$(bot "follow:" | jq -r '.[0].state')" closed "a live run closes it"
 	eq "$(bot "README:" | jq -r '.[0].state')" open "the README issue stays for the owner"
 }
 
@@ -1429,6 +1581,9 @@ t_workflows() {
 			has "$b" "gh api -X POST repos/ngvoicu/pi-provimux/environments/$j/deployment-branch-policies -f name=main -f type=branch" \
 				"6: FOLLOWING.md admits main alone to $j"
 		done
+		# 6.2: the git-install claim is qualified for a package manager pi does not recognise.
+		has "$b" "with a package-manager command pi does not recognise" "6.2: FOLLOWING.md qualifies the git install"
+		has "$b" "pi 1.3.0 runs a plain install in the git checkout" "6.2: a plain install installs development dependencies"
 	else
 		bad "no docs/FOLLOWING.md at $TREE"
 	fi
@@ -1442,8 +1597,8 @@ t_workflows() {
 		hasnt "$b" 'git archive' "7: $j writes the tree with checkout-index"
 		# 7: the container sees an exported tree and this run's scripts read-only: never the workspace (its .git, which
 		# the checkout's cleanup opens with a credential afterwards) or the current folder.
-		eq "$(grep -oE -- '-v "[^"]*"' <<<"$b" | sort -u | grep -vxE -- '-v "\$RUNNER_TEMP/tree:/w"|-v "\$RUNNER_TEMP/follow:/follow:ro"' || true)" "" \
-			"7: $j mounts only the exported tree and the scripts"
+		eq "$(grep -oE -- '-v "[^"]*"' <<<"$b" | sort -u | grep -vxE -- '-v "\$RUNNER_TEMP/tree:/w(:ro)?"|-v "\$RUNNER_TEMP/pack:/pack(:ro)?"|-v "\$RUNNER_TEMP/follow:/follow:ro"' || true)" "" \
+			"7: $j mounts only the exported tree, the archive folder and the scripts"
 		hasnt "$b" 'GITHUB_WORKSPACE' "7: $j never names the workspace"
 		has "$b" 'checkout-index -a --prefix="$RUNNER_TEMP/tree/"' "7: $j exports the tree by git"
 	done
@@ -1451,8 +1606,17 @@ t_workflows() {
 	for j in "$f test-candidate" "$p test"; do
 		# shellcheck disable=SC2086
 		b=$(job $j)
-		has "$b" 'npm pack --ignore-scripts --pack-destination /tmp/pack' "5: $j packs in the container"
-		has "$b" 'node /follow/load.mjs /tmp/pack/*.tgz /w/node_modules' "5: $j loads the packed package"
+		# The clean export is packed, read-only, before npm ci; the loader gets that archive read-only; nothing is
+		# packed after the install (t_f5_order runs the steps).
+		has "$b" '-v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack" -w /w "$NODE_IMAGE"' "5: $j packs the tree read-only"
+		has "$b" 'npm pack --ignore-scripts --pack-destination /pack' "5: $j packs into the archive folder"
+		local lp lc
+		lp=$({ grep -n 'npm pack --ignore-scripts --pack-destination /pack' <<<"$b" || true; } | head -n 1 | cut -d: -f1)
+		lc=$({ grep -n '"$NODE_IMAGE" npm ci$' <<<"$b" || true; } | head -n 1 | cut -d: -f1)
+		yes_ test "${lp:-999}" -lt "${lc:-0}"
+		eq "$(awk -v c="${lc:-0}" 'NR > c' <<<"$b" | grep -c 'npm pack' || true)" 0 "5: $j packs nothing after npm ci"
+		has "$b" '-v "$RUNNER_TEMP/pack:/pack:ro"' "5: $j gives the loader the archive read-only"
+		has "$b" 'node /follow/load.mjs "$1" /w/node_modules' "5: $j loads that archive"
 	done
 	hasnt "$(cat "$f" "$p")" '        cache:' "7: no cache input"
 	eq "$(grep -c 'actions/setup-node@' "$f" "$p" | awk -F: '{ s += $2 } END { print s }')" \
@@ -1556,7 +1720,7 @@ t_plan() {
 # --- run ----------------------------------------------------------------------------------------------------------
 build_fixture >/dev/null
 ALL='numbers clean rerun waiting states conflict manifest_conflict manifest_merge refusals shape readme report plan
-f2_release f3_strings f3_handoff f3_links f3_checker f4_deps f4_dev_lands f5_paths f5_pack f5_load f6_refs f8_recovery
+f2_release f3_strings f3_handoff f3_links f3_checker f4_deps f4_dev_lands f5_paths f5_pack f5_load f5_order f6_refs f8_recovery
 f9_issues f10_publish f10_land f11_mirror workflows f12_history'
 # shellcheck disable=SC2086 # the names
 [[ $# -gt 0 ]] || set -- $ALL

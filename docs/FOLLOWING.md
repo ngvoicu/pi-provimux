@@ -65,6 +65,14 @@ nothing lands.
    and `package-lock.json` (2.6 guards those by policy). If npm's packing rules ever differ between the original's
    npm and the runner's, the check refuses; it never passes a difference.
 
+   The tarball is read only where the reader (`.github/follow/tar.mjs`) and npm's own `node-tar` agree exactly:
+   every header plain POSIX ustar with a valid checksum, of a regular file or a directory, with a plain octal size,
+   and zeros to the end after the first zero block. A tarball with anything else is refused: PAX extended or global
+   headers (`x`, `g`), GNU long names or links (`L`, `K`), links, GNU-format headers, base-256 sizes. Such a header
+   can change what npm installs (a PAX `size` longer than the base header's makes npm install bytes past git's)
+   while a simpler reader sees git's bytes. npm's own `npm pack` writes none of them; the original's 1.5.0 has none
+   and passes.
+
 Every string from upstream is checked before it is used: versions are tokens of `[0-9A-Za-z.+-]` (anything else reads
 as `!`), only plain `X.Y.Z` versions with at most six digits a part reach arithmetic, and the old base's version is
 read back from its commit. A version asked for by hand is checked before it is shown. Inside GitHub Actions, the
@@ -116,7 +124,7 @@ Every job checks out the run's own commit (`github.sha`, the `main` the run name
 | Job | What it does | What it runs | Permissions |
 |---|---|---|---|
 | `prepare` | Selects the release and binds it to npm's tarball (2.1, 2.2). Decides whether there is anything to do. Runs the guard on git objects (paths and kinds of file) before anything is written, then merges `B` into `main` in a temporary worktree, applies the file rules (2.5), stamps the version and the changelog (3) and runs the whole guard (2.6). Uploads the candidate as a git bundle. | git, `npm view` and npm's tarball (data, never run), `npm pack --dry-run --ignore-scripts` on `B`'s regular files written out (a list, nothing run), `jq`, the run's own scripts. No code of the original or of the candidate. | `contents: read` |
-| `test (candidate)` | Writes the candidate's tree with `git checkout-index` (no `.git`, no export attribute) to a folder of its own, then **in a container** (pinned `node:24` image) that gets that tree, this run's scripts read-only and the network, and none of the runner's variables, tokens or caches: `npm ci`; `npm pack` and **the packed package loaded by pi's own loader** from a consumer folder of its own (`load.mjs`, 4.2); `npm run check`. | **The original's and the fork's code, and their dev dependencies**, in the container. | `contents: read`, `actions: read` |
+| `test (candidate)` | Writes the candidate's tree with `git checkout-index` (no `.git`, no export attribute) to a folder of its own, then **in a container** (pinned `node:24` image) that gets that tree, this run's scripts read-only and the network, and none of the runner's variables, tokens or caches: `npm pack` of the clean tree, before anything is installed; `npm ci`; **that archive loaded by pi's own loader** from a consumer folder of its own (`load.mjs`, 4.2); `npm run check`. | **The original's and the fork's code, and their dev dependencies**, in the container. | `contents: read`, `actions: read` |
 | `test (original)` | The same on `B` alone. Information only: it tells the owner whether a failure is the original's own. It never decides. | **The original's code**, in the container. | `contents: read` |
 | `land` | Needs `prepare` and a successful `test (candidate)`. Takes the bundle by the id and digest `prepare` output, checks it is the commit `prepare` named, then **checks it again by content** (`follow.sh recheck`: the whole guard, and npm's tarball against `M`'s second parent), pushes it to `main` without force, then starts `publish.yml`. | git, `gh`, the run's own scripts. | `contents: write`, `actions: write`; environment `main-only` |
 | `report` | Always. Writes the issue (2.7). | The run's own script, `gh`. | `issues: write`; environment `main-only` |
@@ -224,6 +232,11 @@ after. A checker that fails to run is an error, never a pass.
    - **every entry** is a `node_modules/` path whose `resolved` is exactly the registry's tarball of **that entry's
      own name and version** (`https://registry.npmjs.org/<name>/-/<basename>-<version>.tgz`; for an alias, the
      real package its `name` field names), with a full `sha512` integrity;
+   - **every declaration the lock resolves to an entry asks for that entry's package, from the registry**: the
+     root's four maps and each entry's `dependencies`, `optionalDependencies` and `peerDependencies`. An entry
+     whose `name` differs from its key's must be asked for as that alias (`npm:<name>@…`) by every declaration that
+     reaches it, and an alias declaration must reach an entry of the package it names; a declaration of another
+     source (`file:`, `link:`, git, a URL, a path, `owner/repo`) refuses;
    - anything else refuses: a link, a bundled package, a git, file or other source, another package's tarball under
      this name, no root, a declared dependency with no entry, a lockfile version other than 2 or 3.
 
@@ -231,8 +244,9 @@ after. A checker that fails to run is an error, never a pass.
    `@earendil-works/pi-coding-agent`, which are also development dependencies), `protobufjs` and `@google/genai`
    among them: a change the original makes to those stops for the owner. The other 84 (Biome, TypeScript, Vitest,
    `@types/node` and what they bring) may change by themselves, install scripts included, because only the test
-   container installs them. (pi's own git install runs `npm install --omit=dev --legacy-peer-deps`, which installs
-   no root peer from this lock; the rule is stricter than that path, by the owner's decision of 2026-11-22.)
+   container installs them. (pi's own git install, with its recognised npm configuration, runs
+   `npm install --omit=dev --legacy-peer-deps`, which installs no root peer from this lock; the rule is stricter than
+   that path, by the owner's decision of 2026-11-22. With a package manager pi does not recognise, see 6.2.)
 3. **The fork's tests**: every test file the fork added *or changed* (its blob on `main` is not the old base's;
    today four of the original's test files carry fork changes) is in the candidate unchanged. Together with
    `scripts` and the check configuration being the owner's, what `npm run check` runs cannot shrink without him.
@@ -407,7 +421,7 @@ One run at a time, never cancelled midway.
 | Job | What it does | What it runs | Permissions |
 |---|---|---|---|
 | `plan` | Names `main`'s version first, from git alone, so that every outcome, an early refusal included, reaches `notify`. Refuses an `.npmrc` anywhere in the tree before npm runs at all. Asks npm, from a neutral folder with no configuration and `--registry=https://registry.npmjs.org/`, whether it has that version: yes, nothing to publish, go to `tag`. Otherwise the publish guard (below). | git, `jq`, `npm view`, `npm pack --dry-run --ignore-scripts`. No repository code. | `contents: read` |
-| `test` | Writes that commit's tree with `git checkout-index` to a folder of its own (no `.git`; the workspace, whose `.git` the checkout action's cleanup opens afterwards with a credential, is never given to the container). In the same container as `follow`'s tests: `npm ci`; `npm pack` and the packed package loaded by pi (below); `npm run check`. | **The repository's code and dev dependencies**, in the container. | `contents: read` |
+| `test` | Writes that commit's tree with `git checkout-index` to a folder of its own (no `.git`; the workspace, whose `.git` the checkout action's cleanup opens afterwards with a credential, is never given to the container). In the same container as `follow`'s tests: `npm pack` of the clean tree, before anything is installed; `npm ci`; that archive loaded by pi (below); `npm run check`. | **The repository's code and dev dependencies**, in the container. | `contents: read` |
 | `publish` | Needs `plan` and `test`. Checks out the commit with no stored credential; then **in one step** checks the tree is clean and that the live `main` is still that commit, and runs `npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/`. | `git` and the npm CLI. **No repository code:** no `npm ci`, no lifecycle script, no build (the package has none: pi loads the `.ts` files). | `id-token: write`, `contents: read`; environment `npm` |
 | `tag` | `follow.sh tag`: the tag `v<version>` at the commit just published, which must be in the live `main` and whose `package.json` must name that version, and the GitHub release with the changelog entry; a missing release is made even when the tag exists. When the version was already on npm (repair), the commit npm recorded (`gitHead`), else the existing tag, each only if it is in the live `main` **and its `package.json` names the version**; with neither, the job **fails** and `notify` tells the owner to make the tag. An annotated tag is followed to its commit. | git, `gh`, `npm view`, the run's own script. | `contents: write`; environment `main-only` |
 | `notify` | After a failure: the issue `publish: <version> — failed` (`publish: unknown — failed` when `main`'s version is not plain). After a success that is not a dry run, and only once npm shows the version, it closes that issue. | The run's own script, `gh`, `npm view`. | `issues: write`; environment `main-only` |
@@ -424,9 +438,12 @@ One run at a time, never cancelled midway.
   `CHANGELOG.md`, and it holds every extension `pi.extensions` registers (a nested `.npmignore` cannot leave one
   out).
 
-**The packed package loads** (the `test` job, and `follow`'s `test (candidate)` before landing). In the container,
-after `npm ci`: `npm pack --ignore-scripts`, then `.github/follow/load.mjs` (this run's copy, mounted read-only)
-unpacks the tarball into a consumer folder of its own (`node_modules/pi-provimux`, nothing else of the tree), links
+**The packed package loads** (the `test` job, and `follow`'s `test (candidate)` before landing). **Before
+`npm ci`**, a container packs the clean export (`npm pack --ignore-scripts`, the tree mounted read-only) into a
+folder of its own: what publication builds from the same commit, never a tree an install has written into (an
+install that generates a file under `extensions/` would otherwise make a package load that npm would ship without
+it). After `npm ci`, a second container gets that archive read-only, and `.github/follow/load.mjs` (this run's copy,
+mounted read-only) unpacks the tarball into a consumer folder of its own (`node_modules/pi-provimux`, nothing else of the tree), links
 in only the package's `peerDependencies` from the tree's `node_modules` (what pi provides at run time), clears
 `HOME`, pi's agent folder and the `CLIPROXYAPI_*` variables, and has **pi's own loader**
 (`discoverAndLoadExtensions` of `@earendil-works/pi-coding-agent`) load the package. Every registered extension must
@@ -519,7 +536,8 @@ by hand chooses; a scheduled `follow` run and a `push` to `main` have no input a
 In a dry run everything is checked and nothing changes: `follow`'s `land` fetches and rechecks the candidate, checks
 the push with `git push --dry-run`, and says what it would push and start; `publish` runs every check and
 `npm pack --dry-run` (not `npm publish --dry-run`, which would exchange the OIDC token first); `tag` says which tag
-and release it would make. Failure issues are still written; a dry run never closes one. The `publish` job still
+and release it would make. Failure issues are still written; a dry run never closes one, neither `follow`'s
+`report` nor `publish`'s `notify` (`DRY_RUN` unset counts as a dry run). The `publish` job still
 enters the environment `npm` and holds `id-token: write`; it uses neither.
 
 **Switching it off** is one commit, after 4.4 steps 1 to 4: in `.github/workflows/follow.yml` and
@@ -655,8 +673,12 @@ candidate's; the `dev` flag is never read), and every entry resolves to **the re
 and version** with a full `sha512`. Anything else refuses. Their install scripts run in the test container only. A
 hostile development dependency can therefore make the tests pass whatever the code does: the same class of risk as
 hostile code passing CI, accepted with it. By the graph, it reaches no user of an npm install (a package's
-development dependencies are never installed for its users) nor of pi's git install (`--omit=dev`), and no
-credential (6.1). Today this covers 84 of the lock's 202 entries; the other 118, reached from the root's peers, stop
+development dependencies are never installed for its users) nor of pi's git install as pi 1.3.0 runs it with its
+recognised npm configuration (`npm install --omit=dev --legacy-peer-deps`), and no credential (6.1). **One
+qualification:** with a package-manager command pi does not recognise (an uncommon choice in the user's pi
+settings), pi 1.3.0 runs a plain install in the git checkout, which installs development dependencies too; a git
+install so configured gets them, install scripts included. npm installs (`pi install npm:pi-provimux`) are not
+affected. Today this covers 84 of the lock's 202 entries; the other 118, reached from the root's peers, stop
 for the owner.
 
 Two more residual points: the test jobs' result is produced by the code they run, so a hostile release can make
@@ -889,20 +911,20 @@ mounts, the container steps) is checked as text in `workflows`.
 | `conflict` | A conflict in a source file lands nothing and leaves the work tree alone; by hand it stops, and after resolving `stamp` and `guard` finish. |
 | `manifest_conflict`, `manifest_merge` | `devDependencies` changed on both sides is a conflict; changed on one side each, a merge by hand gets both keys, `description` stays the fork's, tabs kept, and the guard refuses it. |
 | `refusals` | Each refusal: `LICENSE`, a workflow, a new top-level file, `vitest.config.ts`, `.npmrc`, `docs/`, a symbolic link, `dependencies`, a `postinstall`, `license`, a new key, `pi`, `files`, a package from another registry. |
-| `f2_release` | npm's tarball with a changed file, with a file the commit lacks, **without a file the commit ships**, with a wrong integrity, missing, and a rewritten bump commit: all refused. |
+| `f2_release` | npm's tarball with a changed file, with a file the commit lacks, **without a file the commit ships**, with a PAX size longer than its base header's or any PAX or GNU extended header (`x`, `g`, `L`, `K`), with a wrong integrity, missing, and a rewritten bump commit: all refused. |
 | `f3_strings`, `f3_handoff`, `f3_links`, `f3_checker` | A version string with a line break adds no record; a hostile old-base version is never evaluated; a version input with a runner command is not echoed; runner commands are stopped; `fetch-candidate` prints exactly the commit on standard output with `GITHUB_ACTIONS` unset and true, the stop markers on standard error; a link where the merge writes is refused and nothing is written through it; a checker that fails is an error, not a pass. |
-| `f4_deps`, `f4_dev_lands` | Refused: a development dependency moved to `dependencies`; a changed peer, new `optionalDependencies`; an entry the root's peer reaches, changed (with install scripts), marked `dev` and changed, removed, or shadowed by a new nested `dev` entry; another package's tarball and digest under a development dependency's name; a link; a local-file development dependency with no entry; a short or missing integrity; a root entry unlike `package.json`; a lock with no root. Lands: a bump of two development dependencies, one with install scripts; a development alias (`npm:a@1.0.0`). |
-| `f5_paths`, `f5_pack`, `f5_load` | A nested `.npmrc`, `.npmignore`, `.gitattributes`; `tsconfig.json`; a new extension file; a test the fork changed; a nested `.npmignore` leaving the registered extension out of the tarball; a comment naming a retired import is no refusal; `load.mjs` loads a packed package with its files, refuses one whose template-literal import the tarball lacks, and gives the package nothing but its peers. |
+| `f4_deps`, `f4_dev_lands` | Refused: a development dependency moved to `dependencies`; a changed peer, new `optionalDependencies`; an entry the root's peer reaches, changed (with install scripts), marked `dev` and changed, removed, or shadowed by a new nested `dev` entry; another package's tarball and digest under a development dependency's name; a link; a local-file development dependency with no entry; an entry installing another package than its declaration asks for (a stale same-version alias), an alias declaration whose entry installs the alias's own name, a git declaration; a short or missing integrity; a root entry unlike `package.json`; a lock with no root. Lands: a bump of two development dependencies, one with install scripts; a development alias (`npm:a@1.0.0`). |
+| `f5_paths`, `f5_pack`, `f5_load`, `f5_order` | A nested `.npmrc`, `.npmignore`, `.gitattributes`; `tsconfig.json`; a new extension file; a test the fork changed; a nested `.npmignore` leaving the registered extension out of the tarball; a comment naming a retired import is no refusal; `load.mjs` loads a packed package with its files, refuses one whose template-literal import the tarball lacks, and gives the package nothing but its peers; the test jobs' container steps, replayed in the workflow's order with an install that generates a file the extension needs, fail at the load, and pass with the file in the commit. |
 | `f6_refs` | `plan`, `land`, `tag` refuse `refs/heads/Main` and a tag ref. |
 | `f8_recovery` | `merge` from inside the tree refused; a hand merge carrying a refused change ends in the guard's refusal; a key added while resolving a conflict is refused (the effective manifest); no container or push command in the issues or this file; `plan` refuses an `.npmrc` before npm runs, runs npm from a neutral folder against the public registry, and refuses a publish tag in `publishConfig`. |
 | `f9_issues` | Past 350 issues; a contributor's issue with the bot's title and key untouched; the bot's closed issue reopened, not duplicated; the failure issue first, written even when the README issue fails; a 5000-line list kept under GitHub's limit; a README issue quoting the failure key, and a bot issue without the label, untouched. |
 | `f10_publish`, `f10_land` | A dry run closes nothing; a success without the version on npm closes nothing; an annotated tag at the commit passes; a missing release is made; no `gitHead` and no tag fails; a long changelog; a commit outside the live `main` is not tagged; a tag or `gitHead` at a commit of `main` naming another version is not taken; `plan` names the version when it refuses an `.npmrc`; a failed retry dispatch is red with an issue; a failed dispatch is `dispatch-failed`, never `landed`; a tampered candidate is refused by `land` and nothing is pushed; `main` moved during the push is `moved`. |
 | `f11_mirror` | A tag the NAS refuses leaves `main` unmoved too; a tag named `origin/main` does not stand in for the branch; the mirror follows; in a reused workspace, a tag gone from GitHub is seen as on the NAS only. |
-| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; every job that writes is in `main-only`, the OIDC job in `npm`, the others in none, and this file has the `gh api` commands for both; the version input checked; the test jobs in a container with no `setup-node` and no `git archive`, mounting only the exported tree and the scripts, never the workspace; the packed package loaded in `test (candidate)` and `publish`'s `test`; no cache; `land` by `follow.sh land`; no credentialed job (nor `follow.sh`) runs `npm ci`, `npm install` or `npm rebuild`, `npm pack` and `npm publish` only with `--ignore-scripts`, and the test jobs install only in the container; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA. |
+| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; every job that writes is in `main-only`, the OIDC job in `npm`, the others in none, and this file has the `gh api` commands for both; the version input checked; the test jobs in a container with no `setup-node` and no `git archive`, mounting only the exported tree and the scripts, never the workspace; the clean tree packed read-only before `npm ci` and nothing packed after, and that archive given read-only to the loader, in `test (candidate)` and `publish`'s `test`; no cache; `land` by `follow.sh land`; no credentialed job (nor `follow.sh`) runs `npm ci`, `npm install` or `npm rebuild`, `npm pack` and `npm publish` only with `--ignore-scripts`, and the test jobs install only in the container; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA. |
 | `f12_history` | No commit has `.github/workflows/` without `.forgejo/workflows/`. |
 | `shape` | Candidates spoiled after the merge: the fork's own test changed, README changed, `R` changing another file or more than the version, a wrong version, a third commit, no merge. |
 | `readme` | The original's README change: the fork's README byte for byte, the diff kept; both sides changing it is no conflict. |
-| `report` | A conflict opens the issue (its key the first line, no recovery commands) and the README issue; a rerun writes no comment; a new state renames it with one comment; check failed with its log in a longer fence; dry run green; land failed; landed; up to date and published closes it; the publish issue opens and closes. |
+| `report` | A conflict opens the issue (its key the first line, no recovery commands) and the README issue; a rerun writes no comment; a new state renames it with one comment; check failed with its log in a longer fence; dry run green; land failed; landed; up to date and published closes it only in a live run, never in a dry run; the publish issue opens and closes. |
 | `plan` | The publish guard: to publish, already published, first publish, a version of another form or base, a lifecycle script, an untracked file in the tarball, a dirty tree, an `.npmrc`. |
 
 The real history was also replayed: from `59e0947` (before the fork merged 1.5.0), `prepare` with `1.5.0` resolves

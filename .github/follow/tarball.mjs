@@ -5,7 +5,9 @@
 //   verify FILE INTEGRITY         FILE's sha512 is the registry's integrity ("sha512-<base64>"); exit 0, else 4
 //   compare FILE COMMIT SHIPS     the tarball and the commit match both ways: the tarball holds exactly the files of
 //                                 SHIPS (what npm packs from COMMIT, one path per line), each a regular file of
-//                                 COMMIT with the same bytes; prints one difference per line; exit 0, else 4
+//                                 COMMIT with the same bytes; prints one difference per line; exit 0, else 4. A
+//                                 tarball with any header tar.mjs does not read exactly as npm's node-tar (PAX or
+//                                 GNU extended headers, links, non-ustar formats) is refused (4)
 //   export COMMIT DIR             writes COMMIT's regular files (no link, no submodule) into DIR, a new folder, so
 //                                 that npm can list what it would pack from them; runs nothing of them
 //   registered PKGJSON PACKED     every extension package.json registers (pi.extensions) is in PACKED (one path per
@@ -49,7 +51,15 @@ try {
 		const bad = [];
 		const seen = new Set();
 		let files = 0;
-		for (const e of entries(file)) {
+		// A tarball read otherwise than npm reads it (extended headers, other types, other formats) is refused.
+		let all;
+		try {
+			all = entries(file);
+		} catch (e) {
+			console.log(`tarball: ${e instanceof Error ? e.message : e}`);
+			process.exit(4);
+		}
+		for (const e of all) {
 			if (e.type === "5") continue;
 			if (!e.path.startsWith("package/")) {
 				bad.push(`tarball: ${show(e.path)} is outside package/`);

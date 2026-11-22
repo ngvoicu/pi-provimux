@@ -150,17 +150,28 @@ jobs:
           GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git read-tree "$got"
           GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git checkout-index -a --prefix="$RUNNER_TEMP/tree/"
           cp -R .github/follow "$RUNNER_TEMP/follow"
+          mkdir "$RUNNER_TEMP/pack"
+      # What publication packs: the clean export, packed before anything is installed into it, into a folder of its
+      # own. The loader gets this archive read-only, so the package it loads is the one npm publish builds from the
+      # same commit, never one an install wrote into.
+      - name: Pack the clean tree
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack" -w /w "$NODE_IMAGE"
+          npm pack --ignore-scripts --pack-destination /pack
       # The container gets the tree and the network, and none of the runner's variables, tokens or caches.
       - name: npm ci
         run: >-
           docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
           -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm ci
-      # What npm would publish, loaded by pi's own loader from a consumer folder of its own (load.mjs).
+      # The clean tree's archive, loaded by pi's own loader from a consumer folder of its own (load.mjs); the
+      # installed tree gives only pi itself, through the package's peers.
       - name: The packed package loads
         run: >-
           docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
-          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -v "$RUNNER_TEMP/follow:/follow:ro" -w /w "$NODE_IMAGE"
-          sh -c 'mkdir /tmp/pack && npm pack --ignore-scripts --pack-destination /tmp/pack >/dev/null && node /follow/load.mjs /tmp/pack/*.tgz /w/node_modules'
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack:ro"
+          -v "$RUNNER_TEMP/follow:/follow:ro" -w /w "$NODE_IMAGE"
+          sh -c 'set -- /pack/*.tgz && [ "$#" -eq 1 ] && [ -f "$1" ] && node /follow/load.mjs "$1" /w/node_modules'
       - name: npm run check
         run: >-
           docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
