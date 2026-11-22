@@ -415,8 +415,10 @@ t_manifest_merge() {
 	eq "$(jq -r '.description' package.json)" "the fork" "description is the fork's"
 	eq "$(head -c 1 package.json)$(sed -n 2p package.json | head -c 1)" "{	" "tabs kept"
 	run stamp
-	eq "$RUN_RC" 4 "the guard refuses new development dependencies"
-	has "$RUN_OUT" 'the original changed `devDependencies`' "says which"
+	# Development dependencies are the original's to change, but a lockfile that does not match is refused.
+	eq "$RUN_RC" 4 "a package.json the lockfile does not match: refused"
+	has "$RUN_OUT" "the root entry's devDependencies are not package.json's" "says which"
+	hasnt "$RUN_OUT" 'the original changed `devDependencies`' "devDependencies themselves are no stop"
 }
 
 # refused NAME WANT SETUP…: the original makes a change in SETUP, releases 1.5.1; the guard must refuse with WANT,
@@ -694,18 +696,37 @@ t_f3_checker() {
 
 # --- finding 4: dependencies and install scripts -----------------------------------------------------------------
 t_f4_deps() {
-	refused devdep 'package.json: the original changed `devDependencies`' o_pkg '.devDependencies.vitest = "9.0.0"' "chore: vitest 9"
+	refused devtodep 'package.json: the original added `dependencies`' o_pkg '.dependencies = {"a": .devDependencies.a} | del(.devDependencies.a)' "chore: a for users"
 	refused peerdep 'package.json: the original added `peerDependencies`' o_pkg '.peerDependencies = {"x": "*"}' "chore: a peer"
 	refused optdep 'package.json: the original added `optionalDependencies`' o_pkg '.optionalDependencies = {"y": "1"}' "chore: optional"
-	refused scriptentry 'an entry with install scripts is added or changed' o_lock '.packages["node_modules/b"].version = "2.0.1" | .packages["node_modules/b"].resolved = "https://registry.npmjs.org/b/-/b-2.0.1.tgz"'
-	refused newscript 'an entry with install scripts is added or changed' o_lock '.packages["node_modules/a"].hasInstallScript = true'
+	refused shipped 'a package that is not a development dependency is added or changed (it runs install scripts)' \
+		o_lock '.packages["node_modules/c"] = {version: "1.0.0", resolved: "https://registry.npmjs.org/c/-/c-1.0.0.tgz", integrity: .packages["node_modules/a"].integrity, hasInstallScript: true}'
+	refused notdev 'a package that is not a development dependency is added or changed' o_lock 'del(.packages["node_modules/a"].dev)'
 	refused integrity 'no full sha512 integrity' o_lock '.packages["node_modules/a"].integrity = "sha512-aaaa"'
+	refused nointegrity '"node_modules/a"]: no full sha512 integrity' o_lock 'del(.packages["node_modules/a"].integrity)'
 	refused rootentry "the root entry's devDependencies are not package.json's" o_lock '.packages[""].devDependencies.z = "1.0.0"'
 }
 o_lock() {
 	jq --tab "$1" package-lock.json >p && mv p package-lock.json
 	git add -A
 	commit "chore: the lockfile"
+}
+
+# The original bumps its development dependencies, one of them with install scripts: it lands.
+t_f4_dev_lands() {
+	fresh f4-dev-lands
+	jq --tab '.devDependencies.a = "1.1.0" | .devDependencies.b = "2.1.0"' package.json >p && mv p package.json
+	jq --tab --arg ia "$(fake_sri a110)" --arg ib "$(fake_sri b210)" '.packages[""].devDependencies.a = "1.1.0" | .packages[""].devDependencies.b = "2.1.0"
+		| .packages["node_modules/a"] += {version: "1.1.0", resolved: "https://registry.npmjs.org/a/-/a-1.1.0.tgz", integrity: $ia}
+		| .packages["node_modules/b"] += {version: "2.1.0", resolved: "https://registry.npmjs.org/b/-/b-2.1.0.tgz", integrity: $ib}' \
+		package-lock.json >p && mv p package-lock.json
+	git add -A && commit "chore: bump a and b"
+	release 1.5.1
+	run prepare
+	eq "$(state)" candidate "a development dependency bump lands: $(field reasons)"
+	eq "$(git show "$(field candidate):package.json" | jq -c .devDependencies)" '{"a":"1.1.0","b":"2.1.0"}' "the new versions"
+	eq "$(git show "$(field candidate):package-lock.json" | jq -r '.packages["node_modules/b"].version, .packages["node_modules/b"].hasInstallScript')" \
+		"$(printf '2.1.0\ntrue')" "the install-script dev entry, changed"
 }
 
 # --- finding 5: paths, check configuration, the tarball, the fork's tests ----------------------------------------
@@ -1093,6 +1114,25 @@ t_workflows() {
 		"$(grep -c 'package-manager-cache: false' "$f" "$p" | awk -F: '{ s += $2 } END { print s }')" "7: every setup-node without its cache"
 	# 3, 10: land runs follow.sh land (recheck, landed only after the dispatch); one writer of main at a time.
 	has "$(job "$f" land)" 'follow.sh land' "3: land rechecks by content"
+	# No job that holds a credential installs dependencies or runs their scripts: npm ci runs only in the three
+	# test jobs, inside the container; npm pack and npm publish always with --ignore-scripts; the scripts the
+	# credentialed jobs run install nothing.
+	for j in "$f prepare" "$f land" "$f report" "$p plan" "$p publish" "$p tag" "$p notify"; do
+		# shellcheck disable=SC2086
+		b=$(job $j | grep -v '^ *#' | grep -v -- '- name:')
+		hasnt "$b" 'npm ci' "deps: $j does not run npm ci"
+		hasnt "$b" 'npm install' "deps: $j does not run npm install"
+		hasnt "$b" 'npm rebuild' "deps: $j does not run npm rebuild"
+		eq "$(grep -E 'npm (pack|publish)( |$)' <<<"$b" | grep -vc -- '--ignore-scripts' || true)" 0 "deps: $j packs and publishes with --ignore-scripts"
+	done
+	for j in "$f test-candidate" "$f test-original" "$p test"; do
+		# shellcheck disable=SC2086
+		b=$(job $j | grep -v '^ *#' | grep -v -- '- name:')
+		eq "$(grep -cE 'npm (ci|install)' <<<"$b")" "$(grep -c '"$NODE_IMAGE" npm ci$' <<<"$b")" "deps: $j installs only in the container"
+	done
+	eq "$(grep -vE '^\s*(#|echo|refuse|say)' "$SCRIPTS/follow.sh" | grep -cE '\bnpm(_neutral)? +(ci|install|rebuild)\b' || true)" 0 "deps: follow.sh installs nothing"
+	eq "$(grep -vE '^\s*(#|echo|refuse|say)' "$SCRIPTS/follow.sh" | grep -E '\bnpm(_neutral)? +(pack|publish)\b' | grep -vc -- '--ignore-scripts' || true)" 0 \
+		"deps: follow.sh packs with --ignore-scripts"
 	hasnt "$(cat "$f")" 'landed=landed' "10: no landed written in the workflow"
 	for j in "$f land" "$p publish" "$p tag"; do
 		# shellcheck disable=SC2086
@@ -1171,7 +1211,7 @@ t_plan() {
 # --- run ----------------------------------------------------------------------------------------------------------
 build_fixture >/dev/null
 ALL='numbers clean rerun waiting states conflict manifest_conflict manifest_merge refusals shape readme report plan
-f2_release f3_strings f3_links f3_checker f4_deps f5_paths f5_pack f6_refs f8_recovery f9_issues f10_publish f10_land
+f2_release f3_strings f3_links f3_checker f4_deps f4_dev_lands f5_paths f5_pack f6_refs f8_recovery f9_issues f10_publish f10_land
 f11_mirror workflows f12_history'
 # shellcheck disable=SC2086 # the names
 [[ $# -gt 0 ]] || set -- $ALL

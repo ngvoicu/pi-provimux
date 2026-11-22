@@ -9,8 +9,8 @@
 //                                            none, 4 some
 //   lock-check MAIN CANDIDATE PKG            package-lock.json of the candidate: every package from the npm
 //                                            registry by its exact address with a full sha512 integrity, the root
-//                                            entry's dependencies those of PKG (package.json), and no entry that
-//                                            runs install scripts added or changed; exit 0 / 4
+//                                            entry's dependencies those of PKG (package.json), and no entry added
+//                                            or changed that is not a development dependency; exit 0 / 4
 //   set-version FILE VERSION                 the version in package.json, or its two copies in package-lock.json,
 //                                            changing nothing else in the text
 //   same-but-version A B                     exit 0 when A and B differ in their version fields only, else 4
@@ -19,9 +19,10 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const FORK_KEYS = new Set(["name", "version", "description", "keywords", "repository", "homepage", "bugs", "author"]);
-// Merged key by key (a merge by hand needs them merged); of these only engines is not a stop for the guard.
+// Merged key by key (a merge by hand needs them merged). devDependencies and engines are the original's to change
+// (2.5); peerDependencies and optionalDependencies, like every other key, are a stop for the guard.
 const MAP_KEYS = new Set(["devDependencies", "peerDependencies", "optionalDependencies", "engines"]);
-const FREE_KEYS = new Set(["engines"]);
+const FREE_KEYS = new Set(["devDependencies", "engines"]);
 const DEP_KEYS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
 const RESOLVED = /^https:\/\/registry\.npmjs\.org\/(@[a-z0-9._~-]+\/)?[a-z0-9._~-]+\/-\/[a-z0-9._~-]+-[0-9A-Za-z.+-]+\.tgz$/;
 const INTEGRITY = /^sha512-[A-Za-z0-9+/]{86}==$/;
@@ -235,9 +236,13 @@ try {
 				continue;
 			}
 			const before = mainPkgs[p];
-			// An entry that runs install scripts, before or now, may not change at all.
-			if ((e.hasInstallScript === true || get(before, "hasInstallScript") === true) && !eq(e, before))
-				bad.push(`package-lock.json packages[${name(p)}]: an entry with install scripts is added or changed`);
+			// Only development dependencies may be added or changed: they are installed in the test container alone.
+			// A package users would get (no "dev": true, now or before), install scripts or not, is the owner's.
+			if (!eq(e, before) && (e.dev !== true || (before !== undefined && get(before, "dev") !== true)))
+				bad.push(
+					`package-lock.json packages[${name(p)}]: a package that is not a development dependency is added or changed` +
+						(e.hasInstallScript === true || get(before, "hasInstallScript") === true ? " (it runs install scripts)" : ""),
+				);
 			if (e.link === true) {
 				if (!eq(e, before)) bad.push(`package-lock.json packages[${name(p)}]: a new link`);
 				continue;

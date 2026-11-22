@@ -167,8 +167,8 @@ the original's README diff, so that what is new gets described in the fork's wor
 | Keys | Rule |
 |---|---|
 | `name`, `version`, `description`, `keywords`, `repository`, `homepage`, `bugs`, `author` | The fork's, always. What the original does to them is ignored (its `version` is read as `V`, not copied). |
-| `engines` | Three-way: a key only one side changed takes that side. Both sides changed it differently: stop. |
-| `devDependencies`, `peerDependencies`, `optionalDependencies` | Merged key by key, three ways (so that a merge by hand gets them right), but the original changing them at all is **a stop for the guard, the owner decides**: a new peer can be installed on users' machines, a new development dependency chooses what runs the checks. |
+| `devDependencies`, `engines` | Three-way: a key only one side changed takes that side. Both sides changed it differently: stop. The original may change its development dependencies freely (the owner's decision of 2026-11-22, 6.2): they are installed only in the test container, never for users and never in a job that holds a credential. |
+| `peerDependencies`, `optionalDependencies` | Merged key by key, three ways (so that a merge by hand gets them right), but the original changing them at all is **a stop for the guard, the owner decides**: they can be installed on users' machines. |
 | `dependencies`, `bundleDependencies`, `overrides`, `scripts`, `bin`, `files`, `pi`, `main`, `exports`, `type`, `publishConfig`, `license`, and any key the original adds | The original changed it: **stop, the owner decides.** These decide what is installed on a user's machine, what runs at install, what pi loads, what the check runs, and under which licence. |
 
 **`package-lock.json`** is merged the same way: the entries of `packages` are compared whole, three ways; the root
@@ -192,8 +192,10 @@ after. A checker that fails to run is an error, never a pass.
    (`README.md`, `package.json`, `package-lock.json`, `CHANGELOG.md`) that is not a regular file on either side.
 2. **The manifest** stop-keys of 2.5, and the candidate's `package-lock.json`: every package from
    `https://registry.npmjs.org/<name>/-/<file>.tgz` with a full `sha512` integrity, the root entry's dependencies
-   equal to `package.json`'s, and **no entry that runs install scripts added or changed in any way** (version,
-   address, anything), even when it ran them before (`protobufjs`, `@google/genai` and `fsevents` do today).
+   equal to `package.json`'s, and **only development dependencies (`"dev": true`, before and after) added or
+   changed**. A package users would get, with or without install scripts, is the owner's; a development dependency
+   may change, install scripts included (`protobufjs`, `@google/genai` and `fsevents` run them today), because only
+   the test container installs it. Today every entry of the lockfile is a development dependency.
 3. **The fork's tests**: every test file the fork added *or changed* (its blob on `main` is not the old base's;
    today four of the original's test files carry fork changes) is in the candidate unchanged. Together with
    `scripts` and the check configuration being the owner's, what `npm run check` runs cannot shrink without him.
@@ -508,6 +510,12 @@ the runner: no `GITHUB_TOKEN`, no Actions runtime token (so no artifact or cache
 sudo, all capabilities dropped. No job uses a cache, and every `setup-node` has `package-manager-cache: false`.
 What leaves them is their conclusion and nothing else: no later job reads a file they wrote (2.4).
 
+**No job that holds a credential installs dependencies or runs their scripts.** `npm ci` runs only in these three
+jobs, inside the container, which is the one place development dependencies and their install scripts run. The
+credentialed jobs (`land`, `report`, `plan`, `publish`, `tag`, `notify`, and `prepare` with its read token) run
+`npm view`, and `npm pack` / `npm publish` with `--ignore-scripts`, which install nothing; this was already so and
+needed no change. `test.sh` checks it in the workflows and in `follow.sh`.
+
 **What remains:** the container has the network (npm needs it), so code in it can reach anything public; the
 runner around it still holds its runtime credential, which a container escape would expose; and the job's own
 token (`contents: read`, `actions: read`) is used by the step before, outside the container.
@@ -559,6 +567,13 @@ releases, bound byte for byte to their commit (2.1); the 24-hour wait; an exact 
 without him; no dependency, peer, development dependency, install-script package or check configuration changing
 without him (2.5, 2.6); the fork's tests, its changes to the original's tests included, kept; the original's code
 run in a container without the runner's credentials (6.1); and the changelog entry and release of every update.
+
+**Development dependencies, decided 2026-11-22 as part of the same acceptance.** A change the original makes to its
+`devDependencies` and their lockfile entries lands by itself, as long as they stay development dependencies, each
+resolves to its exact registry tarball with a full `sha512`, and no credentialed job installs them (6.1). Their
+install scripts run in the test container only. A hostile development dependency can therefore make the tests pass
+whatever the code does: the same class of risk as hostile code passing CI, accepted with it. It reaches no user
+(npm and git installs omit development dependencies) and no credential.
 
 Two more residual points: the test jobs' result is produced by the code they run, so a hostile release can make
 its own tests pass (they guard against breakage, not intent); and whoever can push to this repository can publish,
@@ -772,14 +787,14 @@ revision's scripts and tree. It runs on macOS's bash 3.2 and on Linux (bash 5, G
 | `refusals` | Each refusal: `LICENSE`, a workflow, a new top-level file, `vitest.config.ts`, `.npmrc`, `docs/`, a symbolic link, `dependencies`, a `postinstall`, `license`, a new key, `pi`, `files`, a package from another registry. |
 | `f2_release` | npm's tarball with a changed file, with a file the commit lacks, with a wrong integrity, missing, and a rewritten bump commit: all refused. |
 | `f3_strings`, `f3_links`, `f3_checker` | A version string with a line break adds no record; a hostile old-base version is never evaluated; a version input with a runner command is not echoed; runner commands are stopped; a link where the merge writes is refused and nothing is written through it; a checker that fails is an error, not a pass. |
-| `f4_deps` | New or changed `devDependencies`, `peerDependencies`, `optionalDependencies`; an install-script entry whose version changes; a new install script; a short integrity; a root entry unlike `package.json`. |
+| `f4_deps`, `f4_dev_lands` | Refused: a development dependency moved to `dependencies`; new `peerDependencies`, `optionalDependencies`; a package users would get, with install scripts; an entry no longer a development dependency; a short or missing integrity; a root entry unlike `package.json`. Lands: a bump of two development dependencies, one with install scripts. |
 | `f5_paths`, `f5_pack` | A nested `.npmrc`, `.npmignore`, `.gitattributes`; `tsconfig.json`; a new extension file; a test the fork changed; a nested `.npmignore` leaving the registered extension out of the tarball. |
 | `f6_refs` | `plan`, `land`, `tag` refuse `refs/heads/Main` and a tag ref. |
 | `f8_recovery` | `merge` from inside the tree refused; a hand merge carrying a refused change ends in the guard's refusal; `plan` refuses an `.npmrc` before npm runs, runs npm from a neutral folder against the public registry, and refuses a publish tag in `publishConfig`. |
 | `f9_issues` | Past 350 issues; a contributor's issue with the bot's title and key untouched; the bot's closed issue reopened, not duplicated; the failure issue first, written even when the README issue fails; a 5000-line list kept under GitHub's limit. |
 | `f10_publish`, `f10_land` | A dry run closes nothing; a success without the version on npm closes nothing; an annotated tag at the commit passes; a missing release is made; no `gitHead` and no tag fails; a long changelog; a commit outside the live `main` is not tagged; a failed dispatch is `dispatch-failed`, never `landed`; a tampered candidate is refused by `land` and nothing is pushed. |
 | `f11_mirror` | A tag the NAS refuses leaves `main` unmoved too; a tag named `origin/main` does not stand in for the branch; the mirror follows. |
-| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; `tag` in the environment `npm`; the version input checked; the test jobs in a container with no `setup-node` and no `git archive`; no cache; `land` by `follow.sh land`; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA. |
+| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; `tag` in the environment `npm`; the version input checked; the test jobs in a container with no `setup-node` and no `git archive`; no cache; `land` by `follow.sh land`; no credentialed job (nor `follow.sh`) runs `npm ci`, `npm install` or `npm rebuild`, `npm pack` and `npm publish` only with `--ignore-scripts`, and the test jobs install only in the container; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA. |
 | `f12_history` | No commit has `.github/workflows/` without `.forgejo/workflows/`. |
 | `shape` | Candidates spoiled after the merge: the fork's own test changed, README changed, `R` changing another file or more than the version, a wrong version, a third commit, no merge. |
 | `readme` | The original's README change: the fork's README byte for byte, the diff kept; both sides changing it is no conflict. |
