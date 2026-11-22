@@ -5,9 +5,12 @@ name: Follow GitHub
 # .forgejo/workflows/ and, while this folder exists, ignores .github/workflows/: on the NAS this is the only workflow
 # (no follow, no publish). Every revision of this repository that has .github/workflows/ has this file too; the
 # GitHub jobs also run only when the server is github.com.
-# Fast-forward only, all or nothing. Everything is checked before anything changes, and then main and the new tags
-# go in one atomic push: if the NAS's main has a commit that GitHub's lacks, or a v* tag that GitHub has differently
-# or not at all, or the server refuses any ref, nothing changes: no force push, no merge commit, no tag moved.
+# All or nothing. Everything is checked before anything changes, and then main and the new tags go in one atomic
+# push. The NAS is a mirror of GitHub's main: a fast-forward when it can be one; when GitHub's main is not a
+# descendant of the NAS's, the same push also keeps the NAS's main as refs/nas-backup/main-<UTC time>, so no commit
+# is lost on the NAS, and holds only while the NAS's main is still the commit read. Tags are only added: if a v* tag
+# is on GitHub differently or not at all, or the server refuses any ref, nothing changes: no merge commit, no tag
+# moved. GitHub is only read.
 # Other branches are not mirrored.
 on:
   schedule:
@@ -41,16 +44,22 @@ jobs:
           echo "NAS main: $here"
           echo "GitHub main: $there"
           bad=0
+          backup=
           if [ "$here" != "$there" ] && ! git merge-base --is-ancestor "$here" "$there"; then
-            echo "The NAS's main has commits that GitHub's lacks: not a fast-forward."
-            bad=1
+            backup="refs/nas-backup/main-$(date -u +%Y%m%dT%H%M%SZ)"
+            echo "GitHub's main is not a descendant of the NAS's: the NAS's main is kept as $backup, then set to GitHub's."
           fi
           # Tags: GitHub's that the NAS lacks are added; one the NAS has differently, or GitHub lacks, stops the job.
           git ls-remote --tags --refs origin 'refs/tags/v*' >"$RUNNER_TEMP/nas-tags"
           git for-each-ref --format='%(objectname) %(refname)' 'refs/remotes/github-tags/' |
             sed 's# refs/remotes/github-tags/# refs/tags/#' >"$RUNNER_TEMP/github-tags"
           set --
-          if [ "$here" != "$there" ]; then set -- "$there:refs/heads/main"; fi
+          lease=
+          if [ "$here" != "$there" ]; then
+            set -- "$there:refs/heads/main"
+            lease="--force-with-lease=refs/heads/main:$here"
+          fi
+          if [ -n "$backup" ]; then set -- "$@" "$here:$backup"; fi
           while read -r sha ref; do
             have=$(awk -v r="$ref" '$2 == r { print $1 }' "$RUNNER_TEMP/nas-tags")
             if [ -z "$have" ]; then
@@ -74,5 +83,5 @@ jobs:
             echo "main and the tags: already equal."
             exit 0
           fi
-          git push --atomic origin "$@"
+          git push --atomic ${lease:+"$lease"} origin "$@"
           echo "Pushed, all at once: $*"

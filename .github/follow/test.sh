@@ -1756,6 +1756,46 @@ t_f11_mirror() {
 	RUN_OUT=$(cd "$S/work" && RUNNER_TEMP=$S bash "$S/step.sh" 2>&1) || RUN_RC=$?
 	yes_ test "$RUN_RC" -ne 0
 	has "$RUN_OUT" "v105.0.2 is on the NAS only" "a tag gone from GitHub is a divergence in a reused workspace"
+	git -C "$S/github" tag v105.0.2 "$(git -C "$S/nas.git" rev-parse refs/tags/v105.0.2)"
+	# GitHub's main rewritten (not a descendant of the NAS's), with a new tag: the NAS's main is kept under
+	# refs/nas-backup/, then set to GitHub's, in the same atomic push; GitHub is not written.
+	local old new ghrefs
+	old=$(git -C "$S/nas.git" rev-parse refs/heads/main)
+	(cd "$S/github" && git reset -q --hard v105.0.1 && echo c >>a && git commit -qam c && git tag v105.0.3)
+	new=$(git -C "$S/github" rev-parse HEAD)
+	ghrefs=$(git -C "$S/github" for-each-ref --format='%(refname) %(objectname)')
+	# A backup the server refuses: nothing changes, main included.
+	printf '#!/bin/sh\nwhile read o n r; do case "$r" in refs/nas-backup/*) exit 1;; esac; done\nexit 0\n' >"$S/nas.git/hooks/pre-receive"
+	chmod +x "$S/nas.git/hooks/pre-receive"
+	step
+	yes_ test "$RUN_RC" -ne 0
+	eq "$(git -C "$S/nas.git" rev-parse refs/heads/main)" "$old" "main not moved when the backup is refused"
+	rm "$S/nas.git/hooks/pre-receive"
+	# The NAS's main moved between the read and the push: the lease refuses, nothing changes.
+	local racer
+	racer=$(git -C "$S/github" commit-tree -p v105.0.1 -m racer "HEAD^{tree}")
+	git -C "$S/github" push -q "$S/nas.git" "$racer:refs/heads/racer"
+	awk -v n="$S/nas.git" -v r="$racer" '{ print } /^echo "GitHub main: /{ print "git -C " n " update-ref refs/heads/main " r }' "$S/step.sh" >"$S/race.sh"
+	rm -rf "$S/work"
+	git clone -q "$S/nas.git" "$S/work"
+	RUN_RC=0
+	RUN_OUT=$(cd "$S/work" && RUNNER_TEMP=$S bash "$S/race.sh" 2>&1) || RUN_RC=$?
+	yes_ test "$RUN_RC" -ne 0
+	eq "$(git -C "$S/nas.git" rev-parse refs/heads/main)" "$racer" "a main moved meanwhile is left as it is"
+	eq "$(git -C "$S/nas.git" for-each-ref refs/nas-backup/)" "" "no backup after a refused lease"
+	git -C "$S/nas.git" update-ref refs/heads/main "$old"
+	git -C "$S/nas.git" update-ref -d refs/heads/racer
+	# Then it follows.
+	step
+	eq "$RUN_RC" 0 "the rewritten main: $RUN_OUT"
+	eq "$(git -C "$S/nas.git" rev-parse refs/heads/main)" "$new" "main set to GitHub's rewritten main"
+	eq "$(git -C "$S/nas.git" rev-parse refs/tags/v105.0.3)" "$new" "the new tag followed"
+	eq "$(git -C "$S/nas.git" for-each-ref --format='%(objectname)' refs/nas-backup/)" "$old" "the old main kept, once"
+	if git -C "$S/nas.git" for-each-ref --format='%(refname)' refs/nas-backup/ | grep -Eqx 'refs/nas-backup/main-[0-9]{8}T[0-9]{6}Z'; then ok; else bad "11: the backup is refs/nas-backup/main-<UTC time>"; fi
+	eq "$(git -C "$S/github" for-each-ref --format='%(refname) %(objectname)')" "$ghrefs" "GitHub not written"
+	step
+	eq "$RUN_RC" 0 "the next run: $RUN_OUT"
+	eq "$(git -C "$S/nas.git" for-each-ref refs/nas-backup/ | wc -l | tr -d ' ')" 1 "the next run keeps no second backup"
 }
 
 # --- the workflows, read as text (what a local run cannot exercise) ------------------------------------------------
@@ -1930,7 +1970,9 @@ t_workflows() {
 	has "$b" 'npm publish --dry-run --ignore-scripts' "archive: the dry run is npm publish --dry-run"
 	has "$(job "$p" tag)" 'follow.sh tag' "10: tag and release by the script"
 	# 11: the mirror.
-	has "$(cat "$m")" "git push --atomic origin" "11: one atomic push"
+	has "$(cat "$m")" 'git push --atomic ${lease:+"$lease"} origin' "11: one atomic push"
+	has "$(cat "$m")" 'lease="--force-with-lease=refs/heads/main:$here"' "11: main moves only from the commit read"
+	has "$(cat "$m")" 'refs/nas-backup/main-$(date -u +%Y%m%dT%H%M%SZ)' "11: the NAS's main kept before it is rewritten"
 	has "$(cat "$m")" "refs/remotes/origin/main" "11: fully qualified refs"
 	if grep -Eq 'uses: actions/checkout@[0-9a-f]{40}' "$m"; then ok; else bad "11: checkout pinned by SHA"; fi
 	# Every action pinned.
