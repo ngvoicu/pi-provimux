@@ -15,7 +15,7 @@ The extension is the same as in 105.0.1; what changes is how pi-provimux is rele
   Until it is switched on, it runs as a dry run: everything is checked, and it only says what it would land.
   How it works, and what it accepts: [docs/FOLLOWING.md](docs/FOLLOWING.md).
 - **Checked on pi 1.3.0 and pi 1.6.0** before anything lands and before anything is published, with the packed
-  package loaded by pi's own loader on both.
+  package loaded by pi's own loader on both. The archive published to npm is that tested archive, byte for byte.
 
 ## 105.0.1 - 2026-11-22
 

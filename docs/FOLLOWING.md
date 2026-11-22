@@ -449,8 +449,8 @@ One run at a time, never cancelled midway.
 | Job | What it does | What it runs | Permissions |
 |---|---|---|---|
 | `plan` | Names `main`'s version first, from git alone, so that every outcome, an early refusal included, reaches `notify`. Refuses an `.npmrc` anywhere in the tree before npm runs on it (only the version check, 6.1, comes first). Asks npm, from a neutral folder with no configuration and `--registry=https://registry.npmjs.org/`, whether it has that version: yes, nothing to publish, go to `tag`. Otherwise the publish guard (below). | git, `jq`, `npm view`, `npm pack --dry-run --ignore-scripts`. No repository code. | `contents: read` |
-| `test` | Writes that commit's tree with `git checkout-index` to a folder of its own (no `.git`; the workspace, whose `.git` the checkout action's cleanup opens afterwards with a credential, is never given to the container). In the same container as `follow`'s tests: `npm pack` of the clean tree, before anything is installed; `npm ci`; that archive loaded by pi (below); `npm run check`; then the load and `npm run check` again on pi 1.6.0 (below). | **The repository's code and dev dependencies**, in the container. | `contents: read` |
-| `publish` | Needs `plan` and `test`. Checks out the commit with no stored credential; then **in one step** checks the tree is clean and that the live `main` is still that commit, and runs `npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/`. | `git` and the npm CLI. **No repository code:** no `npm ci`, no lifecycle script, no build (the package has none: pi loads the `.ts` files). | `id-token: write`, `contents: read`; environment `npm` |
+| `test` | Writes that commit's tree with `git checkout-index` to a folder of its own (no `.git`; the workspace, whose `.git` the checkout action's cleanup opens afterwards with a credential, is never given to the container). In the same container as `follow`'s tests: `npm pack` of the clean tree, before anything is installed; then, on the runner and still before any dependency code runs, that archive's sha512 recorded as the job's output and the archive uploaded as the artifact `publish-archive` ("The tested archive", below); `npm ci`; that archive loaded by pi (below); `npm run check`; then the load and `npm run check` again on pi 1.6.0 (below). | **The repository's code and dev dependencies**, in the container. | `contents: read` |
+| `publish` | Needs `plan` and `test`. Checks out the commit with no stored credential. Takes **the archive `test` packed, loaded and checked** (`follow.sh archive`, below). Then **in one step** checks that archive's sha512 again, that the tree is clean and that the live `main` is still that commit, and runs `npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/ <that archive>`. | `git`, the npm CLI, the run's own scripts (`follow.sh archive`, `tarball.mjs`). **No code of the package:** no `npm ci`, no lifecycle script, no build, no pack. | `id-token: write`, `contents: read`, `actions: read` (the artifact); environment `npm` |
 | `tag` | `follow.sh tag`: the tag `v<version>` at the commit just published, which must be in the live `main` and whose `package.json` must name that version, and the GitHub release with the changelog entry; a missing release is made even when the tag exists. When the version was already on npm (repair), the commit npm recorded (`gitHead`), else the existing tag, each only if it is in the live `main` **and its `package.json` names the version**; with neither, the job **fails** and `notify` tells the owner to make the tag. An annotated tag is followed to its commit. | git, `gh`, `npm view`, the run's own script. | `contents: write`; environment `main-only` |
 | `notify` | After a failure: the issue `publish: <version> — failed` (`publish: unknown — failed` when `main`'s version is not plain). After a success that is not a dry run, and only once npm shows the version, it closes that issue. | The run's own script, `gh`, `npm view`. | `issues: write`; environment `main-only` |
 
@@ -482,6 +482,22 @@ that is gone does not. This replaced a scan of the source for imports. What it d
 commands or talk to a proxy; a module imported only later, on use, is not loaded.
 
 The same publish guard applies to every route: the owner's own pushes and `follow`'s landings alike.
+
+**The tested archive is the one published.** npm versions compress differently: on the same commit, npm 11.19.1 and
+11.5.1 pack the same 16 files, byte for byte, into archives with different sha512s. So `publish` never packs
+again. In `test`, right after `npm pack` and before `npm ci`, a step on the runner checks that the pack folder holds
+the one file `pi-provimux-<version>.tgz`, records its sha512 as the job's output `integrity`, and copies it to a
+folder no container sees, from which `actions/upload-artifact` uploads it as `publish-archive` (its id and digest
+are the job's outputs too). Nothing of the package or its dependencies has run by then; the loads and checks that
+follow read the same bytes. `publish` runs `follow.sh archive` with those outputs: the artifact must be
+`publish-archive` of this run with that digest (as `land` takes `prepare`'s bundle, 2.4), hold that one file alone,
+have the recorded sha512, and ship exactly the files npm packs from the commit, each with the commit's bytes
+(`tarball.mjs compare`, the check of 2.1). Anything else refuses, and nothing is published. The publishing step
+checks the sha512 once more, then runs `npm publish` on that file. With a file argument npm uploads the file's own
+bytes (pacote reads the tarball as it is; checked with npm 11.20.0: `npm publish --dry-run <file>` reports the
+file's sha512), and the OIDC exchange and provenance do not depend on the argument: npm exchanges the token for the
+package the manifest names, and the provenance statement's subject is that name, version and the uploaded bytes'
+sha512. That the trusted publisher accepts it is shown only by the first live publish (4.4 step 5).
 
 **Two pi versions.** `npm ci` gives the lockfile's pi, 1.3.0. pi 1.6.0 does some of the extension's Codex work
 itself, and the tests take that into account (`test/pi-ai-version.ts`). So after the load and `npm run check` on
@@ -593,7 +609,10 @@ by hand chooses; a scheduled `follow` run and a `push` to `main` have no input a
 
 In a dry run everything is checked and nothing changes: `follow`'s `land` fetches and rechecks the candidate, checks
 the push with `git push --dry-run`, and says what it would push and start; `publish` runs every check and
-`npm pack --dry-run` (not `npm publish --dry-run`, which would exchange the OIDC token first); `tag` says which tag
+`npm publish --dry-run` on the tested archive, run with `ACTIONS_ID_TOKEN_REQUEST_URL`,
+`ACTIONS_ID_TOKEN_REQUEST_TOKEN` and `NPM_ID_TOKEN` removed from its environment: npm asks for the OIDC token before
+it looks at `--dry-run`, and without those variables it skips that exchange (npm 11.20.0, `lib/utils/oidc.js`), so
+nothing is exchanged and nothing uploaded; `tag` says which tag
 and release it would make. Failure issues are still written; a dry run never closes one, neither `follow`'s
 `report` nor `publish`'s `notify` (`DRY_RUN` unset counts as a dry run). The `publish` job still
 enters the environment `npm` and holds `id-token: write`; it uses neither.
@@ -616,9 +635,10 @@ rule.
   Forgejo, while `.forgejo/workflows/` exists, ignores `.github/workflows/` (as the site's workflow states and its
   NAS shows, and Forgejo's documentation now says): on the NAS this is the only workflow, so `follow` and `publish`
   never run there. **Every revision of this repository that has `.github/workflows/` without
-  `.forgejo/workflows/` has only jobs that run on github.com alone**: those are `main`'s 105.0.1 revisions, whose
-  tag-triggered `publish.yml` checked the server in both its jobs; the branch `follow`'s history was arranged so
-  that it has none, and `test.sh` checks every commit. Every GitHub job also runs only when the server is
+  `.forgejo/workflows/` has exactly one of two known files there**: `main`'s 105.0.1 revisions, whose only workflow is
+  the tag-triggered `publish.yml` of `dad67d5` or of `ecce622` (blobs `67b7efe` and `96781b1`), each checking the
+  server in both its jobs; the branch `follow`'s history was arranged so that it has none, and `test.sh` checks every
+  commit against those two blobs. Every GitHub job also runs only when the server is
   github.com. **The deploy is one ref update:** the NAS's `main` moves straight to the merged tip, never through
   an intermediate revision.
 - **When:** hourly (`cron: '13 * * * *'`), and by hand.
@@ -659,7 +679,9 @@ with the job's credential, after the dependency code is done; nothing a later st
 container can write. Nothing of the runner: no `GITHUB_TOKEN`, no Actions runtime token (so no artifact or cache
 writes), no `GITHUB_*` file, no sudo, all capabilities dropped. No job uses a cache, and every `setup-node` has
 `package-manager-cache: false`. What leaves them is their conclusion and nothing else: no later job reads a file
-they wrote (2.4).
+they wrote (2.4). The one exception is `publish.yml`'s `test`, whose archive `publish` uploads: it is fixed (its
+sha512 recorded, the archive uploaded) by steps on the runner before any dependency code runs, and `publish` checks
+it against that record and against the commit (4.2).
 
 **No job that holds a credential installs dependencies or runs their scripts.** `npm ci` runs only in these three
 jobs, inside the container, which is the one place development dependencies and their install scripts run. The
@@ -718,9 +740,10 @@ In the order a commit meets them:
    `engines`.
 5. **The check.** Typecheck, lint and every test, the fork's own included, on the merged tree. This is what catches
    a *broken* release.
-6. **The publish runs none of it.** `npm publish --ignore-scripts` from a clean checkout of the live `main`, in a
-   job that installed nothing, with the registry fixed on the command line; the publish guard (4.2) runs before it,
-   and the package npm would publish has been loaded by pi in the test container.
+6. **The publish runs none of it.** `npm publish --ignore-scripts` of the tested archive, at a clean checkout of the
+   live `main`, in a job that installed nothing, with the registry fixed on the command line; the publish guard
+   (4.2) runs before it, and the very archive published has been loaded by pi and checked in the test container,
+   and compared with the commit, file by file.
 7. **Only `main`, only forward.** The environments `npm` and `main-only` admit only `main` (6.3); `main` cannot be
    force-pushed; `v*` tags cannot be moved.
 8. **Afterwards.** Every version on npm carries provenance: the workflow, the run and the commit it came from. A
@@ -1005,8 +1028,9 @@ there and says so. Cases that do not run `follow.sh` (e.g. `tarball.mjs`'s heade
 | `f9_issues` | Past 350 issues; a contributor's issue with the bot's title and key untouched; the bot's closed issue reopened, not duplicated; the failure issue first, written even when the README issue fails; a 5000-line list kept under GitHub's limit; a README issue quoting the failure key, and a bot issue without the label, untouched. |
 | `f10_publish`, `f10_land` | A dry run closes nothing; a success without the version on npm closes nothing; an annotated tag at the commit passes; a missing release is made; no `gitHead` and no tag fails; a long changelog; a commit outside the live `main` is not tagged; a tag or `gitHead` at a commit of `main` naming another version is not taken; `plan` names the version when it refuses an `.npmrc`; a failed retry dispatch is red with an issue; a failed dispatch is `dispatch-failed`, never `landed`; a tampered candidate is refused by `land` and nothing is pushed; `main` moved during the push is `moved`. |
 | `f11_mirror` | A tag the NAS refuses leaves `main` unmoved too; a tag named `origin/main` does not stand in for the branch; the mirror follows; in a reused workspace, a tag gone from GitHub is seen as on the NAS only. |
-| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; every job that writes is in `main-only`, the OIDC job in `npm`, the others in none, and this file has the `gh api` commands for both; the version input checked; the test jobs in a container with no `setup-node` and no `git archive` (`test (candidate)`: one `setup-node`, for `follow.sh`'s npm gate, before the tree and any container); every job that runs `follow.sh` sets up Node 24 before it, mounting only the exported tree and the scripts, never the workspace; the clean tree packed read-only before `npm ci` and nothing packed after, and that archive given read-only to the loader, in `test (candidate)` and `publish`'s `test`; no cache; `land` by `follow.sh land`; no credentialed job (nor `follow.sh`) runs `npm ci`, `npm install` or `npm rebuild`, `npm pack` and `npm publish` only with `--ignore-scripts`, and the test jobs install only in the container (`npm ci`, and pi 1.6.0 with `--no-save --ignore-scripts`), and pack, `npm ci`, load, check on pi 1.3.0, then install pi 1.6.0, load, check, in that order; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA. |
-| `f12_history` | A commit with `.github/workflows/` but no `.forgejo/workflows/` has only jobs that check for github.com (`main`'s 105.0.1 revisions); on a throwaway repository, a job without that check, or a workflow with no job, fails the rule. |
+| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; every job that writes is in `main-only`, the OIDC job in `npm`, the others in none, and this file has the `gh api` commands for both; the version input checked; the test jobs in a container with no `setup-node` and no `git archive` (`test (candidate)`: one `setup-node`, for `follow.sh`'s npm gate, before the tree and any container); every job that runs `follow.sh` sets up Node 24 before it, mounting only the exported tree and the scripts, never the workspace; the clean tree packed read-only before `npm ci` and nothing packed after, and that archive given read-only to the loader, in `test (candidate)` and `publish`'s `test`; no cache; `land` by `follow.sh land`; no credentialed job (nor `follow.sh`) runs `npm ci`, `npm install` or `npm rebuild`, `npm pack` and `npm publish` only with `--ignore-scripts`, and the test jobs install only in the container (`npm ci`, and pi 1.6.0 with `--no-save --ignore-scripts`), and pack, `npm ci`, load, check on pi 1.3.0, then install pi 1.6.0, load, check, in that order; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA; `publish.yml`'s `test` records the archive's sha512 and uploads it before `npm ci`, and `publish` takes it by `follow.sh archive` by the test job's id and digest, packs nothing, checks the sha512 again in the publishing step, and publishes or dry-runs that file alone, the dry run without the OIDC request variables. |
+| `f12_history` | A commit with `.github/workflows/` but no `.forgejo/workflows/` has exactly `publish.yml`, one of the two known blobs of `main`'s 105.0.1 revisions; both are met in the history and run their two jobs on GitHub only; on a throwaway repository, another workflow beside it, a changed `publish.yml`, or the known bytes under another name fail the rule. |
+| `archive` | `follow.sh archive`: the tested archive is taken and its path alone printed; refused: a recorded sha512 of another archive (a digest mismatch, nothing written), the same files compressed again, another artifact digest, an artifact of another name, an artifact with another file, an archive whose files are not the commit's. |
 | `npm_gate` | Every command of `follow.sh`'s dispatcher, read from the script itself, and an unknown word, under a stand-in npm 10.9.3 with tokens in the environment: each exits 1 with the reason after exactly one `--version`, with no other npm call. The review's `merge` of a release whose tree has a `prepare` starts no hook and leaves the fork alone. `help`, `-h` and `--help` run without npm. |
 | `npm_boundary` | npm 10.9.3 (a stand-in that would start `prepare`) with tokens in the environment: `prepare` and `plan` stop at the version check, saying why, before any npm call, and no hook runs; 11.5.0 refused, 11.5.1 runs. An npm that starts `prepare` as npm 10 does, given synthetic `GH_TOKEN`, `GITHUB_TOKEN`, `NODE_AUTH_TOKEN`, `NPM_TOKEN`, `ACTIONS_*` and another variable: the upstream tree's and the fork's `prepare` and every npm call see none of them, only `PATH`, `HOME`, the two empty configurations, `ignore_scripts=true` and the registry. The real npm (11.5.1 or later) with tokens set and a `prepare` that prints its environment: no token. |
 | `shape` | Candidates spoiled after the merge: the fork's own test changed, README changed, `R` changing another file or more than the version, a wrong version, a third commit, no merge. |

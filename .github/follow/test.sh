@@ -1848,6 +1848,29 @@ t_workflows() {
 	b=$(job "$p" publish | awk '/- name: Check main, then npm publish/{on=1} on')
 	has "$b" "git ls-remote" "10: the publish step checks main"
 	has "$b" "npm publish --ignore-scripts" "10: and publishes in the same step"
+	# The tested archive is what is published (4.2): the test job records its sha512 and uploads it before any
+	# dependency code runs; publish takes it by id and digest (follow.sh archive), checks the sha512 again in the
+	# publishing step, never packs, and publishes or dry-runs that file alone.
+	b=$(job "$p" test)
+	local lr lu lci
+	lr=$({ grep -n -- '- name: Record the tested archive' <<<"$b" || true; } | head -n 1 | cut -d: -f1)
+	lu=$({ grep -n 'actions/upload-artifact@' <<<"$b" || true; } | head -n 1 | cut -d: -f1)
+	lci=$({ grep -n '"$NODE_IMAGE" npm ci$' <<<"$b" || true; } | head -n 1 | cut -d: -f1)
+	yes_ test "${lr:-999}" -lt "${lu:-0}"
+	yes_ test "${lu:-999}" -lt "${lci:-0}"
+	has "$b" 'openssl dgst -sha512 -binary' "archive: the test job records the sha512"
+	has "$b" 'name: publish-archive' "archive: and uploads publish-archive"
+	has "$b" 'integrity: ${{ steps.archive.outputs.integrity }}' "archive: the sha512 is the test job's output"
+	b=$(job "$p" publish | grep -v '^ *#')
+	has "$b" 'follow.sh" archive' "archive: publish takes it by follow.sh archive"
+	has "$b" 'ID: ${{ needs.test.outputs.archive_id }}' "archive: by the test job's artifact id"
+	has "$b" 'DIGEST: ${{ needs.test.outputs.archive_digest }}' "archive: and digest"
+	hasnt "$b" 'npm pack' "archive: publish packs nothing"
+	eq "$(grep -c 'npm publish ' <<<"$b")" 2 "archive: one publish and one dry run"
+	eq "$(grep 'npm publish ' <<<"$b" | grep -vc ' "\$archive"$' || true)" 0 "archive: each publishes the archive alone"
+	has "$(awk '/- name: Check main, then npm publish/{on=1} on' <<<"$b")" '= "$INTEGRITY" ] || fail' "archive: sha512 checked again in the publishing step"
+	has "$b" 'env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u NPM_ID_TOKEN' "archive: the dry run cannot exchange a token"
+	has "$b" 'npm publish --dry-run --ignore-scripts' "archive: the dry run is npm publish --dry-run"
 	has "$(job "$p" tag)" 'follow.sh tag' "10: tag and release by the script"
 	# 11: the mirror.
 	has "$(cat "$m")" "git push --atomic origin" "11: one atomic push"
@@ -1859,45 +1882,151 @@ t_workflows() {
 
 # --- finding 12: no revision runs GitHub's workflows on Forgejo --------------------------------------------------
 # A revision with .github/workflows but no .forgejo/workflows (Forgejo then reads .github/workflows) passes only when
-# every job of every workflow file there runs on GitHub only: main's 105.0.1 revisions, with a publish.yml whose two
-# jobs say so, are public and stay as they are.
-github_only() { # github_only COMMIT: every job of .github/workflows/* at COMMIT starts with the server check
-	local f jobs ifs
-	for f in $(git -C "$TREE" ls-tree --name-only "$1:.github/workflows"); do
-		jobs=$(git -C "$TREE" show "$1:.github/workflows/$f" | awk '/^jobs:/{on=1; next} on && /^[^ #]/{on=0} on && /^  [A-Za-z0-9_-]+:$/' | wc -l | tr -d ' ')
-		ifs=$(git -C "$TREE" show "$1:.github/workflows/$f" | grep -cE "^    if: github\.server_url == 'https://github\.com'( |$)" || true)
-		[[ $jobs -gt 0 && $jobs == "$ifs" ]] || return 1
-	done
+# that folder is exactly one of the two tag-triggered publish.yml files of main's 105.0.1 revisions, public and kept as
+# they are, both checked to run their two jobs on GitHub only: the blob of dad67d5 and the blob of ecce622.
+F12_KNOWN='67b7efe1cd319f7908987e2e0effe38bb3254973 96781b145be7919a4539ebb31ccb84420c339f28'
+known_105_0_1() { # known_105_0_1 COMMIT: .github/workflows at COMMIT is exactly publish.yml, one of F12_KNOWN
+	local l mode type blob name
+	l=$(git -C "$TREE" ls-tree "$1:.github/workflows") || return 1
+	[[ $(wc -l <<<"$l" | tr -d ' ') == 1 ]] || return 1
+	read -r mode type blob name <<<"$l"
+	[[ $mode == 100644 && $type == blob && $name == publish.yml && " $F12_KNOWN " == *" $blob "* ]]
 }
 t_f12_history() {
 	CASE=f12-history
-	local c n=0
+	local c n=0 seen=''
 	if ! git -C "$TREE" rev-parse --git-dir >/dev/null 2>&1; then
 		bad "no history at $TREE"
 		return 0
 	fi
 	for c in $(git -C "$TREE" rev-list HEAD); do
-		if git -C "$TREE" cat-file -e "$c:.github/workflows" 2>/dev/null && ! git -C "$TREE" cat-file -e "$c:.forgejo/workflows" 2>/dev/null &&
-			! github_only "$c"; then
-			bad "12: $c has .github/workflows without .forgejo/workflows, and a job that may run off GitHub"
-			n=$((n + 1))
+		if git -C "$TREE" cat-file -e "$c:.github/workflows" 2>/dev/null && ! git -C "$TREE" cat-file -e "$c:.forgejo/workflows" 2>/dev/null; then
+			if known_105_0_1 "$c"; then
+				seen="$seen $(git -C "$TREE" rev-parse "$c:.github/workflows/publish.yml")"
+			else
+				bad "12: $c has .github/workflows without .forgejo/workflows, and not one of 105.0.1's two publish.yml"
+				n=$((n + 1))
+			fi
 		fi
 	done
 	if ((n == 0)); then ok; fi
-	# The exception, on a throwaway repository: a job without the server check, or a workflow with no job, fails it.
-	local g=$T/f12-github-only
+	# The two known files: each one met in this history (the list is not stale), each running its two jobs on GitHub
+	# only (read again, not trusted from the list).
+	local blob jobs ifs
+	for blob in $F12_KNOWN; do
+		has "$seen" "$blob" "12: $blob is a revision of main without .forgejo/workflows"
+		if ! git -C "$TREE" cat-file -e "$blob" 2>/dev/null; then
+			bad "12: $blob is not in this history"
+			continue
+		fi
+		jobs=$(git -C "$TREE" cat-file blob "$blob" | awk '/^jobs:/{on=1; next} on && /^[^ #]/{on=0} on && /^  [A-Za-z0-9_-]+:$/' | wc -l | tr -d ' ')
+		ifs=$(git -C "$TREE" cat-file blob "$blob" | grep -cE "^    if: github\.server_url == 'https://github\.com'$" || true)
+		eq "$jobs $ifs" "2 2" "12: $blob runs its two jobs on GitHub only"
+	done
+	# The exception, on a throwaway repository: a known file passes; another file beside it, the same name with
+	# other bytes, or another name with the known bytes, fails it.
+	local g=$T/f12-known
 	rm -rf "$g"
 	git init -q "$g"
 	mkdir -p "$g/.github/workflows"
-	printf "on: push\njobs:\n  a:\n    if: github.server_url == 'https://github.com'\n    runs-on: x\n  b:\n    if: github.server_url == 'https://github.com'\n    runs-on: x\n" >"$g/.github/workflows/w.yml"
-	(cd "$g" && git add -A && commit "two GitHub-only jobs")
-	if TREE=$g github_only HEAD; then ok; else bad "12: two GitHub-only jobs pass"; fi
-	printf "  c:\n    runs-on: x\n" >>"$g/.github/workflows/w.yml"
-	(cd "$g" && git add -A && commit "a job that may run anywhere")
-	if TREE=$g github_only HEAD; then bad "12: a job without the server check passes"; else ok; fi
-	printf "on: push\n" >"$g/.github/workflows/w.yml"
-	(cd "$g" && git add -A && commit "no job")
-	if TREE=$g github_only HEAD; then bad "12: a workflow with no job passes"; else ok; fi
+	git -C "$TREE" cat-file blob 67b7efe1cd319f7908987e2e0effe38bb3254973 >"$g/.github/workflows/publish.yml"
+	(cd "$g" && git add -A && commit "105.0.1's publish.yml")
+	if TREE=$g known_105_0_1 HEAD; then ok; else bad "12: a known publish.yml passes"; fi
+	printf 'on: push\n' >"$g/.github/workflows/other.yml"
+	(cd "$g" && git add -A && commit "another workflow beside it")
+	if TREE=$g known_105_0_1 HEAD; then bad "12: another workflow beside it passes"; else ok; fi
+	rm "$g/.github/workflows/other.yml"
+	printf '# changed\n' >>"$g/.github/workflows/publish.yml"
+	(cd "$g" && git add -A && commit "publish.yml changed")
+	if TREE=$g known_105_0_1 HEAD; then bad "12: a changed publish.yml passes"; else ok; fi
+	git -C "$TREE" cat-file blob 96781b145be7919a4539ebb31ccb84420c339f28 >"$g/.github/workflows/publish.yml"
+	(cd "$g" && git mv .github/workflows/publish.yml .github/workflows/release.yml && git add -A && commit "renamed")
+	if TREE=$g known_105_0_1 HEAD; then bad "12: the known bytes under another name pass"; else ok; fi
+}
+
+# publish.yml's tested archive (follow.sh archive): only the archive the test job packed and recorded is published.
+# pack_commit DIR: the fork's HEAD written out by git and packed by npm into DIR, as the test job packs it.
+pack_commit() {
+	local d=$1
+	rm -rf "$d" "$d.tree"
+	mkdir -p "$d"
+	GIT_INDEX_FILE=$d.index git read-tree HEAD
+	GIT_INDEX_FILE=$d.index git checkout-index -a --prefix="$d.tree/"
+	rm -f "$d.index"
+	(cd "$d.tree" && npm pack --ignore-scripts --pack-destination "$d" >/dev/null 2>&1)
+}
+# serve_archive NAME FILE…: the artifact NAME of run 777 holding FILEs, as the gh stub serves it; prints its digest.
+serve_archive() {
+	local name=$1 z=$T/archive-zip d
+	shift
+	rm -rf "$z"
+	mkdir -p "$z"
+	cp "$@" "$z/"
+	(cd "$z" && zip -q -X a.zip ./*)
+	d=$( (sha256sum "$z/a.zip" 2>/dev/null || shasum -a 256 "$z/a.zip") | cut -d' ' -f1)
+	cp "$z/a.zip" "$GH_DIR/artifact.zip"
+	jq -n --arg n "$name" --arg d "sha256:$d" '{workflow_run: {id: 777}, name: $n, expired: false, digest: $d}' >"$GH_DIR/artifact.json"
+	echo "$d"
+}
+# archive_run ARGS…: follow.sh archive in run 777; standard output alone in RUN_OUT, exit code in RUN_RC.
+archive_run() {
+	RUN_RC=0
+	RUN_OUT=$(GITHUB_RUN_ID=777 PATH="$T/gh/bin:$PATH" bash "$FOLLOW" archive "$@" 2>"$T/archive.err") || RUN_RC=$?
+}
+t_archive() {
+	fresh archive
+	gh_stub
+	cd "$F"
+	# Under npm older than 11.5.1, follow.sh refuses every command (asserted by run); the rest needs a newer npm.
+	run archive
+	past_gate || return 0
+	local sha d integ tgz=$T/archive/pack/pi-provimux-105.0.1.tgz dest=$T/archive/dest other
+	sha=$(git rev-parse HEAD)
+	pack_commit "$T/archive/pack"
+	yes_ test -f "$tgz"
+	integ=$(sri "$tgz")
+	d=$(serve_archive publish-archive "$tgz")
+	# The tested archive: taken, and its path alone on standard output.
+	archive_run 4242 "$d" "$integ" "$sha" 105.0.1 "$dest"
+	eq "$RUN_RC" 0 "the tested archive is taken: $(cat "$T/archive.err")"
+	eq "$RUN_OUT" "$dest/pi-provimux-105.0.1.tgz" "standard output is exactly its path"
+	yes_ cmp -s "$tgz" "$dest/pi-provimux-105.0.1.tgz"
+	# A digest mismatch refuses: the recorded sha512 is another archive's. Nothing is written.
+	archive_run 4242 "$d" "$(fake_sri other)" "$sha" 105.0.1 "$dest-2"
+	eq "$RUN_RC" 4 "a digest mismatch refuses"
+	has "$(cat "$T/archive.err")" "is not the archive the test job recorded" "says so"
+	eq "$RUN_OUT" "" "nothing on standard output"
+	yes_ test ! -e "$dest-2"
+	# The same files, compressed again (another npm, another gzip): another sha512, refused.
+	mkdir -p "$T/archive/re"
+	(cd "$T/archive/re" && tar xzf "$tgz" && tar cf - package | gzip -9 >pi-provimux-105.0.1.tgz)
+	d=$(serve_archive publish-archive "$T/archive/re/pi-provimux-105.0.1.tgz")
+	archive_run 4242 "$d" "$integ" "$sha" 105.0.1 "$dest-3"
+	eq "$RUN_RC" 4 "the same files packed again: refused"
+	# The artifact must be what the test job uploaded: its digest, its name, one file.
+	d=$(serve_archive publish-archive "$tgz")
+	archive_run 4242 "$(printf '%064d' 0)" "$integ" "$sha" 105.0.1 "$dest-4"
+	eq "$RUN_RC" 1 "another artifact digest: refused"
+	d=$(serve_archive follow-candidate "$tgz")
+	archive_run 4242 "$d" "$integ" "$sha" 105.0.1 "$dest-5"
+	eq "$RUN_RC" 1 "an artifact of another name: refused"
+	printf 'x\n' >"$T/archive/extra.txt"
+	d=$(serve_archive publish-archive "$tgz" "$T/archive/extra.txt")
+	archive_run 4242 "$d" "$integ" "$sha" 105.0.1 "$dest-6"
+	eq "$RUN_RC" 4 "an artifact with another file: refused"
+	# An archive whose recorded sha512 matches, but whose files are not the commit's: refused by the comparison.
+	change extensions/fork.ts 'export const fork = 2;' "fix: fork 2"
+	other=$(git rev-parse HEAD)
+	git checkout -q "$sha"
+	printf 'export const fork = 3;\n' >extensions/fork.ts
+	git add -A && commit "not on main"
+	pack_commit "$T/archive/pack3"
+	git checkout -q main
+	d=$(serve_archive publish-archive "$T/archive/pack3/pi-provimux-105.0.1.tgz")
+	archive_run 4242 "$d" "$(sri "$T/archive/pack3/pi-provimux-105.0.1.tgz")" "$other" 105.0.1 "$dest-7"
+	eq "$RUN_RC" 4 "files other than the commit's: refused"
+	has "$(cat "$T/archive.err")" "does not ship exactly the files npm packs from" "says so"
+	yes_ test ! -e "$dest-7"
 }
 
 t_plan() {
@@ -2088,7 +2217,7 @@ t_npm_gate() {
 build_fixture >/dev/null
 ALL='numbers clean rerun waiting states conflict manifest_conflict manifest_merge refusals shape readme report plan
 f2_release f3_strings f3_handoff f3_links f3_checker f4_deps f4_dev_lands f5_paths f5_pack f5_load f5_order f6_refs f8_recovery
-f9_issues f10_publish f10_land f11_mirror workflows f12_history npm_boundary npm_gate'
+f9_issues f10_publish f10_land f11_mirror workflows f12_history npm_boundary npm_gate archive'
 # shellcheck disable=SC2086 # the names
 [[ $# -gt 0 ]] || set -- $ALL
 for t in "$@"; do

@@ -24,6 +24,9 @@
 #   follow.sh recheck MAIN R                the guard and the release binding again, on what land is given
 #   follow.sh land STATE MAIN [R]           checks, pushes R to main without force, starts publish.yml (DRY_RUN)
 #   follow.sh plan                          publish.yml's publish guard (4.2) on HEAD
+#   follow.sh archive ID DIGEST INTEGRITY SHA VERSION DEST
+#                                           publish.yml's tested archive, by its artifact's id and digest: its
+#                                           sha512 is INTEGRITY and it ships exactly SHA's files; copied to DEST
 #   follow.sh tag VERSION SHA PUBLISHED     publish.yml's tag v<VERSION> and GitHub release (DRY_RUN)
 #
 # The scripts that merge are run from outside the tree they merge (merge and stamp refuse otherwise).
@@ -898,21 +901,68 @@ cmd_prepare() {
 # --- the candidate between jobs ----------------------------------------------------------------------------------
 # fetch-candidate ID DIGEST: prepare's artifact (name follow-candidate) of this run, by the id and digest prepare
 # output; checks it, fetches the bundle into refs/follow/candidate and prints the commit.
-cmd_fetch_candidate() {
-	local id=$1 digest=$2 run=${GITHUB_RUN_ID:?} got
-	[[ $id =~ ^[0-9]{1,20}$ && $digest =~ ^(sha256:)?[0-9a-f]{64}$ ]] || die "fetch-candidate: not an artifact id and digest"
+# fetch_artifact NAME ID DIGEST: this run's artifact NAME, by the id and digest the job that made it output, unzipped
+# into $TMP/a (a new folder). Dies unless the API says it is NAME of this run with that digest, and the download
+# has that digest.
+fetch_artifact() {
+	local name=$1 id=$2 digest=$3 run=${GITHUB_RUN_ID:?} got
+	[[ $id =~ ^[0-9]{1,20}$ && $digest =~ ^(sha256:)?[0-9a-f]{64}$ ]] || die "$name: not an artifact id and digest"
 	digest="sha256:${digest#sha256:}"
 	gh api "repos/$REPO/actions/artifacts/$id" |
-		jq -e --arg run "$run" --arg d "$digest" '(.workflow_run.id | tostring) == $run and .name == "follow-candidate" and (.expired | not) and .digest == $d' >/dev/null ||
-		die "artifact $id is not follow-candidate of run $run with $digest"
+		jq -e --arg run "$run" --arg n "$name" --arg d "$digest" '(.workflow_run.id | tostring) == $run and .name == $n and (.expired | not) and .digest == $d' >/dev/null ||
+		die "artifact $id is not $name of run $run with $digest"
 	gh api "repos/$REPO/actions/artifacts/$id/zip" >"$TMP/a.zip" || die "cannot download artifact $id"
 	got=$( (sha256sum "$TMP/a.zip" 2>/dev/null || shasum -a 256 "$TMP/a.zip") | cut -d' ' -f1)
 	[[ "sha256:$got" == "$digest" ]] || die "artifact $id downloads as sha256:$got, not $digest"
+	rm -rf "${TMP:?}/a"
 	mkdir -p "$TMP/a"
 	unzip -q -o "$TMP/a.zip" -d "$TMP/a"
+}
+
+cmd_fetch_candidate() {
+	fetch_artifact follow-candidate "$1" "$2"
 	git bundle verify -q "$TMP/a/candidate.bundle" >/dev/null 2>&1 || die "the candidate bundle does not verify against this repository"
 	git fetch -q "$TMP/a/candidate.bundle" "+$CANDIDATE_REF:$CANDIDATE_REF"
 	git rev-parse "$CANDIDATE_REF"
+}
+
+# --- archive (publish.yml) ---------------------------------------------------------------------------------------
+# archive ID DIGEST INTEGRITY SHA VERSION DEST: the archive publish.yml's test job packed, loaded and checked, taken
+# from its artifact (publish-archive) by id and digest. It must be one file, pi-provimux-VERSION.tgz, whose sha512 is
+# INTEGRITY (what the test job recorded before any dependency code ran), and it must ship exactly the files npm
+# packs from SHA, each with SHA's bytes (tarball.mjs compare, as for the original's releases, 2.1). Copies it to
+# DEST/pi-provimux-VERSION.tgz and prints that path, alone, on standard output. Exit 4 when it refuses.
+cmd_archive() {
+	local id=${1:-} digest=${2:-} integ=${3:-} sha=${4:-} v=${5:-} dest=${6:-} rc=0 f files
+	[[ $# -eq 6 ]] || die "archive: ID DIGEST INTEGRITY SHA VERSION DEST"
+	[[ ${GITHUB_REF:-refs/heads/main} == refs/heads/main ]] || die "archive runs on refs/heads/main only"
+	[[ $integ =~ ^sha512-[A-Za-z0-9+/]{86}==$ ]] || die "archive: INTEGRITY is not a sha512 integrity"
+	[[ $sha =~ ^[0-9a-f]{40}$ ]] || die "archive: SHA is not a commit id"
+	is_plain "$v" || die "archive: VERSION $(shown "$v") is not a plain version"
+	[[ -n $dest && ! -e $dest/$PKG-$v.tgz ]] || die "archive: DEST is empty or already has the archive"
+	git cat-file -e "$sha^{commit}" 2>/dev/null || die "archive: $sha is not in this repository"
+	fetch_artifact publish-archive "$id" "$digest"
+	files=$(cd "$TMP/a" && find . -mindepth 1 | sed 's#^\./##' | LC_ALL=C sort)
+	if [[ $files != "$PKG-$v.tgz" ]] || [[ -L $TMP/a/$PKG-$v.tgz || ! -f $TMP/a/$PKG-$v.tgz ]]; then
+		say "refused: the artifact holds $(shown "$(tr '\n' ' ' <<<"$files")"), not the one file $PKG-$v.tgz" >&2
+		return 4
+	fi
+	f=$TMP/a/$PKG-$v.tgz
+	if ! node "$HERE/tarball.mjs" verify "$f" "$integ" >&2; then
+		say "refused: $PKG-$v.tgz is not the archive the test job recorded ($integ)" >&2
+		return 4
+	fi
+	ships_of "$sha" >&2 || rc=$?
+	if ((rc == 0)); then node "$HERE/tarball.mjs" compare "$f" "$sha" "$TMP/ships" >&2 || rc=$?; fi
+	if ((rc == 4)); then
+		say "refused: $PKG-$v.tgz does not ship exactly the files npm packs from $sha, with its bytes" >&2
+		return 4
+	elif ((rc != 0)); then
+		die "archive: the comparison with $sha failed"
+	fi
+	mkdir -p "$dest"
+	cp "$f" "$dest/$PKG-$v.tgz"
+	printf '%s\n' "$dest/$PKG-$v.tgz"
 }
 
 # --- land (follow.yml) -------------------------------------------------------------------------------------------
@@ -1444,6 +1494,7 @@ guard) cmd_guard "$@" ;;
 recheck) cmd_recheck "$@" ;;
 prepare) cmd_prepare ;;
 fetch-candidate) cmd_fetch_candidate "$@" ;;
+archive) cmd_archive "$@" ;;
 land) cmd_land "$@" ;;
 plan) cmd_plan ;;
 tag) cmd_tag "$@" ;;

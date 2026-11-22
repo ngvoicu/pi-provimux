@@ -5,9 +5,9 @@
 # Started by a push to main (the owner's own releases), or by follow.yml and by hand (workflow_dispatch:
 # gh workflow run publish.yml -R ngvoicu/pi-provimux -f dry_run=no).
 #
-# DRY RUN. Until the owner's one-time npm steps are done (docs/FOLLOWING.md 4.4), "publish" packs without
-# publishing (npm pack --dry-run: no OIDC exchange, nothing uploaded), "tag" only says what it would do, and no issue
-# is closed. A push takes the default below; a run by hand can choose. To switch it on, change 'yes' to 'no' in both
+# DRY RUN. Until the owner's one-time npm steps are done (docs/FOLLOWING.md 4.4), "publish" runs npm publish
+# --dry-run on the tested archive with the OIDC request variables removed (no token exchange, nothing uploaded),
+# "tag" only says what it would do, and no issue is closed. A push takes the default below; a run by hand can choose. To switch it on, change 'yes' to 'no' in both
 # places marked "the switch" (and the same in follow.yml).
 #
 # Every job runs on GitHub only and from refs/heads/main only, checked exactly by the shell before anything else;
@@ -18,9 +18,11 @@
 #            the tarball
 #   test     npm ci, the packed package loaded by pi (load.mjs), npm run check, in a container without the runner's
 #            credentials, on a tree written out by git (no .git, nothing a later step uses); first on the lockfile's
-#            pi 1.3.0, then again on pi 1.6.0, installed --no-save over it
-#   publish  a clean checkout; in one step, main checked to be that commit and then npm publish --ignore-scripts;
-#            no npm ci, no script, no build; id-token: write and the environment npm, nothing else
+#            pi 1.3.0, then again on pi 1.6.0, installed --no-save over it. The archive it packs, loads and checks
+#            is recorded (sha512) and uploaded (publish-archive) before any dependency code runs
+#   publish  that very archive (follow.sh archive: by the artifact's id and digest, its sha512 the recorded one,
+#            its files exactly the commit's), then, in one step, main checked to be that commit and npm publish
+#            --ignore-scripts of the archive; no npm ci, no script, no pack; id-token: write and the environment npm
 #   tag      v<version> at the published commit of the live main, and the GitHub release; environment main-only
 #   notify   the issue "publish: <version> — failed", or closes it once npm shows the version (never in a dry run)
 name: publish
@@ -86,6 +88,11 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    # The archive this job tests is the one publish uploads: its artifact, and its sha512 taken before npm ci.
+    outputs:
+      archive_id: ${{ steps.upload.outputs.artifact-id }}
+      archive_digest: ${{ steps.upload.outputs.artifact-digest }}
+      integrity: ${{ steps.archive.outputs.integrity }}
     steps:
       - name: Only refs/heads/main
         run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
@@ -114,6 +121,32 @@ jobs:
           docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
           -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack" -w /w "$NODE_IMAGE"
           npm pack --ignore-scripts --pack-destination /pack
+      # What publish will upload, fixed before any dependency code runs: only npm, in the container above, has written
+      # it. Its sha512 is this job's output, and a copy, in a folder no container ever sees, is uploaded as the
+      # artifact publish-archive. The steps below load and check the same bytes (/pack, read-only).
+      - name: Record the tested archive
+        id: archive
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          set -- "$RUNNER_TEMP"/pack/*
+          [ "$#" -eq 1 ] && [ -f "$1" ] && [ ! -L "$1" ] && [ "${1##*/}" = "pi-provimux-$VERSION.tgz" ] ||
+            { echo "the pack folder is not the one archive pi-provimux-$VERSION.tgz"; exit 1; }
+          mkdir "$RUNNER_TEMP/archive"
+          cp "$1" "$RUNNER_TEMP/archive/"
+          integrity="sha512-$(openssl dgst -sha512 -binary "$RUNNER_TEMP/archive/pi-provimux-$VERSION.tgz" | base64 -w0)"
+          [ "$integrity" = "sha512-$(openssl dgst -sha512 -binary "$1" | base64 -w0)" ] || { echo "the copy differs"; exit 1; }
+          echo "integrity=$integrity" >>"$GITHUB_OUTPUT"
+          echo "The tested archive: pi-provimux-$VERSION.tgz, $integrity" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload the tested archive
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: publish-archive
+          path: ${{ runner.temp }}/archive/
+          if-no-files-found: error
+          retention-days: 7
       # The container gets the tree and the network, and none of the runner's variables, tokens or caches.
       - name: npm ci
         run: >-
@@ -164,6 +197,8 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      # To read the test job's artifact by its id (follow.sh archive).
+      actions: read
     steps:
       - name: Only refs/heads/main
         run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
@@ -181,14 +216,34 @@ jobs:
           v=$(npm --version)
           echo "node $(node --version), npm $v"
           [ "$(printf '%s\n%s\n' 11.5.1 "$v" | sort -V | head -n 1)" = 11.5.1 ] || { echo "npm $v is older than 11.5.1"; exit 1; }
-      # One step: main is this commit right before the upload.
-      - name: Check main, then npm publish
+      # The archive the test job packed, loaded and checked, never a fresh pack (npm versions compress differently):
+      # by its artifact's id and digest, its sha512 the one recorded before any dependency code ran, its files exactly
+      # those npm packs from the commit, with the commit's bytes. Written outside the checkout.
+      - name: The tested archive
         env:
+          GH_TOKEN: ${{ github.token }}
+          ID: ${{ needs.test.outputs.archive_id }}
+          DIGEST: ${{ needs.test.outputs.archive_digest }}
+          INTEGRITY: ${{ needs.test.outputs.integrity }}
           SHA: ${{ needs.plan.outputs.sha }}
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
+          cp -R .github/follow "$RUNNER_TEMP/follow"
+          FOLLOW_OUT="$RUNNER_TEMP/out" bash "$RUNNER_TEMP/follow/follow.sh" archive \
+            "$ID" "$DIGEST" "$INTEGRITY" "$SHA" "$VERSION" "$RUNNER_TEMP/release"
+      # One step: the archive is the tested one and main is this commit, right before the upload.
+      - name: Check main, then npm publish
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          INTEGRITY: ${{ needs.test.outputs.integrity }}
+        run: |
+          set -euo pipefail
           fail() { echo "$*"; exit 1; }
+          archive="$RUNNER_TEMP/release/pi-provimux-$VERSION.tgz"
+          [ -f "$archive" ] && [ ! -L "$archive" ] || fail "no tested archive"
+          [ "sha512-$(openssl dgst -sha512 -binary "$archive" | base64 -w0)" = "$INTEGRITY" ] || fail "the archive is not the tested one"
           [ "$(git rev-parse HEAD)" = "$SHA" ] || fail "the checkout is not $SHA"
           [ -z "$(git status --porcelain --ignored)" ] || fail "the checkout is not clean"
           [ -z "$(git ls-files -- '*.npmrc' '.npmrc')" ] || fail "an .npmrc"
@@ -196,12 +251,15 @@ jobs:
           live=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)
           [ "$live" = "$SHA" ] || fail "main is $live now, not $SHA: nothing is published from an older main"
           if [ "$DRY_RUN" != no ]; then
-            npm pack --dry-run --ignore-scripts
-            echo "Dry run: would publish pi-provimux $VERSION." | tee -a "$GITHUB_STEP_SUMMARY"
+            # The same command on the same archive, as a dry run. npm exchanges the OIDC token before it looks at
+            # --dry-run; without the request variables it skips that exchange, and a dry run uploads nothing.
+            env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u NPM_ID_TOKEN \
+              npm publish --dry-run --ignore-scripts --access public --registry https://registry.npmjs.org/ "$archive"
+            echo "Dry run: would publish pi-provimux $VERSION, $INTEGRITY." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/
-          echo "Published pi-provimux $VERSION." | tee -a "$GITHUB_STEP_SUMMARY"
+          npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/ "$archive"
+          echo "Published pi-provimux $VERSION, $INTEGRITY." | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The tag v<version> at the published commit and the GitHub release (follow.sh tag): the commit must be in the
   # live main; when npm already had the version, the commit npm recorded (gitHead) or the existing tag; otherwise the
