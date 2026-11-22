@@ -1,75 +1,255 @@
-# Publishes pi-provimux to npm when a tag v<version> is pushed. npm's trusted publisher for pi-provimux names this
-# file and the environment npm: the publish job gets a short-lived OIDC token, with no npm token or secret anywhere.
+# Publishes the version main names, if npm does not have it (docs/FOLLOWING.md, 4.2). It reads state, not events,
+# so a rerun is always safe. The only workflow npm trusts: the trusted publisher of pi-provimux names this file and
+# the environment npm. There is no token and no secret anywhere.
 #
-#   test     npm ci and npm run check, then again with pi 1.6.0; read-only, no environment, no secrets
-#   publish  refuses unless the tag's commit is on main and the tag is v + package.json's version; then
-#            npm publish --provenance, with nothing installed and no package script run
-# Both run on GitHub only: a mirror of the repository on another forge may read .github/workflows too.
+# Started by a push to main (the owner's own releases), or by follow.yml and by hand (workflow_dispatch:
+# gh workflow run publish.yml -R ngvoicu/pi-provimux -f dry_run=no).
+#
+# DRY RUN. Until the owner's one-time npm steps are done (docs/FOLLOWING.md 4.4), "publish" packs without
+# publishing (npm pack --dry-run: no OIDC exchange, nothing uploaded), "tag" only says what it would do, and no issue
+# is closed. A push takes the default below; a run by hand can choose. To switch it on, change 'yes' to 'no' in both
+# places marked "the switch" (and the same in follow.yml).
+#
+# Every job runs on GitHub only and from refs/heads/main only, checked exactly by the shell before anything else;
+# every job that can write or holds the OIDC token is in an environment GitHub admits from the branch main alone
+# (docs/FOLLOWING.md 6.3): npm for publish, main-only for tag and notify.
+#   plan     the publish guard (follow.sh plan): the version named first, no .npmrc, then npm view against the
+#            public registry from a neutral folder, npm pack --dry-run --ignore-scripts, the registered extensions in
+#            the tarball
+#   test     npm ci, the packed package loaded by pi (load.mjs), npm run check, in a container without the runner's
+#            credentials, on a tree written out by git (no .git, nothing a later step uses)
+#   publish  a clean checkout; in one step, main checked to be that commit and then npm publish --ignore-scripts;
+#            no npm ci, no script, no build; id-token: write and the environment npm, nothing else
+#   tag      v<version> at the published commit of the live main, and the GitHub release; environment main-only
+#   notify   the issue "publish: <version> — failed", or closes it once npm shows the version (never in a dry run)
 name: publish
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: npm pack --dry-run, no tag, no release'
+        type: choice
+        options: ['yes', 'no']
+        # The switch (1 of 2).
+        default: 'yes'
+
+# One publish at a time, never cancelled midway.
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 permissions: {}
 
+env:
+  # The switch (2 of 2): what a push does.
+  DRY_RUN: ${{ inputs.dry_run || 'yes' }}
+  NODE_IMAGE: node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+
 jobs:
-  test:
+  plan:
     if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+      publish: ${{ steps.plan.outputs.publish }}
+      published: ${{ steps.plan.outputs.published }}
+    steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: The publish guard
+        id: plan
+        run: |
+          cp -R .github/follow "$RUNNER_TEMP/follow"
+          FOLLOW_OUT="$RUNNER_TEMP/out" bash "$RUNNER_TEMP/follow/follow.sh" plan
+
+  test:
+    needs: plan
+    if: github.server_url == 'https://github.com' && needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24'
-          package-manager-cache: false
-      - run: npm ci
-      - name: npm run check, on pi 1.3.0 (package-lock.json)
-        run: npm run check
-      # The same checks on pi 1.6.0, which does some of the extension's Codex work itself (test/pi-ai-version.ts).
-      - name: npm run check, on pi 1.6.0
+      # The commit's tree written out by git (checkout-index: no .git, no export attribute), and this run's scripts.
+      # The container sees these two folders only, never the workspace, whose .git the checkout's cleanup opens.
+      - name: The commit's tree (git only)
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
         run: |
-          npm install --no-save --ignore-scripts @earendil-works/pi-ai@1.6.0 @earendil-works/pi-coding-agent@1.6.0
-          npm ls @earendil-works/pi-ai @earendil-works/pi-coding-agent
-          npm run check
+          set -euo pipefail
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "plan named no commit"; exit 1; }
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git read-tree "$SHA"
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git checkout-index -a --prefix="$RUNNER_TEMP/tree/"
+          cp -R .github/follow "$RUNNER_TEMP/follow"
+          mkdir "$RUNNER_TEMP/pack"
+      # What publication packs: the clean export, packed before anything is installed into it, into a folder of its
+      # own. The loader gets this archive read-only, so the package it loads is the one npm publish builds from the
+      # same commit, never one an install wrote into.
+      - name: Pack the clean tree
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack" -w /w "$NODE_IMAGE"
+          npm pack --ignore-scripts --pack-destination /pack
+      # The container gets the tree and the network, and none of the runner's variables, tokens or caches.
+      - name: npm ci
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm ci
+      # The clean tree's archive, loaded by pi's own loader from a consumer folder of its own (load.mjs); the
+      # installed tree gives only pi itself, through the package's peers.
+      - name: The packed package loads
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack:ro"
+          -v "$RUNNER_TEMP/follow:/follow:ro" -w /w "$NODE_IMAGE"
+          sh -c 'set -- /pack/*.tgz && [ "$#" -eq 1 ] && [ -f "$1" ] && node /follow/load.mjs "$1" /w/node_modules'
+      - name: npm run check
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm run check
 
   publish:
-    needs: test
-    if: github.server_url == 'https://github.com'
+    needs: [plan, test]
+    if: github.server_url == 'https://github.com' && needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The trusted publisher names this environment; GitHub admits only main to it (docs/FOLLOWING.md 6.3).
     environment: npm
+    # main is written by land, publish and tag one at a time.
+    concurrency:
+      group: pi-provimux-main
+      cancel-in-progress: false
     permissions:
       id-token: write
       contents: read
     steps:
-      # The whole history, so that origin/main is there to check the tag against.
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      # No registry-url: setup-node would write an .npmrc with an _authToken, which npm would use instead of OIDC.
+      # No registry-url: setup-node would write an .npmrc whose _authToken npm would try instead of OIDC.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           package-manager-cache: false
-      - name: Refuse unless the tag is v + package.json's version, at a commit on main, with npm 11.5.1 or later
+      - name: The npm CLI (trusted publishing needs 11.5.1 or later)
+        run: |
+          v=$(npm --version)
+          echo "node $(node --version), npm $v"
+          [ "$(printf '%s\n%s\n' 11.5.1 "$v" | sort -V | head -n 1)" = 11.5.1 ] || { echo "npm $v is older than 11.5.1"; exit 1; }
+      # One step: main is this commit right before the upload.
+      - name: Check main, then npm publish
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
-          fail() { echo "::error::$*"; exit 1; }
-          [[ $GITHUB_REF == refs/tags/v* ]] || fail "$GITHUB_REF is not a tag v*"
-          version=$(jq -r .version package.json)
-          [ "$GITHUB_REF_NAME" = "v$version" ] || fail "the tag $GITHUB_REF_NAME is not v$version (package.json)"
-          commit=$(git rev-parse --verify "$GITHUB_SHA^{commit}") || fail "$GITHUB_SHA names no commit"
-          [ "$(git rev-parse HEAD)" = "$commit" ] || fail "the checkout is not $commit"
-          git merge-base --is-ancestor "$commit" origin/main || fail "$commit is not on origin/main"
+          fail() { echo "$*"; exit 1; }
+          [ "$(git rev-parse HEAD)" = "$SHA" ] || fail "the checkout is not $SHA"
           [ -z "$(git status --porcelain --ignored)" ] || fail "the checkout is not clean"
-          v=$(npm --version)
-          [ "$(printf '%s\n%s\n' 11.5.1 "$v" | sort -V | head -n 1)" = 11.5.1 ] || fail "npm $v is older than 11.5.1"
-          echo "pi-provimux $version from $commit, node $(node --version), npm $v"
-      - run: npm publish --provenance --access public --ignore-scripts
+          [ -z "$(git ls-files -- '*.npmrc' '.npmrc')" ] || fail "an .npmrc"
+          [ "$(jq -r .version package.json)" = "$VERSION" ] || fail "package.json does not say $VERSION"
+          live=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)
+          [ "$live" = "$SHA" ] || fail "main is $live now, not $SHA: nothing is published from an older main"
+          if [ "$DRY_RUN" != no ]; then
+            npm pack --dry-run --ignore-scripts
+            echo "Dry run: would publish pi-provimux $VERSION." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/
+          echo "Published pi-provimux $VERSION." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The tag v<version> at the published commit and the GitHub release (follow.sh tag): the commit must be in the
+  # live main; when npm already had the version, the commit npm recorded (gitHead) or the existing tag; otherwise the
+  # job fails and notify says so.
+  tag:
+    needs: [plan, publish]
+    if: >-
+      always() && github.server_url == 'https://github.com' && needs.plan.result == 'success' &&
+      (needs.publish.result == 'success' || needs.plan.outputs.published == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # GitHub admits only the branch main to this environment (docs/FOLLOWING.md 6.3).
+    environment: main-only
+    concurrency:
+      group: pi-provimux-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          PUBLISHED: ${{ needs.plan.outputs.published }}
+        run: FOLLOW_OUT="$RUNNER_TEMP/out" bash .github/follow/follow.sh tag "$VERSION" "$SHA" "$PUBLISHED"
+
+  notify:
+    needs: [plan, test, publish, tag]
+    if: always() && github.server_url == 'https://github.com' && needs.plan.outputs.version != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: main-only
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Only refs/heads/main
+        run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/follow
+          persist-credentials: false
+      # follow.sh needs npm 11.5.1 or later (docs/FOLLOWING.md 2.1): Node 24's.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: The publish issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          RESULT: >-
+            ${{ (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+            && format('plan {0}, test {1}, publish {2}, tag {3}', needs.plan.result, needs.test.result, needs.publish.result, needs.tag.result)
+            || 'success' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: FOLLOW_OUT="$RUNNER_TEMP/out" bash .github/follow/follow.sh report-publish "$VERSION" "$RESULT"
