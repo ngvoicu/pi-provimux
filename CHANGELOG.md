@@ -1,6 +1,6 @@
 # Changelog
 
-## 105.0.1
+## 105.0.1 - 2026-11-22
 
 The extension is now **pi-provimux**, Provimux's pi extension, a fork of
 [router-for-me/pi-cliproxyapi-provider](https://github.com/router-for-me/pi-cliproxyapi-provider). It works with

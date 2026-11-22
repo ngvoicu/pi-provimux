@@ -64,6 +64,9 @@ pi install /absolute/path/to/pi-provimux
 pi -e /absolute/path/to/pi-provimux
 ```
 
+The version names the original release it is built on, then a count of its own: 105.0.1 is pi-provimux's first
+release on the original's 1.5.0 (major × 100 + minor, then patch).
+
 It needs pi 0.99.0 or newer: the Codex WebSocket reports which kind of account answered through pi's
 `provider_stream_event`, which older pi does not have.
 
