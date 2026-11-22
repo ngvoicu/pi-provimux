@@ -32,7 +32,10 @@ jobs:
           set -eu
           github=${FOLLOW_MIRROR_SOURCE:-https://github.com/ngvoicu/pi-provimux.git}
           git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
-          git fetch --no-tags "$github" "+refs/heads/main:refs/remotes/github/main" "+refs/tags/v*:refs/remotes/github-tags/v*"
+          # A fresh inventory of GitHub's tags every run, also in a reused workspace: the tracking namespace is
+          # emptied first and the fetch prunes it, so a tag gone from GitHub is not remembered from an earlier run.
+          git for-each-ref --format='delete %(refname)' refs/remotes/github-tags/ | git update-ref --stdin
+          git fetch --no-tags --prune "$github" "+refs/heads/main:refs/remotes/github/main" "+refs/tags/v*:refs/remotes/github-tags/v*"
           here=$(git rev-parse --verify "refs/remotes/origin/main^{commit}")
           there=$(git rev-parse --verify "refs/remotes/github/main^{commit}")
           echo "NAS main: $here"

@@ -11,11 +11,12 @@
 # it on, change 'yes' to 'no' in both places marked "the switch" (and the same in publish.yml), in one commit.
 #
 # Trust (docs/FOLLOWING.md 6.1): every job runs on GitHub only, from refs/heads/main only (checked exactly, by the
-# shell, before anything else), checks out this run's own commit and runs its own .github/follow scripts. Only the
-# two test jobs run the original's or the candidate's code, and they run it in a container that has none of the
-# runner's credentials; nothing they write is read later: "land" takes the candidate from prepare's artifact by the
-# id and digest prepare output, checks it again by content, and takes from the test jobs only their conclusion. No
-# job uses a cache.
+# shell, before anything else), checks out this run's own commit and runs its own .github/follow scripts. The jobs
+# that can write (land, report) are in the environment main-only, which GitHub admits from the branch main alone
+# (6.3). Only the two test jobs run the original's or the candidate's code, and they run it in a container that has
+# none of the runner's credentials and sees only a tree written out by git (no .git, nothing a later step uses);
+# nothing they write is read later: "land" takes the candidate from prepare's artifact by the id and digest prepare
+# output, checks it again by content, and takes from the test jobs only their conclusion. No job uses a cache.
 name: follow
 
 on:
@@ -85,6 +86,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      # Both ways: with GITHUB_ACTIONS unset and set to true, side by side.
       - name: Self-test of the follow scripts and workflows (throwaway repositories)
         run: bash .github/follow/test.sh
       - name: The follow scripts, outside the tree they merge
@@ -113,8 +115,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The merged tree: npm ci and npm run check, in a container. Runs the original's and the fork's code and their dev
-  # dependencies.
+  # The merged tree: npm ci, the packed package loaded by pi, and npm run check, in a container. Runs the original's
+  # and the fork's code and their dev dependencies. The container sees the tree (no .git) and this run's own scripts,
+  # read-only; neither the workspace nor anything a later step reads.
   test-candidate:
     name: test (candidate)
     needs: prepare
@@ -146,11 +149,18 @@ jobs:
           [ "$got" = "$WANT" ] || { echo "the artifact holds $got, prepare made $WANT"; exit 1; }
           GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git read-tree "$got"
           GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git checkout-index -a --prefix="$RUNNER_TEMP/tree/"
+          cp -R .github/follow "$RUNNER_TEMP/follow"
       # The container gets the tree and the network, and none of the runner's variables, tokens or caches.
       - name: npm ci
         run: >-
           docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
           -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm ci
+      # What npm would publish, loaded by pi's own loader from a consumer folder of its own (load.mjs).
+      - name: The packed package loads
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -v "$RUNNER_TEMP/follow:/follow:ro" -w /w "$NODE_IMAGE"
+          sh -c 'mkdir /tmp/pack && npm pack --ignore-scripts --pack-destination /tmp/pack >/dev/null && node /follow/load.mjs /tmp/pack/*.tgz /w/node_modules'
       - name: npm run check
         run: >-
           docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
@@ -201,6 +211,8 @@ jobs:
       needs.prepare.outputs.fork_published == 'false'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # GitHub admits only the branch main to this environment (docs/FOLLOWING.md 6.3).
+    environment: main-only
     # main is written by land, publish and tag one at a time.
     concurrency:
       group: pi-provimux-main
@@ -242,6 +254,7 @@ jobs:
     if: always() && github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: main-only
     permissions:
       contents: read
       actions: read

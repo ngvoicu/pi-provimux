@@ -10,13 +10,17 @@
 # is closed. A push takes the default below; a run by hand can choose. To switch it on, change 'yes' to 'no' in both
 # places marked "the switch" (and the same in follow.yml).
 #
-# Every job runs on GitHub only and from refs/heads/main only, checked exactly by the shell before anything else.
-#   plan     the publish guard (follow.sh plan): no .npmrc first, then npm view against the public registry from a
-#            neutral folder, npm pack --dry-run --ignore-scripts, the files pi loads in the tarball
-#   test     npm ci, npm run check on that commit, in a container without the runner's credentials
+# Every job runs on GitHub only and from refs/heads/main only, checked exactly by the shell before anything else;
+# every job that can write or holds the OIDC token is in an environment GitHub admits from the branch main alone
+# (docs/FOLLOWING.md 6.3): npm for publish, main-only for tag and notify.
+#   plan     the publish guard (follow.sh plan): the version named first, no .npmrc, then npm view against the
+#            public registry from a neutral folder, npm pack --dry-run --ignore-scripts, the registered extensions in
+#            the tarball
+#   test     npm ci, the packed package loaded by pi (load.mjs), npm run check, in a container without the runner's
+#            credentials, on a tree written out by git (no .git, nothing a later step uses)
 #   publish  a clean checkout; in one step, main checked to be that commit and then npm publish --ignore-scripts;
 #            no npm ci, no script, no build; id-token: write and the environment npm, nothing else
-#   tag      v<version> at the published commit of the live main, and the GitHub release; environment npm
+#   tag      v<version> at the published commit of the live main, and the GitHub release; environment main-only
 #   notify   the issue "publish: <version> — failed", or closes it once npm shows the version (never in a dry run)
 name: publish
 
@@ -86,17 +90,35 @@ jobs:
         run: '[ "$GITHUB_REF" = refs/heads/main ] || { echo "publish runs from refs/heads/main only"; exit 1; }'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.sha }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      # The commit's tree written out by git (checkout-index: no .git, no export attribute), and this run's scripts.
+      # The container sees these two folders only, never the workspace, whose .git the checkout's cleanup opens.
+      - name: The commit's tree (git only)
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "plan named no commit"; exit 1; }
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git read-tree "$SHA"
+          GIT_INDEX_FILE="$RUNNER_TEMP/tree.index" git checkout-index -a --prefix="$RUNNER_TEMP/tree/"
+          cp -R .github/follow "$RUNNER_TEMP/follow"
       # The container gets the tree and the network, and none of the runner's variables, tokens or caches.
       - name: npm ci
         run: >-
           docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
-          -e HOME=/tmp -e CI=true -v "$GITHUB_WORKSPACE:/w" -w /w "$NODE_IMAGE" npm ci
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm ci
+      # What npm would publish, loaded by pi's own loader from a consumer folder of its own (load.mjs).
+      - name: The packed package loads
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -v "$RUNNER_TEMP/follow:/follow:ro" -w /w "$NODE_IMAGE"
+          sh -c 'mkdir /tmp/pack && npm pack --ignore-scripts --pack-destination /tmp/pack >/dev/null && node /follow/load.mjs /tmp/pack/*.tgz /w/node_modules'
       - name: npm run check
         run: >-
           docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
-          -e HOME=/tmp -e CI=true -v "$GITHUB_WORKSPACE:/w" -w /w "$NODE_IMAGE" npm run check
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm run check
 
   publish:
     needs: [plan, test]
@@ -161,7 +183,8 @@ jobs:
       (needs.publish.result == 'success' || needs.plan.outputs.published == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: npm
+    # GitHub admits only the branch main to this environment (docs/FOLLOWING.md 6.3).
+    environment: main-only
     concurrency:
       group: pi-provimux-main
       cancel-in-progress: false
@@ -192,6 +215,7 @@ jobs:
     if: always() && github.server_url == 'https://github.com' && needs.plan.outputs.version != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: main-only
     permissions:
       contents: read
       issues: write

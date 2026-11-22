@@ -3,11 +3,35 @@
 # Tests of the follow scripts and workflows on throwaway repositories: an "original" with releases and npm tarballs,
 # a "fork" built on its 1.5.0, a stub npm registry (FOLLOW_NPM_DIR), a stub gh and a fake npm. Nothing leaves the
 # temporary folder; no network.
-#   bash .github/follow/test.sh            all
-#   bash .github/follow/test.sh clean …    only the named ones
-# FOLLOW_TEST_SCRIPTS (default: this folder) and FOLLOW_TEST_TREE (default: this repository) point the tests at
-# other scripts and another tree, e.g. an older revision's, to see what it fails.
+#   bash .github/follow/test.sh            all, twice side by side: with GITHUB_ACTIONS unset and with it true
+#   bash .github/follow/test.sh clean …    only the named ones, both ways
+# FOLLOW_TEST_ACTIONS=unset or =true runs one way only. FOLLOW_TEST_SCRIPTS (default: this folder) and
+# FOLLOW_TEST_TREE (default: this repository) point the tests at other scripts and another tree, e.g. an older
+# revision's, to see what it fails.
 set -euo pipefail
+
+# Both ways: the scripts behave differently inside GitHub Actions (runner commands), so every case runs with
+# GITHUB_ACTIONS unset and with GITHUB_ACTIONS=true, in two processes side by side.
+if [[ -z ${FOLLOW_TEST_ACTIONS:-} ]]; then
+	W=$(mktemp -d "${TMPDIR:-/tmp}/follow-test-ways.XXXXXX")
+	trap 'rm -rf "${W:?}"' EXIT
+	FOLLOW_TEST_ACTIONS='unset' bash "${BASH_SOURCE[0]}" "$@" >"$W/unset.log" 2>&1 &
+	p1=$!
+	FOLLOW_TEST_ACTIONS=true bash "${BASH_SOURCE[0]}" "$@" >"$W/true.log" 2>&1 &
+	p2=$!
+	rc=0
+	wait "$p1" || rc=1
+	wait "$p2" || rc=1
+	for w in unset true; do
+		echo "=== GITHUB_ACTIONS=$w"
+		cat "$W/$w.log"
+	done
+	exit "$rc"
+fi
+[[ $FOLLOW_TEST_ACTIONS == unset || $FOLLOW_TEST_ACTIONS == true ]] || {
+	echo "FOLLOW_TEST_ACTIONS is unset or true" >&2
+	exit 2
+}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPTS=${FOLLOW_TEST_SCRIPTS:-$HERE}
@@ -41,6 +65,10 @@ git config --global advice.detachedHead false
 git config --global protocol.file.allow always
 git config --global core.autocrlf false
 unset GITHUB_ACTIONS GITHUB_OUTPUT GITHUB_REF DRY_RUN
+if [[ $FOLLOW_TEST_ACTIONS == true ]]; then export GITHUB_ACTIONS=true; fi
+export npm_config_userconfig=$T/npmrc-user npm_config_globalconfig=$T/npmrc-global npm_config_update_notifier=false
+: >"$T/npmrc-user"
+: >"$T/npmrc-global"
 
 # Fixed dates: every commit one minute after the last.
 TICK=1795000000
@@ -77,13 +105,14 @@ npm_set() {
 	} >"$f"
 }
 
-# pack_release COMMIT VERSION [DIR]: npm's tarball of the original at COMMIT, as npm makes it (package/…, the
-# regular files of package.json, README.md, LICENSE and extensions/), into the stub registry.
+# pack_release COMMIT VERSION [DIR [SKIP]]: npm's tarball of the original at COMMIT, as npm makes it (package/…, the
+# regular files of package.json, README.md, LICENSE and extensions/, never an .npmrc or .npmignore), without the path
+# SKIP, into the stub registry.
 pack_release() {
-	local c=$1 v=$2 dir=${3:-$FOLLOW_NPM_DIR} tgz
+	local c=$1 v=$2 dir=${3:-$FOLLOW_NPM_DIR} skip=${4:-} tgz
 	mkdir -p "$dir"
 	tgz=$dir/_router-for-me_pi-cliproxyapi-provider@$v.tgz
-	git -C "$O" ls-tree -r "$c" | awk -F'\t' '$1 ~ /^100(644|755) / && ($2 ~ /^extensions\// || $2 == "package.json" || $2 == "README.md" || $2 == "LICENSE") { print $2 }' >"$T/pack.list"
+	git -C "$O" ls-tree -r "$c" | awk -F'\t' -v skip="$skip" '$1 ~ /^100(644|755) / && $2 != skip && $2 !~ /(^|\/)\.npm(rc|ignore)$/ && ($2 ~ /^extensions\// || $2 == "package.json" || $2 == "README.md" || $2 == "LICENSE") { print $2 }' >"$T/pack.list"
 	# shellcheck disable=SC2046 # one path per word: the fixture's names have no spaces
 	git -C "$O" archive --format=tar --prefix=package/ "$c" -- $(cat "$T/pack.list") | gzip -n >"$tgz"
 	jq -n --arg t "$tgz" --arg i "$(sri "$tgz")" '{tarball: $t, integrity: $i}' >"$dir/_router-for-me_pi-cliproxyapi-provider@$v.dist.json"
@@ -91,13 +120,15 @@ pack_release() {
 
 # --- the fixture --------------------------------------------------------------------------------------------------
 build_fixture() {
-	local o=$T/fixture/original f=$T/fixture/fork ia ib
+	local o=$T/fixture/original f=$T/fixture/fork ia ib ip iq
 	mkdir -p "$o"
 	cd "$o"
 	git init -q
 	mkdir -p extensions test
 	ia=$(fake_sri a)
 	ib=$(fake_sri b)
+	ip=$(fake_sri p)
+	iq=$(fake_sri q)
 	cat >package.json <<-'JSON'
 		{
 			"name": "@router-for-me/pi-cliproxyapi-provider",
@@ -111,6 +142,9 @@ build_fixture() {
 			},
 			"pi": {
 				"extensions": ["./extensions/index.ts"]
+			},
+			"peerDependencies": {
+				"p": "1.0.0"
 			},
 			"devDependencies": {
 				"a": "1.0.0",
@@ -130,6 +164,9 @@ build_fixture() {
 					"name": "@router-for-me/pi-cliproxyapi-provider",
 					"version": "1.4.0",
 					"license": "MIT",
+					"peerDependencies": {
+						"p": "1.0.0"
+					},
 					"devDependencies": {
 						"a": "1.0.0",
 						"b": "2.0.0"
@@ -147,6 +184,21 @@ build_fixture() {
 					"integrity": "$ib",
 					"dev": true,
 					"hasInstallScript": true
+				},
+				"node_modules/p": {
+					"version": "1.0.0",
+					"resolved": "https://registry.npmjs.org/p/-/p-1.0.0.tgz",
+					"integrity": "$ip",
+					"peer": true,
+					"dependencies": {
+						"q": "^1.0.0"
+					}
+				},
+				"node_modules/q": {
+					"version": "1.0.0",
+					"resolved": "https://registry.npmjs.org/q/-/q-1.0.0.tgz",
+					"integrity": "$iq",
+					"peer": true
 				}
 			}
 		}
@@ -232,6 +284,10 @@ change() { # change FILE TEXT MESSAGE, in the current repository
 run() { # run ARGS…: follow.sh in the current repository; output and exit code in RUN_OUT, RUN_RC
 	RUN_RC=0
 	RUN_OUT=$(bash "$FOLLOW" "$@" 2>&1) || RUN_RC=$?
+}
+runc() { # runc CMD…: any command; output and exit code in RUN_OUT, RUN_RC
+	RUN_RC=0
+	RUN_OUT=$("$@" 2>&1) || RUN_RC=$?
 }
 state() { jq -r '.state' "$OUT/result.json" 2>/dev/null || echo none; }
 field() { jq -r --arg k "$1" '.[$k] // "" | if type == "array" then .[] else tostring end' "$OUT/result.json" 2>/dev/null || true; }
@@ -476,7 +532,7 @@ t_refusals() {
 	refused newkey 'package.json: the original added `funding`' o_newkey
 	refused pi 'package.json: the original changed `pi`' o_pi
 	refused files 'package.json: the original changed `files`' o_files
-	refused resolved 'resolved is not a tarball address on the npm registry' o_resolved
+	refused resolved 'resolved is not https://registry.npmjs.org/a/-/a-1.0.0.tgz' o_resolved
 }
 
 # Candidates made wrong after the merge: the guard checks what it is given, not what prepare made.
@@ -592,6 +648,17 @@ t_f2_release() {
 	run prepare
 	eq "$(state)" refused "a tarball with a file the commit lacks: refused"
 	has "$(field reasons)" 'tarball: "extensions/extra.ts" is not in the commit' "says which file"
+	# A file the commit ships that npm's tarball lacks (the other way round).
+	fresh f2-lacks
+	change extensions/lib.ts 'export const x = 81;' "fix: x is 81"
+	release 1.5.1
+	cd "$O"
+	pack_release "$(git rev-parse HEAD)" 1.5.1 "$FOLLOW_NPM_DIR" extensions/lib.ts
+	cd "$F"
+	run prepare
+	eq "$(state)" refused "a tarball without a file the commit ships: refused"
+	has "$(field reasons)" 'tarball: the commit ships "extensions/lib.ts", npm'"'"'s tarball lacks it' "says which file"
+	no_bundle "lacks"
 	# The bytes are not what the registry's integrity says.
 	fresh f2-integrity
 	release 1.5.1
@@ -659,6 +726,33 @@ t_f3_strings() {
 	has "$(head -n 1 <<<"$RUN_OUT")" "::stop-commands::" "commands stopped first"
 }
 
+# The artifact hand-over: fetch-candidate prints exactly the commit on standard output, with GITHUB_ACTIONS unset
+# and true (the runner-command markers go to standard error).
+t_f3_handoff() {
+	fresh f3-handoff
+	gh_stub
+	change extensions/lib.ts 'export const x = 12;' "fix: x is 12"
+	release 1.5.1
+	run prepare
+	local r d z=$T/f3-handoff/zip out ga
+	r=$(field candidate)
+	mkdir -p "$z"
+	cp "$OUT/candidate.bundle" "$z/"
+	(cd "$z" && zip -q -X a.zip candidate.bundle)
+	d=$( (sha256sum "$z/a.zip" 2>/dev/null || shasum -a 256 "$z/a.zip") | cut -d' ' -f1)
+	cp "$z/a.zip" "$GH_DIR/artifact.zip"
+	jq -n --arg d "sha256:$d" '{workflow_run: {id: 777}, name: "follow-candidate", expired: false, digest: $d}' >"$GH_DIR/artifact.json"
+	git clone -q --no-local "$F" "$T/f3-handoff/land"
+	cd "$T/f3-handoff/land"
+	for ga in '' true; do
+		out=$(GITHUB_ACTIONS=$ga GITHUB_RUN_ID=777 FOLLOW_OUT=$T/f3-handoff/out-$ga PATH="$T/gh/bin:$PATH" bash "$FOLLOW" fetch-candidate 4242 "$d" 2>/dev/null) || true
+		eq "$out" "$r" "standard output is exactly the commit (GITHUB_ACTIONS=${ga:-unset})"
+	done
+	out=$(GITHUB_ACTIONS=true GITHUB_RUN_ID=777 FOLLOW_OUT=$T/f3-handoff/out-e PATH="$T/gh/bin:$PATH" bash "$FOLLOW" fetch-candidate 4242 "$d" 2>&1 >/dev/null) || true
+	has "$out" "::stop-commands::" "the commands are still stopped, on standard error"
+	cd "$F"
+}
+
 t_f3_links() {
 	fresh f3-links
 	printf 'outside\n' >"$T/victim"
@@ -696,20 +790,50 @@ t_f3_checker() {
 
 # --- finding 4: dependencies and install scripts -----------------------------------------------------------------
 t_f4_deps() {
+	local reach="the root's dependencies, optionalDependencies or peerDependencies reach it: users would get it"
 	refused devtodep 'package.json: the original added `dependencies`' o_pkg '.dependencies = {"a": .devDependencies.a} | del(.devDependencies.a)' "chore: a for users"
-	refused peerdep 'package.json: the original added `peerDependencies`' o_pkg '.peerDependencies = {"x": "*"}' "chore: a peer"
+	refused peerdep 'package.json: the original changed `peerDependencies`' o_pkg '.peerDependencies.x = "*"' "chore: a peer"
 	refused optdep 'package.json: the original added `optionalDependencies`' o_pkg '.optionalDependencies = {"y": "1"}' "chore: optional"
-	refused shipped 'a package that is not a development dependency is added or changed (it runs install scripts)' \
-		o_lock '.packages["node_modules/c"] = {version: "1.0.0", resolved: "https://registry.npmjs.org/c/-/c-1.0.0.tgz", integrity: .packages["node_modules/a"].integrity, hasInstallScript: true}'
-	refused notdev 'a package that is not a development dependency is added or changed' o_lock 'del(.packages["node_modules/a"].dev)'
+	# What users would get is read from the lock's graph (root peer p, then q), never from the "dev" flag.
+	refused shipped "packages[\"node_modules/q\"]: changed, and $reach (it runs install scripts)" \
+		o_lock '.packages["node_modules/q"] += {version: "1.0.1", resolved: "https://registry.npmjs.org/q/-/q-1.0.1.tgz", hasInstallScript: true}'
+	refused devflag "packages[\"node_modules/q\"]: changed, and $reach" \
+		o_lock '.packages["node_modules/q"] += {version: "1.0.1", resolved: "https://registry.npmjs.org/q/-/q-1.0.1.tgz", dev: true}'
+	refused removed "packages[\"node_modules/q\"]: removed, and $reach" o_lock 'del(.packages["node_modules/q"])'
+	# npm resolves p's q to a new nested entry, marked dev: a production edge, so refused.
+	refused nested "packages[\"node_modules/p/node_modules/q\"]: added, and $reach" \
+		o_lock '.packages["node_modules/p/node_modules/q"] = (.packages["node_modules/q"] + {version: "2.0.0", resolved: "https://registry.npmjs.org/q/-/q-2.0.0.tgz", dev: true} | del(.peer))'
+	# Another package's tarball and digest under a development dependency's name.
+	refused othertarball 'packages["node_modules/a"]: resolved is not https://registry.npmjs.org/a/-/a-1.0.0.tgz' \
+		o_lock '.packages["node_modules/a"].resolved = .packages["node_modules/b"].resolved | .packages["node_modules/a"].integrity = .packages["node_modules/b"].integrity'
 	refused integrity 'no full sha512 integrity' o_lock '.packages["node_modules/a"].integrity = "sha512-aaaa"'
 	refused nointegrity '"node_modules/a"]: no full sha512 integrity' o_lock 'del(.packages["node_modules/a"].integrity)'
 	refused rootentry "the root entry's devDependencies are not package.json's" o_lock '.packages[""].devDependencies.z = "1.0.0"'
+	refused link 'packages["node_modules/a"]: a link or a bundled package' o_lock '.packages["node_modules/a"] = {resolved: "../a", link: true}'
+	# A local-file development dependency with a matching root map and no entry.
+	refused filedev "the root's devDependencies \"x\" has no entry node_modules/x" \
+		o_both '.devDependencies.x = "file:../x"' '.packages[""].devDependencies.x = "file:../x"'
+	# The checker itself, on a lock with no root entry (the merge rule would keep the fork's root).
+	CASE=f4-noroot
+	local L=$T/f4-noroot
+	mkdir -p "$L"
+	git -C "$T/fixture/fork" show HEAD:package-lock.json >"$L/main.json"
+	git -C "$T/fixture/fork" show HEAD:package.json >"$L/pkg.json"
+	jq 'del(.packages[""])' "$L/main.json" >"$L/cand.json"
+	runc node "$SCRIPTS/manifest.mjs" lock-check "$L/main.json" "$L/cand.json" "$L/pkg.json"
+	eq "$RUN_RC" 4 "a lock with no root entry: refused"
+	has "$RUN_OUT" "package-lock.json: no root entry" "says so"
 }
 o_lock() {
 	jq --tab "$1" package-lock.json >p && mv p package-lock.json
 	git add -A
 	commit "chore: the lockfile"
+}
+o_both() { # o_both PACKAGE_JQ LOCK_JQ
+	jq --tab "$1" package.json >p && mv p package.json
+	jq --tab "$2" package-lock.json >p && mv p package-lock.json
+	git add -A
+	commit "chore: package.json and the lockfile"
 }
 
 # The original bumps its development dependencies, one of them with install scripts: it lands.
@@ -727,12 +851,18 @@ t_f4_dev_lands() {
 	eq "$(git show "$(field candidate):package.json" | jq -c .devDependencies)" '{"a":"1.1.0","b":"2.1.0"}' "the new versions"
 	eq "$(git show "$(field candidate):package-lock.json" | jq -r '.packages["node_modules/b"].version, .packages["node_modules/b"].hasInstallScript')" \
 		"$(printf '2.1.0\ntrue')" "the install-script dev entry, changed"
+	# A legitimate alias: node_modules/al installs a@1.0.0, the registry's tarball of a.
+	fresh f4-alias
+	o_both '.devDependencies.al = "npm:a@1.0.0"' '.packages[""].devDependencies.al = "npm:a@1.0.0" | .packages["node_modules/al"] = (.packages["node_modules/a"] + {name: "a"})'
+	release 1.5.1
+	run prepare
+	eq "$(state)" candidate "a development alias lands: $(field reasons)"
 }
 
 # --- finding 5: paths, check configuration, the tarball, the fork's tests ----------------------------------------
 t_f5_paths() {
 	refused nested-npmrc 'path: the original changes `extensions/.npmrc`' change extensions/.npmrc "registry=https://evil.invalid/" "x"
-	refused nested-npmignore 'path: the original changes `extensions/.npmignore`' change extensions/.npmignore "index.ts" "x"
+	refused nested-npmignore 'path: the original changes `extensions/.npmignore`' change extensions/.npmignore "# ignores nothing: the path alone refuses" "x"
 	refused gitattributes 'path: the original changes `test/.gitattributes`' change test/.gitattributes "*.ts export-ignore" "x"
 	refused tsconfig 'path: the original changes `tsconfig.json`' change tsconfig.json '{"exclude": ["test"]}' "x"
 	refused newfile 'path: the original changes `extensions/new.ts`, which is not in .github/follow/paths.txt' change extensions/new.ts "export {};" "x"
@@ -756,6 +886,74 @@ t_f5_pack() {
 	run plan
 	eq "$RUN_RC" 4 "the registered extension left out of the tarball: refused"
 	has "$RUN_OUT" 'extensions/index.ts' "says which"
+	# A comment that names a retired import is no refusal: what loads is judged by loading it (t_f5_load).
+	fresh f5-comment
+	cd "$F"
+	npm_set pi-provimux 105.0.0 "105.0.0 900"
+	npm_done
+	printf '// was: import "./retired.ts"\nexport default function () {}\n' >>extensions/index.ts
+	git add -A && commit "docs: a comment"
+	run plan
+	eq "$RUN_RC" 0 "a comment naming a file that is gone: no refusal: $RUN_OUT"
+}
+
+# The delivered package, loaded: load.mjs unpacks npm's tarball into a consumer of its own and has pi's loader (here
+# a stub of discoverAndLoadExtensions that imports each registered extension and calls it) load it. A file the
+# extension imports by a template literal and the tarball lacks fails; the same package with it loads.
+t_f5_load() {
+	CASE=f5-load
+	local d=$T/f5-load pi
+	rm -rf "$d"
+	pi=$d/nm/@earendil-works/pi-coding-agent
+	mkdir -p "$d/pkg/extensions" "$pi" "$d/out"
+	printf '{"name": "@earendil-works/pi-coding-agent", "version": "0.0.0", "type": "module", "exports": {".": "./index.js"}}\n' >"$pi/package.json"
+	cat >"$pi/index.js" <<-'JS'
+		import { readFileSync } from "node:fs";
+		import { join, resolve } from "node:path";
+		import { pathToFileURL } from "node:url";
+		export async function discoverAndLoadExtensions(paths) {
+			const extensions = [];
+			const errors = [];
+			for (const dir of paths) {
+				const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+				for (const e of pkg.pi.extensions) {
+					const p = resolve(dir, e);
+					try {
+						const m = await import(pathToFileURL(p).href);
+						await m.default({});
+						extensions.push({ path: p });
+					} catch (err) {
+						errors.push({ path: p, error: `Failed to load extension: ${err.message}` });
+					}
+				}
+			}
+			return { extensions, errors, warnings: [] };
+		}
+	JS
+	printf 'const name = "lib";\nconst lib = await import(`./${name}.js`);\nexport default function () {\n\treturn lib.value;\n}\n' >"$d/pkg/extensions/index.js"
+	printf 'export const value = 1;\n' >"$d/pkg/extensions/lib.js"
+	pk() { # pk FILES_JSON: the package with that files list, packed by npm into $d/out
+		rm -f "$d"/out/*.tgz
+		jq -n --argjson f "$1" '{name: "pkg-under-test", version: "1.0.0", type: "module", files: $f,
+			pi: {extensions: ["./extensions/index.js"]}, peerDependencies: {"@earendil-works/pi-coding-agent": "*"}}' >"$d/pkg/package.json"
+		(cd "$d/pkg" && npm pack --ignore-scripts --pack-destination "$d/out" >/dev/null 2>&1)
+	}
+	pk '["extensions"]'
+	runc node "$SCRIPTS/load.mjs" "$d/out/pkg-under-test-1.0.0.tgz" "$d/nm"
+	eq "$RUN_RC" 0 "the package with its files loads: $RUN_OUT"
+	pk '["extensions/index.js"]'
+	if tar tzf "$d/out/pkg-under-test-1.0.0.tgz" | grep -q lib.js; then bad "the fixture packs lib.js"; else ok; fi
+	runc node "$SCRIPTS/load.mjs" "$d/out/pkg-under-test-1.0.0.tgz" "$d/nm"
+	eq "$RUN_RC" 4 "a file the tarball lacks, imported by a template literal: refused"
+	has "$RUN_OUT" "pi could not load it" "says why"
+	# Only the peers reach the consumer: an import of something else in node_modules fails.
+	mkdir -p "$d/nm/devonly"
+	printf '{"name": "devonly", "version": "1.0.0", "type": "module", "exports": "./i.js"}\n' >"$d/nm/devonly/package.json"
+	printf 'export const v = 1;\n' >"$d/nm/devonly/i.js"
+	printf 'import { v } from "devonly";\nexport default function () {\n\treturn v;\n}\n' >"$d/pkg/extensions/index.js"
+	pk '["extensions"]'
+	runc node "$SCRIPTS/load.mjs" "$d/out/pkg-under-test-1.0.0.tgz" "$d/nm"
+	eq "$RUN_RC" 4 "a development dependency is not there for the delivered package"
 }
 
 # --- finding 6: refs and inputs (the workflows: t_workflows) ----------------------------------------------------
@@ -794,6 +992,30 @@ t_f8_recovery() {
 		git add extensions/index.ts
 		run stamp
 		eq "$RUN_RC" 4 "stamp after a hand merge runs the guard and refuses"
+	fi
+	# The effective change is checked: a resolution that adds a key the owner decides is refused, though neither
+	# side of the merge had it.
+	fresh f8-effective
+	change extensions/index.ts "$(printf 'line 1\nline 2 (original 1.5.1)\nline 3')" "fix: line 2 again"
+	release 1.5.1
+	change extensions/index.ts "$(printf 'line 1\nline 2 (the fork)\nline 3')" "feat: the fork's line 2"
+	run merge 1.5.1
+	eq "$RUN_RC" 3 "a conflict"
+	printf 'line 1\nline 2 (both)\nline 3\n' >extensions/index.ts
+	jq --tab '.funding = "https://x.invalid"' package.json >p && mv p package.json
+	git add extensions/index.ts package.json
+	run stamp
+	eq "$RUN_RC" 4 "a key added while resolving: refused"
+	has "$RUN_OUT" 'the merge adds `funding`' "says which"
+	# The issues carry no recovery commands: no container over the operator's checkout, no push from it.
+	hasnt "$(sed -n '/^by_hand() {/,/^}/p' "$FOLLOW")" 'docker run' "no container command in the issues"
+	hasnt "$(sed -n '/^by_hand() {/,/^}/p' "$FOLLOW")" 'git push' "no push command in the issues"
+	if [[ -f $TREE/docs/FOLLOWING.md ]]; then
+		hasnt "$(cat "$TREE/docs/FOLLOWING.md")" 'HEAD:main' "FOLLOWING.md: no push of HEAD"
+		hasnt "$(cat "$TREE/docs/FOLLOWING.md")" '-v "$PWD' "FOLLOWING.md: no container over the checkout"
+		has "$(cat "$TREE/docs/FOLLOWING.md")" "by the owner's staff, on request" "FOLLOWING.md: recovery is by hand"
+	else
+		bad "no docs/FOLLOWING.md at $TREE"
 	fi
 	# The plan reads no npm configuration of the tree: an .npmrc is refused before npm runs.
 	fresh f8-plan
@@ -844,8 +1066,8 @@ gh_stub() {
 		field() { local k=$1; shift; while [ $# -gt 0 ]; do case $1 in "$k="*) echo "${1#*=}"; return ;; esac; shift; done; }
 		case "$1 $2" in
 		"api --paginate")
-			jq -c --arg l "$(printf %s "$3" | sed 's/.*labels=\([^&]*\).*/\1/')" '[.[] | select(any(.labels[]; .name == $l))] as $a
-				| range(0; ($a | length); 100) as $i | $a[$i:$i + 100]' "$G/issues.json" ;;
+			# Every issue, whatever the label asked for: the script must check the label itself.
+			jq -c '. as $a | range(0; ($a | length); 100) as $i | $a[$i:$i + 100]' "$G/issues.json" ;;
 		"api -X")
 			case "$4" in
 			*/labels) touch "$G/label" ;;
@@ -854,6 +1076,8 @@ gh_stub() {
 		"api "*)
 			case "$2" in
 			*/labels/*) [ -e "$G/label" ] ;;
+			*/actions/artifacts/*/zip) cat "$G/artifact.zip" ;;
+			*/actions/artifacts/*) cat "$G/artifact.json" ;;
 			*/git/ref/tags/*) jq -e --arg t "${2##*/}" '.[$t] | select(. != null) | {object: .}' "$G/tags.json" ;;
 			*/git/tags/*) jq -e --arg s "${2##*/}" '.[$s] | select(. != null) | {object: .}' "$G/tagobjs.json" ;;
 			*) exit 1 ;;
@@ -904,8 +1128,10 @@ t_report() {
 	eq "$(bot "follow:" | jq -r '.[].title')" "follow: 1.5.1 — conflict" "the follow issue"
 	eq "$(bot "README:" | jq -r 'length')" 1 "the README issue"
 	has "$(bot "README:" | jq -r '.[0].body')" "+readme of 1.5.1" "the README diff, from the result"
-	has "$(bot "follow:" | jq -r '.[0].body')" "/tmp/follow-tools/follow.sh merge 1.5.1" "how to merge by hand"
-	has "$(bot "follow:" | jq -r '.[0].body')" "then the guard" "the guard in the recovery"
+	has "$(bot "follow:" | jq -r '.[0].body')" "by the owner's staff, on the owner's request" "recovery is by hand, on request"
+	hasnt "$(bot "follow:" | jq -r '.[0].body')" "docker run" "no container command"
+	hasnt "$(bot "follow:" | jq -r '.[0].body')" "git push" "no push command"
+	eq "$(bot "follow:" | jq -r '.[0].body' | head -n 1)" "<!-- follow-bot:key=follow:1.5.1 -->" "the key is the body's first line"
 	: >"$GH_LOG"
 	gh_run report
 	eq "$(grep -c '^issue create' "$GH_LOG" || true)" 0 "a rerun opens nothing"
@@ -952,7 +1178,7 @@ t_f9_issues() {
 	jq -n --arg m "<!-- follow-bot:key=follow:1.5.1 -->" '[{number: 1, title: "follow: 1.5.1 — conflict", body: "mine \($m)", state: "open",
 		user: {login: "someone"}, labels: [{name: "follow-bot"}]}]
 		+ [range(2; 352) | {number: ., title: "other \(.)", body: "", state: "open", user: {login: "someone"}, labels: [{name: "follow-bot"}]}]
-		+ [{number: 352, title: "follow: 1.5.1 — refused", body: "old \($m)", state: "closed", user: {login: "github-actions[bot]"}, labels: [{name: "follow-bot"}]}]' \
+		+ [{number: 352, title: "follow: 1.5.1 — refused", body: "\($m)\n<!-- follow-state: refused -->\n\nold", state: "closed", user: {login: "github-actions[bot]"}, labels: [{name: "follow-bot"}]}]' \
 		>"$GH_ISSUES"
 	GH_FAIL_CREATE="README:" gh_run report
 	eq "$RUN_RC" 1 "red, and the README write failed"
@@ -964,6 +1190,30 @@ t_f9_issues() {
 	jq '.conflicts = [range(0; 5000) | "extensions/\(.)-" + ("x" * 200) + ".ts"]' "$OUT/result.json" >"$OUT/r" && mv "$OUT/r" "$OUT/result.json"
 	gh_run report
 	eq "$(jq -r '[.[] | select(.body | length >= 65000)] | length' "$GH_ISSUES")" 0 "every body under GitHub's limit"
+	# The key counts only as the first line of a bot issue with the label: an open README issue quoting the failure
+	# key in its diff, and a bot issue without the label, are left alone; the closed failure issue is reopened.
+	fresh f9-quoted
+	gh_stub
+	change extensions/index.ts "$(printf 'line 1\nline 2 (original 1.5.1)\nline 3')" "fix: line 2 again"
+	change README.md "readme of 1.5.1" "docs: readme"
+	release 1.5.1
+	change extensions/index.ts "$(printf 'line 1\nline 2 (the fork)\nline 3')" "feat: the fork's line 2"
+	run prepare
+	jq -n --arg k "<!-- follow-bot:key=follow:1.5.1 -->" --arg r "<!-- follow-bot:key=readme:1.5.1 -->" '[
+		{number: 1, title: "README: after 1.5.1", body: "\($r)\n<!-- follow-state: open -->\n\n~~~diff\n+ quoting \($k)\n~~~", state: "open",
+			user: {login: "github-actions[bot]"}, labels: [{name: "follow-bot"}]},
+		{number: 2, title: "follow: 1.5.1 — refused", body: "\($k)\n<!-- follow-state: refused -->\n\nold", state: "closed",
+			user: {login: "github-actions[bot]"}, labels: [{name: "follow-bot"}]},
+		{number: 3, title: "follow: 1.5.1 — other", body: "\($k)\n<!-- follow-state: other -->", state: "open",
+			user: {login: "github-actions[bot]"}, labels: []}]' >"$GH_ISSUES"
+	local before1 before3
+	before1=$(jq -c '.[0]' "$GH_ISSUES")
+	before3=$(jq -c '.[2]' "$GH_ISSUES")
+	gh_run report
+	eq "$(jq -c '.[0]' "$GH_ISSUES")" "$before1" "the README issue quoting the key is untouched"
+	eq "$(jq -c '.[2]' "$GH_ISSUES")" "$before3" "a bot issue without the label is untouched"
+	eq "$(jq -r '.[1].state + " " + .[1].title' "$GH_ISSUES")" "open follow: 1.5.1 — conflict" "the keyed failure issue reopened and updated"
+	eq "$(jq -r 'length' "$GH_ISSUES")" 3 "nothing new"
 }
 
 t_f10_publish() {
@@ -974,6 +1224,7 @@ t_f10_publish() {
 	main=$(git rev-parse HEAD)
 	jq -n --arg m "<!-- follow-bot:key=publish:105.0.1 -->" '[{number: 1, title: "publish: 105.0.1 — failed", body: $m, state: "open",
 		user: {login: "github-actions[bot]"}, labels: [{name: "follow-bot"}]}]' >"$GH_ISSUES"
+	jq --arg m "<!-- follow-bot:key=publish:105.0.1 -->" '.[0].body = "\($m)\n<!-- follow-state: failed -->"' "$GH_ISSUES" >"$T/i" && mv "$T/i" "$GH_ISSUES"
 	DRY_RUN=yes gh_run report-publish 105.0.1 success
 	eq "$(jq -r '.[0].state' "$GH_ISSUES")" open "a dry run closes nothing"
 	DRY_RUN=no gh_run report-publish 105.0.1 success
@@ -1008,7 +1259,43 @@ t_f10_publish() {
 	git commit -q --allow-empty -m "local only"
 	DRY_RUN=no gh_run tag 105.0.2 "$(git rev-parse HEAD)" false
 	eq "$RUN_RC" 1 "a commit outside the live main is not tagged"
+	# Repair (npm has the version, no gitHead): an existing tag at an earlier commit of main whose package.json
+	# names another version is not taken; the same tag at a commit that names it is.
+	local early
+	early=$(git rev-parse "$main~2")
+	jq -n --arg s "$early" '{"v105.0.1": {type: "commit", sha: $s}}' >"$GH_DIR/tags.json"
+	: >"$GH_DIR/releases"
+	DRY_RUN=no gh_run tag 105.0.1 "$main" true
+	eq "$RUN_RC" 1 "a tag at a commit that names $(git show "$early:package.json" | jq -r .version): no release made"
+	eq "$(cat "$GH_DIR/releases")" "" "no release for the wrong tree"
+	jq -n --arg s "$main" '{"v105.0.1": {type: "commit", sha: $s}}' >"$GH_DIR/tags.json"
+	DRY_RUN=no gh_run tag 105.0.1 "$main" true
+	eq "$RUN_RC" 0 "the tag at a commit that names 105.0.1: repaired: $RUN_OUT"
+	# npm's gitHead at a commit of main that names another version is not taken either.
+	echo '{}' >"$GH_DIR/tags.json"
+	printf '%s' "$early" >"$FOLLOW_NPM_DIR/pi-provimux@105.0.1.githead"
+	DRY_RUN=no gh_run tag 105.0.1 "$main" true
+	eq "$RUN_RC" 1 "a gitHead that names another version: not tagged"
+	rm -f "$FOLLOW_NPM_DIR/pi-provimux@105.0.1.githead"
 	unset FOLLOW_UPSTREAM_URL
+	# plan names the version even when it refuses before npm runs, so that notify reports it.
+	fresh f10-plan-early
+	cd "$F"
+	change .npmrc "registry=https://evil.invalid/" "chore: npmrc"
+	local outs=$T/f10-plan-early/gh-output
+	: >"$outs"
+	GITHUB_OUTPUT=$outs run plan
+	eq "$RUN_RC" 4 "an .npmrc: refused"
+	eq "$(grep -A1 '^version<<' "$outs" | sed -n 2p)" 105.0.1 "the version is still named"
+	# A failed retry dispatch (main has the release, npm lacks main's version) is red, with an issue.
+	fresh f10-retry
+	gh_stub
+	jq -n '{state: "up-to-date", version: "1.5.0", base_version: "1.5.0", fork_version: "105.0.1", fork_published: "false"}' >"$T/f10-retry/result.json"
+	FOLLOW_RESULT=$T/f10-retry/result.json FOLLOW_LAND=dispatch-failed gh_run report
+	eq "$RUN_RC" 1 "a failed retry dispatch is red"
+	eq "$(bot "follow:" | jq -r '.[0].title')" "follow: 1.5.0 — publish not started" "and says so in an issue"
+	FOLLOW_RESULT=$T/f10-retry/result.json FOLLOW_LAND=dispatched gh_run report
+	eq "$RUN_RC" 0 "a started retry is green"
 }
 
 t_f10_land() {
@@ -1040,6 +1327,18 @@ t_f10_land() {
 	has "$(cat "$outs")" "refused" "says refused"
 	eq "$(git -C "$T/f10-land/origin.git" rev-parse refs/heads/main)" "$main" "nothing pushed"
 	git checkout -q main
+	# The owner pushes between land's read of main and its push (outside the concurrency group): git refuses the
+	# push, and land says "moved", green, not a failure.
+	local other
+	other=$(git commit-tree -p "$main" -m "the owner's push" "$main^{tree}")
+	git push -q "$T/f10-land/origin.git" "$other:refs/heads/owner"
+	printf '#!/bin/sh\nprintf "%%s\\n" %s >refs/heads/main\nexit 1\n' "$other" >"$T/f10-land/origin.git/hooks/pre-receive"
+	chmod +x "$T/f10-land/origin.git/hooks/pre-receive"
+	: >"$outs"
+	GITHUB_OUTPUT=$outs DRY_RUN=no gh_run land candidate "$main" "$r"
+	eq "$RUN_RC" 0 "main moved during the push: not a failure"
+	eq "$(grep -A1 '^landed<<' "$outs" | sed -n 2p)" moved "reported as moved"
+	rm -f "$T/f10-land/origin.git/hooks/pre-receive"
 	unset FOLLOW_PUSH_REMOTE
 }
 
@@ -1077,6 +1376,16 @@ t_f11_mirror() {
 	eq "$RUN_RC" 0 "the mirror: $RUN_OUT"
 	eq "$(git -C "$S/nas.git" rev-parse refs/heads/main)" "$(git -C "$S/github" rev-parse HEAD)" "main followed"
 	eq "$(git -C "$S/nas.git" rev-parse refs/tags/v105.0.2)" "$(git -C "$S/github" rev-parse v105.0.2)" "the tag followed"
+	# A reused workspace: the next run in the same folder, after the tag is gone from GitHub, sees the NAS-only tag.
+	git -C "$S/nas.git" tag -d origin/main >/dev/null
+	RUN_RC=0
+	RUN_OUT=$(cd "$S/work" && RUNNER_TEMP=$S bash "$S/step.sh" 2>&1) || RUN_RC=$?
+	eq "$RUN_RC" 0 "a second run in the same workspace: $RUN_OUT"
+	git -C "$S/github" tag -d v105.0.2 >/dev/null
+	RUN_RC=0
+	RUN_OUT=$(cd "$S/work" && RUNNER_TEMP=$S bash "$S/step.sh" 2>&1) || RUN_RC=$?
+	yes_ test "$RUN_RC" -ne 0
+	has "$RUN_OUT" "v105.0.2 is on the NAS only" "a tag gone from GitHub is a divergence in a reused workspace"
 }
 
 # --- the workflows, read as text (what a local run cannot exercise) ------------------------------------------------
@@ -1098,8 +1407,31 @@ t_workflows() {
 		# 12: GitHub's jobs run on GitHub only.
 		has "$(grep -E '^    if:' -A4 <<<"$b")" "github.server_url == 'https://github.com'" "12: $j only on GitHub"
 	done
-	# 6: the tag job is in the npm environment; the version input is checked before use.
-	has "$(job "$p" tag)" "environment: npm" "6: tag in the npm environment"
+	# 6: every job that can write, or holds the OIDC token, is in an environment that GitHub admits from main alone:
+	# npm for the publish (the trusted publisher names it), main-only for the rest; the jobs that only read are not.
+	for j in "$f prepare" "$f test-candidate" "$f test-original" "$f land" "$f report" "$p plan" "$p test" "$p publish" "$p tag" "$p notify"; do
+		# shellcheck disable=SC2086
+		b=$(job $j)
+		if grep -Eq '^      [a-z-]+: write$' <<<"$b"; then
+			if grep -q '^      id-token: write$' <<<"$b"; then
+				has "$b" "    environment: npm" "6: $j (OIDC) in the environment npm"
+			else
+				has "$b" "    environment: main-only" "6: $j (writes) in the environment main-only"
+			fi
+		else
+			hasnt "$b" "environment:" "6: $j (reads only) needs no environment"
+		fi
+	done
+	if [[ -f $TREE/docs/FOLLOWING.md ]]; then
+		b=$(cat "$TREE/docs/FOLLOWING.md")
+		for j in npm main-only; do
+			has "$b" "gh api -X PUT repos/ngvoicu/pi-provimux/environments/$j" "6: FOLLOWING.md creates the environment $j"
+			has "$b" "gh api -X POST repos/ngvoicu/pi-provimux/environments/$j/deployment-branch-policies -f name=main -f type=branch" \
+				"6: FOLLOWING.md admits main alone to $j"
+		done
+	else
+		bad "no docs/FOLLOWING.md at $TREE"
+	fi
 	has "$(job "$f" prepare)" "Check the inputs" "6: the version input is checked"
 	# 7: the original's and the candidate's code run in a container, no cache anywhere.
 	for j in "$f test-candidate" "$f test-original" "$p test"; do
@@ -1108,6 +1440,19 @@ t_workflows() {
 		has "$b" 'docker run --rm' "7: $j runs the tree in a container"
 		hasnt "$b" 'setup-node' "7: $j has no setup-node"
 		hasnt "$b" 'git archive' "7: $j writes the tree with checkout-index"
+		# 7: the container sees an exported tree and this run's scripts read-only: never the workspace (its .git, which
+		# the checkout's cleanup opens with a credential afterwards) or the current folder.
+		eq "$(grep -oE -- '-v "[^"]*"' <<<"$b" | sort -u | grep -vxE -- '-v "\$RUNNER_TEMP/tree:/w"|-v "\$RUNNER_TEMP/follow:/follow:ro"' || true)" "" \
+			"7: $j mounts only the exported tree and the scripts"
+		hasnt "$b" 'GITHUB_WORKSPACE' "7: $j never names the workspace"
+		has "$b" 'checkout-index -a --prefix="$RUNNER_TEMP/tree/"' "7: $j exports the tree by git"
+	done
+	# 5: the delivered package is loaded by pi before landing and before publishing.
+	for j in "$f test-candidate" "$p test"; do
+		# shellcheck disable=SC2086
+		b=$(job $j)
+		has "$b" 'npm pack --ignore-scripts --pack-destination /tmp/pack' "5: $j packs in the container"
+		has "$b" 'node /follow/load.mjs /tmp/pack/*.tgz /w/node_modules' "5: $j loads the packed package"
 	done
 	hasnt "$(cat "$f" "$p")" '        cache:' "7: no cache input"
 	eq "$(grep -c 'actions/setup-node@' "$f" "$p" | awk -F: '{ s += $2 } END { print s }')" \
@@ -1211,8 +1556,8 @@ t_plan() {
 # --- run ----------------------------------------------------------------------------------------------------------
 build_fixture >/dev/null
 ALL='numbers clean rerun waiting states conflict manifest_conflict manifest_merge refusals shape readme report plan
-f2_release f3_strings f3_links f3_checker f4_deps f4_dev_lands f5_paths f5_pack f6_refs f8_recovery f9_issues f10_publish f10_land
-f11_mirror workflows f12_history'
+f2_release f3_strings f3_handoff f3_links f3_checker f4_deps f4_dev_lands f5_paths f5_pack f5_load f6_refs f8_recovery
+f9_issues f10_publish f10_land f11_mirror workflows f12_history'
 # shellcheck disable=SC2086 # the names
 [[ $# -gt 0 ]] || set -- $ALL
 for t in "$@"; do

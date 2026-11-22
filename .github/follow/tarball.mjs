@@ -3,70 +3,30 @@
 // the tarball is read in memory, never unpacked to disk.
 //
 //   verify FILE INTEGRITY         FILE's sha512 is the registry's integrity ("sha512-<base64>"); exit 0, else 4
-//   compare FILE COMMIT           every file in the tarball is a regular file of COMMIT with the same bytes, and the
-//                                 tarball holds only such files; prints one difference per line; exit 0, else 4
-//   closure PKGJSON PACKED COMMIT the extensions package.json registers (pi.extensions) and the files they import
-//                                 by a relative path are all in PACKED (one path per line); exit 0, else 4
+//   compare FILE COMMIT SHIPS     the tarball and the commit match both ways: the tarball holds exactly the files of
+//                                 SHIPS (what npm packs from COMMIT, one path per line), each a regular file of
+//                                 COMMIT with the same bytes; prints one difference per line; exit 0, else 4
+//   export COMMIT DIR             writes COMMIT's regular files (no link, no submodule) into DIR, a new folder, so
+//                                 that npm can list what it would pack from them; runs nothing of them
+//   registered PKGJSON PACKED     every extension package.json registers (pi.extensions) is in PACKED (one path per
+//                                 line); exit 0, else 4. Whether they load is load.mjs's, in the test job.
 // Exit 1: the check itself failed (unreadable input, git error).
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { posix } from "node:path";
-import { gunzipSync } from "node:zlib";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, posix } from "node:path";
+import { entries, MAX, safePath } from "./tar.mjs";
 
-const MAX = 64 * 1024 * 1024;
 const fail = (msg) => {
 	console.error(`tarball.mjs: ${msg}`);
 	process.exit(1);
 };
-const safePath = (p) =>
-	typeof p === "string" &&
-	p.length > 0 &&
-	p.length < 4096 &&
-	!p.startsWith("/") &&
-	!/[\0\\\n\r]/.test(p) &&
-	!p.split("/").some((s) => s === ".." || s === "." || s === "");
 const show = (s) => JSON.stringify(String(s).slice(0, 200));
 const git = (args, opts = {}) => execFileSync("git", args, { maxBuffer: MAX, stdio: ["ignore", "pipe", "pipe"], ...opts });
-
-// Regular files of a gzipped tar: [{ path, type, data }]. Pax ('x') and GNU long-name ('L') headers name the next
-// entry; global pax headers ('g') are skipped.
-const entries = (file) => {
-	const tar = gunzipSync(readFileSync(file), { maxOutputLength: MAX });
-	const out = [];
-	let off = 0;
-	let longName = null;
-	const str = (b) => {
-		const i = b.indexOf(0);
-		return b.subarray(0, i < 0 ? b.length : i).toString("utf8");
-	};
-	while (off + 512 <= tar.length) {
-		const h = tar.subarray(off, off + 512);
-		if (h.every((x) => x === 0)) break;
-		const size = Number.parseInt(str(h.subarray(124, 136)).trim() || "0", 8);
-		if (!Number.isFinite(size) || size < 0) fail("a tar header with a bad size");
-		const type = String.fromCharCode(h[156] || 48);
-		const prefix = str(h.subarray(345, 500));
-		let name = str(h.subarray(0, 100));
-		if (prefix) name = `${prefix}/${name}`;
-		const data = tar.subarray(off + 512, off + 512 + size);
-		off += 512 + Math.ceil(size / 512) * 512;
-		if (type === "x") {
-			const m = /(?:^|\n)\d+ path=([^\n]*)\n/.exec(data.toString("utf8"));
-			if (m) longName = m[1];
-			continue;
-		}
-		if (type === "L") {
-			longName = str(data);
-			continue;
-		}
-		if (type === "g") continue;
-		if (longName !== null) name = longName;
-		longName = null;
-		out.push({ path: name, type, data });
-	}
-	return out;
-};
+const lines = (file) =>
+	readFileSync(file, "utf8")
+		.split("\n")
+		.filter((s) => s);
 
 const [cmd, ...args] = process.argv.slice(2);
 try {
@@ -83,8 +43,9 @@ try {
 			process.exit(4);
 		}
 	} else if (cmd === "compare") {
-		const [file, commit] = args;
-		if (!/^[0-9a-f]{40}$/.test(commit ?? "")) fail("compare FILE COMMIT (a full commit id)");
+		const [file, commit, shipsFile] = args;
+		if (!/^[0-9a-f]{40}$/.test(commit ?? "") || !shipsFile) fail("compare FILE COMMIT SHIPS (a full commit id)");
+		const ships = new Set(lines(shipsFile));
 		const bad = [];
 		const seen = new Set();
 		let files = 0;
@@ -121,58 +82,42 @@ try {
 			}
 			const blob = git(["cat-file", "blob", m[3]]);
 			if (!blob.equals(e.data)) bad.push(`tarball: ${show(p)} differs from the commit`);
+			else if (!ships.has(p)) bad.push(`tarball: ${show(p)} is in it, but npm would not pack it from the commit`);
 		}
+		// The other way: what npm packs from the commit, the tarball must hold.
+		for (const p of ships) if (!seen.has(p)) bad.push(`tarball: the commit ships ${show(p)}, npm's tarball lacks it`);
 		if (files === 0 || !seen.has("package.json")) bad.push("tarball: no package/package.json");
 		for (const b of bad) console.log(b);
 		process.exit(bad.length ? 4 : 0);
-	} else if (cmd === "closure") {
-		const [pkgFile, packedFile, commit] = args;
-		if (!/^[0-9a-f]{40}$/.test(commit ?? "")) fail("closure PKGJSON PACKED COMMIT");
+	} else if (cmd === "export") {
+		const [commit, dir] = args;
+		if (!/^[0-9a-f]{40}$/.test(commit ?? "") || !dir) fail("export COMMIT DIR (a full commit id)");
+		if (existsSync(dir)) fail(`${dir} exists`);
+		mkdirSync(dir, { recursive: true });
+		const tree = git(["ls-tree", "-r", "-z", "--full-tree", commit]).toString("utf8");
+		for (const rec of tree.split("\0").filter((s) => s)) {
+			const m = /^(\d{6}) (\w+) ([0-9a-f]{40})\t(.*)$/s.exec(rec);
+			if (!m || m[2] !== "blob" || (m[1] !== "100644" && m[1] !== "100755") || !safePath(m[4])) continue;
+			const to = join(dir, m[4]);
+			mkdirSync(dirname(to), { recursive: true });
+			writeFileSync(to, git(["cat-file", "blob", m[3]]));
+		}
+	} else if (cmd === "registered") {
+		const [pkgFile, packedFile] = args;
+		if (!pkgFile || !packedFile) fail("registered PKGJSON PACKED");
 		const pkg = JSON.parse(readFileSync(pkgFile, "utf8"));
-		const packed = new Set(
-			readFileSync(packedFile, "utf8")
-				.split("\n")
-				.filter((s) => s),
-		);
+		const packed = new Set(lines(packedFile));
 		const exts = pkg?.pi?.extensions;
 		const bad = [];
 		if (!Array.isArray(exts) || exts.length === 0) bad.push("package.json registers no extension (pi.extensions)");
-		const todo = (Array.isArray(exts) ? exts : []).map((e) => posix.normalize(String(e)));
-		const done = new Set();
-		const fromCommit = (p) => {
-			try {
-				return git(["cat-file", "blob", `${commit}:${p}`]).toString("utf8");
-			} catch {
-				return null;
-			}
-		};
-		while (todo.length) {
-			const p = todo.shift();
-			if (done.has(p)) continue;
-			done.add(p);
-			if (!safePath(p)) {
-				bad.push(`extension ${show(p)} is not a plain relative path`);
-				continue;
-			}
-			if (!packed.has(p)) {
-				bad.push(`tarball: ${show(p)}, which pi loads, is not in it`);
-				continue;
-			}
-			const src = fromCommit(p);
-			if (src === null) continue;
-			const re = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)["'](\.{1,2}\/[^"']+)["']/g;
-			for (const m of src.matchAll(re)) {
-				const base = posix.normalize(posix.join(posix.dirname(p), m[1]));
-				const stem = base.replace(/\.(js|mjs|cjs)$/, "");
-				const candidates = [base, `${stem}.ts`, `${stem}.mts`, `${stem}.js`, `${stem}.mjs`, `${base}/index.ts`];
-				const hit = candidates.find((c) => fromCommit(c) !== null);
-				if (!hit) bad.push(`${show(p)} imports ${show(m[1])}, which the commit does not have`);
-				else todo.push(hit);
-			}
+		for (const e of Array.isArray(exts) ? exts : []) {
+			const p = posix.normalize(String(e));
+			if (!safePath(p)) bad.push(`extension ${show(e)} is not a plain relative path`);
+			else if (!packed.has(p)) bad.push(`tarball: ${show(p)}, which pi loads, is not in it`);
 		}
 		for (const b of bad) console.log(b);
 		process.exit(bad.length ? 4 : 0);
-	} else fail("usage: tarball.mjs verify|compare|closure …");
+	} else fail("usage: tarball.mjs verify|compare|export|registered …");
 } catch (e) {
 	fail(e instanceof Error ? e.message : String(e));
 }

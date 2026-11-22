@@ -59,11 +59,13 @@ die() {
 }
 say() { echo "follow: $*"; }
 
-# Untrusted text never becomes a runner command: everything this script prints is shown as text.
+# Untrusted text never becomes a runner command: everything this script prints is shown as text. The runner reads
+# commands from both streams; the two markers go to standard error, so that standard output carries only what a
+# command prints for its caller (fetch-candidate: the commit, nothing else).
 STOP=''
 if [[ ${GITHUB_ACTIONS:-} == true ]]; then
 	STOP=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-	echo "::stop-commands::$STOP"
+	echo "::stop-commands::$STOP" >&2
 fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/follow.XXXXXX")
@@ -71,7 +73,7 @@ WORKTREE=''
 cleanup() {
 	if [[ -n $WORKTREE ]]; then git worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true; fi
 	rm -rf "${TMP:?}"
-	if [[ -n $STOP ]]; then echo "::$STOP::"; fi
+	if [[ -n $STOP ]]; then echo "::$STOP::" >&2; fi
 }
 trap cleanup EXIT
 
@@ -270,8 +272,22 @@ npm_githead() {
 	npm_json "$1@$2" gitHead version | jq -r '.gitHead // ""'
 }
 
-# release_matches V B: the registry's tarball of V is what npm says it is, and every file it ships is B's, byte for
-# byte (2.1). Prints the differences; exit 0 a match, 4 a mismatch, 1 the registry or the check failed.
+# ships_of COMMIT: the files npm packs from COMMIT's tree, sorted, in $TMP/ships. The tree's regular files are
+# written out (links and submodules are not) and npm lists them with --dry-run --ignore-scripts from a neutral
+# folder: nothing of the commit runs. Exit 4 when npm cannot pack it, 1 when the export fails.
+ships_of() {
+	rm -rf "${TMP:?}/ships.tree"
+	node "$HERE/tarball.mjs" export "$1" "$TMP/ships.tree" || return 1
+	if ! npm_neutral pack --dry-run --ignore-scripts --json "$TMP/ships.tree" >"$TMP/ships.json" 2>"$TMP/ships.err"; then
+		echo "release: npm cannot pack the commit $1"
+		return 4
+	fi
+	jq -r '.[0].files[].path' "$TMP/ships.json" | LC_ALL=C sort >"$TMP/ships" || return 1
+}
+
+# release_matches V B: the registry's tarball of V is what npm says it is, and it ships exactly the files npm packs
+# from B, each with B's bytes (2.1): a file either side lacks is a mismatch. Prints the differences; exit 0 a match,
+# 4 a mismatch, 1 the registry or the check failed.
 release_matches() {
 	local v=$1 b=$2 dist url integ rc=0
 	dist=$(npm_dist "$ORIGINAL_PKG" "$v")
@@ -293,7 +309,8 @@ release_matches() {
 	fi
 	node "$HERE/tarball.mjs" verify "$TMP/release.tgz" "$integ" || rc=$?
 	((rc == 0)) || return "$rc"
-	node "$HERE/tarball.mjs" compare "$TMP/release.tgz" "$b" || rc=$?
+	ships_of "$b" || return $?
+	node "$HERE/tarball.mjs" compare "$TMP/release.tgz" "$b" "$TMP/ships" || rc=$?
 	return "$rc"
 }
 
@@ -735,6 +752,9 @@ do_guard() {
 	blob_to "$main" package-lock.json "$TMP/ml.json"
 	blob_to "$r" package-lock.json "$TMP/rl.json"
 	blob_to "$r" package.json "$TMP/rp.json"
+	# The effective change, main to R, whatever the merge or its resolution did: only the version, devDependencies
+	# and engines may differ.
+	run_check node "$HERE/manifest.mjs" effective "$TMP/o.json" "$TMP/rp.json"
 	run_check node "$HERE/manifest.mjs" lock-check "$TMP/ml.json" "$TMP/rl.json" "$TMP/rp.json"
 
 	# 3. The fork's tests, those it added and those it changed, and what decides which tests run, unchanged.
@@ -909,6 +929,14 @@ cmd_land() {
 		fi
 		git push "${FOLLOW_PUSH_REMOTE:-origin}" "$r:refs/heads/main" || rc=$?
 		if ((rc != 0)); then
+			# The owner's own push is outside the concurrency group: when main moved between the read and the push, git
+			# refused a non-fast-forward, and that is "moved", not a failure.
+			live=$(git ls-remote "${FOLLOW_PUSH_REMOTE:-origin}" refs/heads/main | awk '$2 == "refs/heads/main" { print $1 }')
+			if [[ $live =~ ^[0-9a-f]{40}$ && $live != "$main" ]]; then
+				say "main moved while landing; nothing landed, the next run starts from it"
+				gh_out landed moved
+				return 0
+			fi
 			gh_out landed push-failed
 			return 1
 		fi
@@ -942,6 +970,13 @@ cmd_plan() {
 	res_init
 	res_set sha "$sha"
 	: >"$TMP/reasons"
+	# The version first, from git alone: every outcome, an early refusal included, names it, so notify runs.
+	git cat-file blob "$sha:package.json" >"$TMP/p.json" 2>/dev/null || : >"$TMP/p.json"
+	ver=$(jq -r '.version // "" | tostring' "$TMP/p.json" 2>/dev/null || true)
+	is_plain "$ver" || ver="!"
+	res_set version "$ver"
+	gh_out version "$ver"
+	gh_out sha "$sha"
 	git ls-tree -r --name-only "$sha" >"$TMP/tracked"
 	# Before any npm command: no npm configuration in the tree.
 	if grep -Eq '(^|/)\.npmrc$' "$TMP/tracked"; then
@@ -952,11 +987,7 @@ cmd_plan() {
 		sed 's/^/  /' "$TMP/reasons"
 		return 4
 	fi
-	git cat-file blob "$sha:package.json" >"$TMP/p.json"
 	name=$(jq -r '.name // "" | tostring' "$TMP/p.json")
-	ver=$(jq -r '.version // "" | tostring' "$TMP/p.json")
-	is_plain "$ver" || ver="!"
-	res_set version "$ver"
 	meta=$(npm_meta "$PKG")
 	if [[ $ver != "!" ]] && jq -e --arg v "$ver" '(.time // {}) | has($v)' >/dev/null <<<"$meta"; then published=true; fi
 	res_set published "$published"
@@ -997,11 +1028,11 @@ cmd_plan() {
 			case " $PACK_FILES " in *" $p "*) continue ;; esac
 			[[ $p == extensions/* ]] || refuse "tarball: \`$(qpath "$p")\` is outside extensions/ and the four files"
 		done <"$TMP/packed"
-		run_check node "$HERE/tarball.mjs" closure "$TMP/p.json" "$TMP/packed" "$sha"
+		# What pi loads is checked by loading it: the test job imports the packed package's registered extensions
+		# (load.mjs). Here only that each registered entry point is in the tarball.
+		run_check node "$HERE/tarball.mjs" registered "$TMP/p.json" "$TMP/packed"
 	fi
 	res_json reasons "$(jq -R . <"$TMP/reasons" | jq -s .)"
-	gh_out version "$ver"
-	gh_out sha "$sha"
 	gh_out published "$published"
 	if [[ -s $TMP/reasons ]]; then
 		gh_out publish false
@@ -1035,6 +1066,11 @@ tag_commit() {
 	echo "$sha"
 }
 
+# is_release_of COMMIT VERSION: COMMIT is in the live main and its package.json names VERSION.
+is_release_of() {
+	[[ $1 =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$1" refs/follow/live 2>/dev/null && [[ $(version_of "$1") == "$2" ]]
+}
+
 # tag VERSION SHA PUBLISHED: v<VERSION> at the commit published from main, then its GitHub release. Exit 1 when the
 # tag or the release cannot be made and is not there: the run is red and the owner is told.
 cmd_tag() {
@@ -1046,17 +1082,20 @@ cmd_tag() {
 	git fetch -q --no-tags "$UPSTREAM_URL" "+refs/heads/main:refs/follow/live" || die "cannot fetch the live main"
 	commit=$sha
 	if [[ $published == true ]]; then
+		# Repair: the commit npm recorded, else the existing tag; either only when it is in the live main and its
+		# package.json names this very version.
 		commit=$(npm_githead "$PKG" "$v")
-		if ! [[ $commit =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$commit" refs/follow/live 2>/dev/null; then
+		if ! is_release_of "$commit" "$v"; then
 			have=$(tag_commit "$t")
-			if [[ -n $have ]] && git merge-base --is-ancestor "$have" refs/follow/live; then
+			if is_release_of "$have" "$v"; then
 				commit=$have
 			else
-				die "npm has $v but no commit of main for it, and there is no $t: make the tag by hand (docs/FOLLOWING.md 4.3)"
+				die "npm has $v but no commit of main that names $v, and no $t at one: make the tag by hand (docs/FOLLOWING.md 4.3)"
 			fi
 		fi
 	fi
 	git merge-base --is-ancestor "$commit" refs/follow/live || die "$commit is not in the live main"
+	[[ $(version_of "$commit") == "$v" ]] || die "$commit's package.json does not name $v: it is not tagged $t"
 	have=$(tag_commit "$t")
 	if [[ -n $have ]]; then
 		[[ $have == "$commit" ]] || die "$t names $have, not $commit: tags are never moved"
@@ -1083,9 +1122,13 @@ cmd_tag() {
 }
 
 # --- report ------------------------------------------------------------------------------------------------------
-# The automation's issues carry the label $LABEL, are opened by the bot, and hold a hidden key; nothing else is
-# ever edited. Untrusted text is cut to a budget.
+# The automation's issues carry the label $LABEL, are opened by the bot, and begin with a hidden key: the body's
+# first line is exactly the key marker, its second the state marker. A marker anywhere else (a quoted diff or log)
+# counts for nothing. Nothing else is ever edited. Untrusted text is cut to a budget.
 key_marker() { printf '<!-- follow-bot:key=%s -->' "$1"; }
+state_marker() { printf '<!-- follow-state: %s -->' "$1"; }
+# jq: an issue's key line and state line (the body's first two lines), "" when absent.
+JQ_KEY='def line($i): ((.body // "") | split("\n") | .[$i] // "" | rtrimstr("\r")); def keyline: line(0); def stateline: line(1);'
 
 fence_for() {
 	local n
@@ -1100,9 +1143,9 @@ capped() { head -n "$2" "$1" | LC_ALL=C cut -c1-300 | head -c "$3"; }
 # All the bot's issues with the label, every page: [{number, title, body, state}].
 bot_issues() {
 	gh api --paginate "repos/$REPO/issues?state=all&labels=$LABEL&per_page=100" >"$TMP/issues.raw" || return 1
-	jq -s --arg bots " $BOT_LOGINS " '[.[] | if type == "array" then .[] else . end
+	jq -s --arg bots " $BOT_LOGINS " --arg label "$LABEL" '[.[] | if type == "array" then .[] else . end
 		| (.user.login // "?") as $u
-		| select((has("pull_request") | not) and ($bots | contains(" " + $u + " ")))
+		| select((has("pull_request") | not) and ($bots | contains(" " + $u + " ")) and any(.labels[]?; .name == $label))
 		| {number, title, body: (.body // ""), state}]' "$TMP/issues.raw"
 }
 
@@ -1116,13 +1159,19 @@ ensure_label() {
 # only when its state changes. None: a new one. Exit 1 when a write fails.
 upsert() {
 	local key=$1 title=$2 state=$3 body=$4 found num old ost
-	head -c 60000 "$body" >"$TMP/upsert.md"
-	printf '\n\n%s\n<!-- follow-state: %s -->\n' "$(key_marker "$key")" "$state" >>"$TMP/upsert.md"
+	{
+		key_marker "$key"
+		echo
+		state_marker "$state"
+		echo
+		echo
+		head -c 60000 "$body"
+	} >"$TMP/upsert.md"
 	bot_issues >"$TMP/bot.json" || {
 		say "cannot list the issues"
 		return 1
 	}
-	found=$(jq -c --arg m "$(key_marker "$key")" '[.[] | select(.body | contains($m))] | sort_by(if .state == "open" then 0 else 1 end, .number) | first // empty' "$TMP/bot.json")
+	found=$(jq -c --arg m "$(key_marker "$key")" "$JQ_KEY"' [.[] | select(keyline == $m)] | sort_by(if .state == "open" then 0 else 1 end, .number) | first // empty' "$TMP/bot.json")
 	if [[ -z $found ]]; then
 		ensure_label
 		gh issue create -R "$REPO" --title "$title" --label "$LABEL" --body-file "$TMP/upsert.md" >/dev/null || return 1
@@ -1131,7 +1180,7 @@ upsert() {
 	fi
 	num=$(jq -r .number <<<"$found")
 	ost=$(jq -r .state <<<"$found")
-	old=$(jq -r '(.body | capture("<!-- follow-state: (?<s>[^>]*) -->") | .s) // ""' <<<"$found")
+	old=$(jq -r "$JQ_KEY"' (stateline | capture("^<!-- follow-state: (?<s>[^>]*) -->$") | .s) // ""' <<<"$found")
 	if [[ $ost != open ]]; then gh issue reopen "$num" -R "$REPO" >/dev/null || return 1; fi
 	gh issue edit "$num" -R "$REPO" --title "$title" --body-file "$TMP/upsert.md" >/dev/null || return 1
 	if [[ $old != "$state" || $ost != open ]]; then
@@ -1146,7 +1195,7 @@ upsert() {
 close_followed() {
 	local base=$1 why=$2 n x
 	bot_issues >"$TMP/bot.json" || return 1
-	jq -r '.[] | select(.state == "open") | (.body | capture("<!-- follow-bot:key=follow:(?<v>[0-9.]+) -->") | .v) as $v | "\(.number) \($v)"' \
+	jq -r "$JQ_KEY"' .[] | select(.state == "open") | (keyline | capture("^<!-- follow-bot:key=follow:(?<v>[0-9.]+) -->$") | .v) as $v | "\(.number) \($v)"' \
 		"$TMP/bot.json" >"$TMP/open" 2>/dev/null || : >"$TMP/open"
 	while read -r n x; do
 		if ! is_plain "$x" || ! is_plain "$base"; then continue; fi
@@ -1159,18 +1208,10 @@ close_followed() {
 # Lines already starting with "- ": the rest of the line made safe.
 md_item_keep() { sed 's/^- //' | md_item; }
 
-# The recovery by hand, the same for every state: tools from outside the tree, the guard before any push.
+# What happens next, the same for every state that stops: the automation stops here; nothing is scripted.
 by_hand() {
-	echo "Merge by hand (the same rules, and the guard):"
-	echo
-	echo '```sh'
-	echo "cp -R .github/follow /tmp/follow-tools      # main's scripts, outside the tree being merged"
-	echo "/tmp/follow-tools/follow.sh merge $1     # leaves a conflict in the work tree"
-	echo "# resolve, git add, then:"
-	echo "/tmp/follow-tools/follow.sh stamp           # M and R, then the guard: exit 4 = refused, do not push"
-	echo "docker run --rm -v \"\$PWD:/w\" -w /w node:24 sh -c 'npm ci && npm run check'   # the original's code, contained"
-	echo "git push upstream HEAD:main                 # GitHub; publish.yml publishes it"
-	echo '```'
+	echo "Nothing landed, and the automation does nothing more with ${1:-this release} (docs/FOLLOWING.md 2.7). Taking it is done by"
+	echo "hand, by the owner's staff, on the owner's request."
 }
 
 cmd_report() {
@@ -1197,8 +1238,15 @@ cmd_report() {
 	case $state in
 	up-to-date | not-newer | waiting)
 		red=0
+		# main has the release and npm lacks main's version: land only starts publish.yml. A failure there is red.
+		case $land in
+		dispatch-failed | failure | cancelled)
+			state="publish not started" red=1
+			echo "main has the release; npm lacks $PKG \`$(shown "$(jq -r '.fork_version // "?"' "$res")")\`, and the job \`land\` could not start \`publish.yml\` (**$(shown "$land")**). Start it: \`gh workflow run publish.yml -R $REPO -f dry_run=no\`." >>"$body"
+			;;
+		esac
 		say "$state"
-		if [[ $(jq -r '.fork_published' "$res") == true && $state != waiting ]]; then
+		if ((red == 0)) && [[ $(jq -r '.fork_published' "$res") == true && $state != waiting ]]; then
 			close_followed "$(jq -r '.base_version // ""' "$res")" "main has the release and npm has $PKG $(shown "$(jq -r .fork_version "$res")")." || failed=1
 		fi
 		;;
@@ -1259,7 +1307,7 @@ cmd_report() {
 				sed 's/^/- /' | md_item_keep
 			echo
 			echo "Accepting it is the owner's: a new path is accepted by adding it to \`.github/follow/paths.txt\` in a commit"
-			echo "of his own (the next run takes the release); anything else is merged by hand, and the guard's refusal read."
+			echo "of his own (the next run takes the release); anything else is his decision, made knowingly."
 			echo
 			by_hand "$v"
 		} >>"$body"
@@ -1279,7 +1327,7 @@ cmd_report() {
 			failed=1
 		}
 	elif [[ $state == landed ]]; then
-		if bot_issues >"$TMP/bot.json" && jq -e --arg m "$(key_marker "$key")" 'any(.[]; .state == "open" and (.body | contains($m)))' "$TMP/bot.json" >/dev/null; then
+		if bot_issues >"$TMP/bot.json" && jq -e --arg m "$(key_marker "$key")" "$JQ_KEY"' any(.[]; .state == "open" and keyline == $m)' "$TMP/bot.json" >/dev/null; then
 			upsert "$key" "follow: $v — landed" landed "$body" || failed=1
 		fi
 	fi
@@ -1290,13 +1338,18 @@ cmd_report() {
 readme_issue() {
 	local v=$1 key="readme:$1" f diff=${FOLLOW_README_DIFF:-$OUT/readme.diff}
 	bot_issues >"$TMP/bot.json" || return 1
-	if jq -e --arg m "$(key_marker "$key")" 'any(.[]; .body | contains($m))' "$TMP/bot.json" >/dev/null; then return 0; fi
+	if jq -e --arg m "$(key_marker "$key")" "$JQ_KEY"' any(.[]; keyline == $m)' "$TMP/bot.json" >/dev/null; then return 0; fi
 	if [[ ! -s $diff ]]; then
 		jq -r '.readme_diff // ""' "$2" >"$TMP/readme.diff"
 		diff=$TMP/readme.diff
 	fi
 	head -c 40000 "$diff" >"$TMP/readme.cut"
 	{
+		key_marker "$key"
+		echo
+		state_marker open
+		echo
+		echo
 		echo "$ORIGINAL_NAME $v changed its README. The fork keeps its own (docs/FOLLOWING.md 2.5); what is new may need"
 		echo "describing in the fork's words. This blocks nothing."
 		echo
@@ -1307,8 +1360,6 @@ readme_issue() {
 			echo
 			echo "$f"
 		fi
-		echo
-		key_marker "$key"
 	} >"$TMP/readme.md"
 	ensure_label
 	gh issue create -R "$REPO" --title "README: after $v" --label "$LABEL" --body-file "$TMP/readme.md" >/dev/null || return 1
@@ -1319,7 +1370,11 @@ readme_issue() {
 # issue of VERSION; anything else opens or updates it. A dry run closes nothing.
 cmd_report_publish() {
 	local v=$1 result=$2 key n dry=${DRY_RUN:-yes}
-	is_plain "$v" || die "report-publish: not a plain version"
+	# plan names "!" for a version that is not plain: still a report, never a close.
+	if ! is_plain "$v"; then
+		v=unknown
+		[[ $result != success ]] || result="the jobs succeeded, but main's version is not plain"
+	fi
 	key="publish:$v"
 	if [[ $result == success ]]; then
 		if [[ $dry != no ]]; then
@@ -1328,7 +1383,7 @@ cmd_report_publish() {
 		fi
 		if jq -e --arg v "$v" '(.time // {}) | has($v)' >/dev/null <<<"$(npm_meta "$PKG")"; then
 			bot_issues >"$TMP/bot.json" || return 1
-			for n in $(jq -r --arg m "$(key_marker "$key")" '.[] | select(.state == "open" and (.body | contains($m))) | .number' "$TMP/bot.json"); do
+			for n in $(jq -r --arg m "$(key_marker "$key")" "$JQ_KEY"' .[] | select(.state == "open" and keyline == $m) | .number' "$TMP/bot.json"); do
 				gh issue close "$n" -R "$REPO" --comment "npm has $PKG $v now${RUN_URL:+ ($RUN_URL)}." >/dev/null || return 1
 				say "issue #$n closed"
 			done
