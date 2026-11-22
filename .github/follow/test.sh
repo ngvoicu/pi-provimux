@@ -117,16 +117,23 @@ pack_release() {
 	jq -n --arg t "$tgz" --arg i "$(sri "$tgz")" '{tarball: $t, integrity: $i}' >"$dir/_router-for-me_pi-cliproxyapi-provider@$v.dist.json"
 }
 
-# mktar.mjs OUT MODE REPO COMMIT LIST: a gzipped tar as npm makes it (plain ustar, package/<path>, regular files),
-# of the files of LIST at COMMIT. MODE plain, or one extended header for extensions/lib.ts: pax-size (a PAX "size"
-# longer than the base header's, the extra bytes after git's: node-tar installs them, a reader of the base size
-# sees git's bytes), x (a PAX path), g (a PAX global header), L (a GNU long name), K (a GNU long link name),
-# linkname (a regular-file header with a link target, which npm's node-tar reads as invalid and skips).
+# mktar.mjs OUT MODE REPO COMMIT LIST: a gzipped tar as npm makes it (plain ustar, package/<path>, regular files, a
+# per-file PAX header with path, mtime and size for a name ustar cannot hold, one gzip member), of the files of LIST
+# at COMMIT. MODE plain, or a header for MKTAR_TARGET (default extensions/lib.ts): pax-size (a PAX "size" longer than
+# the base header's, the extra bytes after git's: node-tar installs them), pax-conflict (the review's case: a global
+# PAX size one byte short and a per-file PAX size equal to the header's, which npm 10's and npm 11's node-tar read
+# with different precedence; the file is put last), x (a PAX path), x-npm (path, mtime and size, as npm pack writes them), xkey:K=V (a PAX
+# path and the key K), g (a PAX global header), L (a GNU long name), K (a GNU long link name), linkname (a
+# regular-file header with a link target); or, after the files: hardlink, symlink, fifo, outside-file, outside-dir,
+# dotdot-dir (package/../x/), pax-dangling (a PAX header with no entry), trailing (data after the end blocks); root
+# (everything under pi-x/, not package/); gz-name (a gzip header with a file name), gz-two (two gzip members).
 cat >"$T/mktar.mjs" <<-'JS'
 	import { execFileSync } from "node:child_process";
 	import { readFileSync, writeFileSync } from "node:fs";
 	import { gzipSync } from "node:zlib";
 	const [out, mode, repo, commit, list] = process.argv.slice(2);
+	const target = process.env.MKTAR_TARGET || "extensions/lib.ts";
+	const root = mode === "root" ? "pi-x" : "package";
 	const header = (name, size, type, link = "") => {
 		const h = Buffer.alloc(512);
 		h.write(name, 0, 100, "utf8");
@@ -146,22 +153,32 @@ cat >"$T/mktar.mjs" <<-'JS'
 	};
 	const pad = (b) => Buffer.concat([b, Buffer.alloc((512 - (b.length % 512)) % 512)]);
 	const record = (kv) => {
-		let n = kv.length + 3;
-		while (`${n} ${kv}\n`.length !== n) n = `${n} ${kv}\n`.length;
+		let n = Buffer.byteLength(kv) + 3;
+		while (Buffer.byteLength(`${n} ${kv}\n`) !== n) n = Buffer.byteLength(`${n} ${kv}\n`);
 		return Buffer.from(`${n} ${kv}\n`);
 	};
 	const parts = [];
 	const ext = (type, data) => parts.push(header("PaxHeader", data.length, type), pad(data));
+	const npmPax = (name, size) => Buffer.concat([record(`path=${name}`), record("mtime=499162500"), record(`size=${size}`)]);
 	if (mode === "g") ext("g", record("comment=x"));
-	for (const p of readFileSync(list, "utf8").split("\n").filter(Boolean)) {
+	const files = readFileSync(list, "utf8").split("\n").filter(Boolean);
+	// A global header applies to every entry after it: the conflict's file last, so it is the only one it touches.
+	if (mode === "pax-conflict") files.sort((a, b) => (a === target) - (b === target));
+	for (const p of files) {
 		let data = execFileSync("git", ["-C", repo, "cat-file", "blob", `${commit}:${p}`]);
-		const name = `package/${p}`;
+		const name = `${root}/${p}`;
 		let size = data.length;
-		if (p === "extensions/lib.ts") {
+		if (!/^[\x20-\x7e]{1,99}$/.test(name)) ext("x", npmPax(name, size));
+		if (p === target) {
 			if (mode === "pax-size") {
 				data = Buffer.concat([data, Buffer.from(";globalThis.stolen = 1;\n")]);
 				ext("x", record(`size=${data.length}`));
+			} else if (mode === "pax-conflict") {
+				ext("g", record(`size=${size - 1}`));
+				ext("x", record(`size=${size}`));
 			} else if (mode === "x") ext("x", record(`path=${name}`));
+			else if (mode === "x-npm") ext("x", npmPax(name, size));
+			else if (mode.startsWith("xkey:")) ext("x", Buffer.concat([record(`path=${name}`), record(mode.slice(5))]));
 			else if (mode === "L") ext("L", Buffer.from(`${name}\0`));
 			else if (mode === "K") ext("K", Buffer.from("x\0"));
 			if (mode !== "pax-size") size = data.length;
@@ -172,8 +189,20 @@ cat >"$T/mktar.mjs" <<-'JS'
 		}
 		parts.push(header(name, size, "0"), pad(data));
 	}
+	if (mode === "hardlink") parts.push(header(`${root}/hard`, 0, "1", `${root}/package.json`));
+	if (mode === "symlink") parts.push(header(`${root}/sym`, 0, "2", "package.json"));
+	if (mode === "fifo") parts.push(header(`${root}/fifo`, 0, "6"));
+	if (mode === "outside-file") parts.push(header("other/manual.txt", 2, "0"), pad(Buffer.from("x\n")));
+	if (mode === "outside-dir") parts.push(header("other/", 0, "5"));
+	if (mode === "dotdot-dir") parts.push(header(`${root}/../x/`, 0, "5"));
+	if (mode === "pax-dangling") ext("x", record(`path=${root}/extra`));
 	parts.push(Buffer.alloc(1024));
-	writeFileSync(out, gzipSync(Buffer.concat(parts)));
+	if (mode === "trailing") parts.push(pad(Buffer.from("trailing\n")));
+	const tar = Buffer.concat(parts);
+	let gz = gzipSync(tar);
+	if (mode === "gz-name") gz = Buffer.concat([gz.subarray(0, 3), Buffer.from([8]), gz.subarray(4, 10), Buffer.from("x.tar\0"), gz.subarray(10)]);
+	if (mode === "gz-two") gz = Buffer.concat([gzipSync(tar.subarray(0, 512)), gzipSync(tar.subarray(512))]);
+	writeFileSync(out, gz);
 JS
 
 # --- the fixture --------------------------------------------------------------------------------------------------
@@ -717,29 +746,36 @@ t_f2_release() {
 	eq "$(state)" refused "a tarball without a file the commit ships: refused"
 	has "$(field reasons)" 'tarball: the commit ships "extensions/lib.ts", npm'"'"'s tarball lacks it' "says which file"
 	no_bundle "lacks"
-	# Tar headers are read by npm's own node-tar, as npm installs the package: what it installs is compared, both
-	# ways. pax-size (a PAX size longer than the base header's: npm installs git's bytes and a hidden line) differs;
-	# a regular file with a link target (linkname, the final review's case) is an entry node-tar skips, so the file
-	# git ships is missing; a PAX path (x), a PAX global header (g), a GNU long name (L) and a GNU long link name (K,
-	# which node-tar applies after its check of the header's own link field) leave the same file, read as npm reads
-	# them, and pass.
-	local mode want
-	for mode in pax-size linkname K x g L; do
+	# Tar headers pass a strict pre-scan (headers.mjs) before npm's own node-tar extracts anything, so nothing that
+	# two node-tar versions read differently gets through: pax-size (a PAX size longer than the base header's: npm
+	# would install a hidden line), pax-conflict (the review's case, on README.md: a global and a per-file PAX size
+	# that npm 10 and npm 11 read with different precedence), a regular file with a link target (linkname), a GNU
+	# long link name (K) or long name (L) and a global PAX header (g) are refused before extraction. A per-file PAX
+	# path (x) and npm pack's own path, mtime and size (x-npm) pass.
+	local mode want target
+	for mode in pax-size pax-conflict linkname K L g x x-npm; do
 		fresh "f2-header-$mode"
 		change extensions/lib.ts 'export const x = 82;' "fix: x is 82"
 		release 1.5.1
 		cd "$O"
-		PACK_MODE=$mode pack_release "$(git rev-parse HEAD)" 1.5.1
+		target=extensions/lib.ts
+		[[ $mode == pax-conflict ]] && target=README.md
+		PACK_MODE=$mode MKTAR_TARGET=$target pack_release "$(git rev-parse HEAD)" 1.5.1
 		cd "$F"
 		run prepare
 		case $mode in
-		pax-size) want='tarball: "extensions/lib.ts" differs from the commit' ;;
-		linkname) want='tarball: the commit ships "extensions/lib.ts", npm'"'"'s tarball lacks it' ;;
+		pax-size) want="\"package/$target\": its PAX size" ;;
+		pax-conflict) want='a global PAX header (g)' ;;
+		linkname) want='a link target ("x"): links are refused' ;;
+		K) want='a GNU long link name header (K)' ;;
+		L) want='a GNU long name header (L)' ;;
+		g) want='a global PAX header (g)' ;;
 		*) want='' ;;
 		esac
 		if [[ -n $want ]]; then
 			eq "$(state)" refused "a tarball with a $mode header: refused"
-			has "$(field reasons)" "$want" "$mode: what npm installs is not git's"
+			has "$(field reasons)" "tarball: refused before extraction: " "$mode: refused before node-tar reads it"
+			has "$(field reasons)" "$want" "$mode: says why"
 			no_bundle "header-$mode"
 		else
 			eq "$(state)" candidate "a tarball with a $mode header naming the same file: read as npm reads it: $(field reasons)"
@@ -765,6 +801,27 @@ t_f2_release() {
 	cd "$P/repo"
 	runc node "$SCRIPTS/tarball.mjs" compare "$tgz" "$(git -C "$P/repo" rev-parse HEAD)" "$P/ships"
 	eq "$RUN_RC" 0 "a PAX file name: read as npm reads it, the same as git's: $RUN_OUT"
+	# The keys npm pack writes in that per-file PAX header (node-tar's WriteEntry, pacote's portable: true): path,
+	# mtime and size, the size the header's own; npm 10.9.3 and 11.19.1 write the same bytes. The pre-scan allows
+	# exactly these.
+	eq "$(gzip -dc "$tgz" | LC_ALL=C grep -ao '[0-9]* [a-z]*=' | sed 's/^[0-9]* //' | tr '\n' ' ')" "path= mtime= size= " "npm pack's PAX keys"
+	# The pre-scan, on the same package: everything outside the allowed headers is refused before extraction,
+	# whatever node-tar would do, and so also with an npm on PATH that has no node-tar at all (fakenpm, below).
+	local pc m
+	pc=$(git -C "$P/repo" rev-parse HEAD)
+	for m in plain x-npm; do
+		MKTAR_TARGET=package.json node "$T/mktar.mjs" "$P/$m.tgz" "$m" "$P/repo" "$pc" "$P/ships"
+		runc node "$SCRIPTS/tarball.mjs" compare "$P/$m.tgz" "$pc" "$P/ships"
+		eq "$RUN_RC" 0 "pre-scan control $m: passes: $RUN_OUT"
+	done
+	for m in hardlink symlink fifo outside-file outside-dir dotdot-dir root pax-dangling trailing gz-name gz-two \
+		pax-size pax-conflict linkname K L g xkey:size=1 xkey:linkpath=x xkey:uid=0 xkey:gid=0 xkey:uname=x \
+		xkey:gname=x xkey:atime=1 xkey:ctime=1 xkey:charset=x xkey:comment=x xkey:path=package/x; do
+		MKTAR_TARGET=package.json node "$T/mktar.mjs" "$P/bad.tgz" "$m" "$P/repo" "$pc" "$P/ships"
+		runc node "$SCRIPTS/tarball.mjs" compare "$P/bad.tgz" "$pc" "$P/ships"
+		eq "$RUN_RC" 4 "pre-scan $m: refused"
+		has "$RUN_OUT" "tarball: refused before extraction: " "pre-scan $m: before node-tar reads it"
+	done
 	# No bundled node-tar (an npm on PATH whose install has none): refused, never read another way.
 	mkdir -p "$P/fakenpm/bin" "$P/fakenpm/lib/npm"
 	printf '{"name": "npm", "version": "0.0.0-fake"}\n' >"$P/fakenpm/lib/npm/package.json"
@@ -773,6 +830,13 @@ t_f2_release() {
 	PATH="$P/fakenpm/bin:$PATH" runc node "$SCRIPTS/tarball.mjs" compare "$tgz" "$(git -C "$P/repo" rev-parse HEAD)" "$P/ships"
 	eq "$RUN_RC" 4 "no bundled node-tar: refused"
 	has "$RUN_OUT" "node-tar cannot be found or read" "says so"
+	# A refused header is refused with no node-tar at all: the pre-scan does not depend on one.
+	for m in hardlink symlink outside-file root pax-conflict; do
+		MKTAR_TARGET=package.json node "$T/mktar.mjs" "$P/bad.tgz" "$m" "$P/repo" "$pc" "$P/ships"
+		PATH="$P/fakenpm/bin:$PATH" runc node "$SCRIPTS/tarball.mjs" compare "$P/bad.tgz" "$pc" "$P/ships"
+		eq "$RUN_RC" 4 "pre-scan $m with no node-tar: refused"
+		has "$RUN_OUT" "tarball: refused before extraction: " "pre-scan $m with no node-tar: by the pre-scan"
+	done
 	cd "$F"
 	# The bytes are not what the registry's integrity says.
 	fresh f2-integrity

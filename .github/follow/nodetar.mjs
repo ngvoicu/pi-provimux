@@ -48,7 +48,8 @@ export const extractLikeNpm = (tar, file, dir) => {
 	const entries = [];
 	const warnings = [];
 	const onwarn = (code, msg) => warnings.push(`${code}: ${msg}`);
-	tar.t({ file, sync: true, onwarn, onReadEntry: (e) => entries.push({ path: e.path, type: e.type }) });
+	// onentry: node-tar 6 (npm 10) knows only that name; node-tar 7 (npm 11) takes it as onReadEntry.
+	tar.t({ file, sync: true, onwarn, onentry: (e) => entries.push({ path: e.path, type: e.type }) });
 	const sawIgnores = new Set();
 	mkdirSync(dir, { recursive: true });
 	tar.x({

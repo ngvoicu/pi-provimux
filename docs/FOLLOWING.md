@@ -53,8 +53,8 @@ Both must exist. A version on npm with no bump commit on the original's `main`, 
 nothing lands.
 
 3. **`B` is what npm ships, both ways.** Before anything is merged, npm's tarball of `V` is downloaded from
-   `https://registry.npmjs.org/` only, checked against the registry's `sha512` integrity and read in memory (never
-   unpacked). On the other side, `B`'s regular files are written to a temporary folder and npm lists what it would
+   `https://registry.npmjs.org/` only, checked against the registry's `sha512` integrity, its headers pre-scanned, then
+   unpacked by npm's own `node-tar` into a fresh temporary folder (below); nothing of it runs. On the other side, `B`'s regular files are written to a temporary folder and npm lists what it would
    pack from them (`npm pack --dry-run --ignore-scripts`, from a neutral folder: nothing of `B` runs). The two must
    be the same set of files, each a regular file of `B` with the same bytes (`.github/follow/tarball.mjs compare`).
    A file that differs, a file `B` lacks, **a file `B` ships that the tarball lacks**, a link, or no tarball at all:
@@ -65,18 +65,37 @@ nothing lands.
    and `package-lock.json` (2.6 guards those by policy). If npm's packing rules ever differ between the original's
    npm and the runner's, the check refuses; it never passes a difference.
 
-   **No tar format is parsed by the automation.** The tarball is read by **npm's own `node-tar`, the copy bundled
+   **First, a strict header pre-scan, independent of any `node-tar` version** (`.github/follow/headers.mjs`).
+   Versions of `node-tar` do not all read the same headers the same way. A global PAX `size` and a per-file PAX
+   `size` that disagree give a README 79 bytes under npm 11.19.1's `node-tar` 7 and 78 under npm 10.9.3's
+   `node-tar` 6. npm 10 ships with Node 22.19.0, the package's minimum Node, so users can still install with it.
+   So before any extraction, the raw tar headers are read, only to classify them, never to take a file's bytes.
+   The tarball is refused unless it is one gzip member (no gzip name, extra field or comment), and every header is:
+   - a plain ustar regular file (`0`) or directory (`5`, size 0) under `package/`, with a valid checksum, plain
+     octal numbers and no link target. Its path has no empty, `.` or `..` segment, appears once and is ASCII
+     unless a PAX path gives it;
+   - or a **per-file** PAX header (`x`) with only the keys `npm pack` writes. That is `path`, `mtime` and `size`,
+     and `size` must equal the following header's own size. It must be followed by the file or directory it
+     describes.
+
+   `npm pack` (pacote's `portable: true`) writes exactly `path`, `mtime` and `size`, the same bytes with npm
+   10.9.3 and 11.19.1. For `docs/café.md` that is `path=package/docs/café.md`, `mtime=499162500`, `size=6`. It
+   never writes `atime`, `ctime`, `charset`, `comment`, owners or `linkpath`, the last only for links, which it
+   does not pack. Refused before extraction: a global PAX header (`g`), GNU `L`/`K`, any link, any other type or
+   PAX key, a dangling PAX header, a lone zero block and any data after the two end blocks. Afterwards, the files
+   `node-tar` writes must be exactly those the pre-scan saw.
+
+   **No file's bytes are taken from that scan.** The tarball is extracted by **npm's own `node-tar`, the copy bundled
    with the job's npm** (found from that npm's install, `npm root -g` with no user or global configuration, and
    checked to be the install of the `npm --version` on `PATH`; never from the repository's dependencies), and
    extracted **with the options npm's `pacote` uses when it installs a package** (strip the first folder, no
    chmod, no mtime, no owner, links filtered out, `.gitignore` read as `.npmignore`) into a fresh temporary folder
    (`.github/follow/nodetar.mjs`). The files so extracted are what is compared with `B`, both ways. So the check
-   sees what npm installs, by construction: PAX and GNU headers are applied exactly as npm applies them (a PAX
-   `size` longer than the base header's installs bytes past git's, and differs; a PAX name such as
-   `docs/café.md`, which `npm pack` writes for any non-ASCII name, reads as npm reads it), and an entry npm skips
-   (a regular file whose header carries a link target) is missing, so a file `B` ships there is refused. Also
-   refused, though npm would only drop or warn: any link, any entry outside `package/`, any warning of `node-tar`,
-   and a job whose npm has no bundled `node-tar` or none whose version can be read. The registry's `sha512` is
+   sees what npm installs, by construction. A PAX name such as `docs/café.md`, which `npm pack` writes for any
+   non-ASCII name, reads as npm reads it. What the pre-scan let through reads the same under npm 10's and npm 11's
+   `node-tar`. Also refused, as a second line: any link or entry outside `package/` that `node-tar` lists (with the
+   `onentry` callback, which both `node-tar` 6 and 7 call), any warning of `node-tar`, and a job whose npm has no
+   bundled `node-tar` or none whose version can be read. The registry's `sha512` is
    checked before the tarball is read. The original's 1.5.0 passes.
 
 Every string from upstream is checked before it is used: versions are tokens of `[0-9A-Za-z.+-]` (anything else reads
@@ -887,7 +906,7 @@ workflows of a public repository are still disabled after 60 days without activi
 
 1. Done. `.github/follow/`: `follow.sh` (`select`, `merge`, `stamp`, `guard`, `report`, and for the workflows
    `prepare`, `fetch-candidate`, `recheck`, `land`, `plan`, `tag`, `report-publish`), `manifest.mjs`,
-   `tarball.mjs`, `nodetar.mjs`, `load.mjs`, `paths.txt`, `test.sh`. Revised after the security review of 2026-11-22
+   `tarball.mjs`, `headers.mjs`, `nodetar.mjs`, `load.mjs`, `paths.txt`, `test.sh`. Revised after the security review of 2026-11-22
    (findings 2 to 12), and again after the second review of the same day, with the scope narrowed: no scripted
    recovery (2.7), environments for every writing job (6.3), development dependencies by the lock's graph (2.6),
    only exported trees for the test containers (6.1).
@@ -918,7 +937,7 @@ mounts, the container steps) is checked as text in `workflows`.
 | `conflict` | A conflict in a source file lands nothing and leaves the work tree alone; by hand it stops, and after resolving `stamp` and `guard` finish. |
 | `manifest_conflict`, `manifest_merge` | `devDependencies` changed on both sides is a conflict; changed on one side each, a merge by hand gets both keys, `description` stays the fork's, tabs kept, and the guard refuses it. |
 | `refusals` | Each refusal: `LICENSE`, a workflow, a new top-level file, `vitest.config.ts`, `.npmrc`, `docs/`, a symbolic link, `dependencies`, a `postinstall`, `license`, a new key, `pi`, `files`, a package from another registry. |
-| `f2_release` | Read by npm's own `node-tar`: a PAX path, a PAX global header and GNU long names naming the same file pass; a PAX file name (`docs/café.md`, packed by `npm pack`) reads as npm's; no bundled `node-tar` refuses. Refused: npm's tarball with a changed file, with a file the commit lacks, **without a file the commit ships**, with a PAX size longer than its base header's (npm installs other bytes), with a regular-file header carrying a link target (npm skips the entry), with a wrong integrity, missing, and a rewritten bump commit: all refused. |
+| `f2_release` | The header pre-scan, then npm's own `node-tar`. Pass: a per-file PAX path, and `npm pack`'s own `path`, `mtime` and `size`. A PAX file name (`docs/café.md`, packed by `npm pack`) reads as npm's, and its PAX keys are exactly `path`, `mtime`, `size`. Refused before extraction, also with an npm that has no `node-tar`: the review's global-against-per-file PAX size on `README.md`, a PAX size longer than its base header's (the hidden `globalThis.stolen`), a regular-file header carrying a link target, a PAX global header, GNU `L`/`K`, hard and symbolic links, a FIFO, a file or directory outside `package/`, `package/../x/`, a tree under another root, a dangling PAX header, trailing data, a gzip name, two gzip members, and each PAX key `npm pack` does not write (`linkpath`, `uid`, `gid`, `uname`, `gname`, `atime`, `ctime`, `charset`, `comment`, a second `path`, a `size` other than the header's). No bundled `node-tar` refuses. Also refused: npm's tarball with a changed file, with a file the commit lacks, **without a file the commit ships**, with a wrong integrity, or missing, and a rewritten bump commit. |
 | `f3_strings`, `f3_handoff`, `f3_links`, `f3_checker` | A version string with a line break adds no record; a hostile old-base version is never evaluated; a version input with a runner command is not echoed; runner commands are stopped; `fetch-candidate` prints exactly the commit on standard output with `GITHUB_ACTIONS` unset and true, the stop markers on standard error; a link where the merge writes is refused and nothing is written through it; a checker that fails is an error, not a pass. |
 | `f4_deps`, `f4_dev_lands` | Refused: a development dependency moved to `dependencies`; a changed peer, new `optionalDependencies`; an entry the root's peer reaches, changed (with install scripts), marked `dev` and changed, removed, or shadowed by a new nested `dev` entry; another package's tarball and digest under a development dependency's name; a link; a local-file development dependency with no entry; an entry installing another package than its declaration asks for (a stale same-version alias), an alias declaration whose entry installs the alias's own name, a git declaration; a short or missing integrity; a root entry unlike `package.json`; a lock with no root. Lands: a bump of two development dependencies, one with install scripts; a development alias (`npm:a@1.0.0`). |
 | `f5_paths`, `f5_pack`, `f5_load`, `f5_order` | A nested `.npmrc`, `.npmignore`, `.gitattributes`; `tsconfig.json`; a new extension file; a test the fork changed; a nested `.npmignore` leaving the registered extension out of the tarball; a comment naming a retired import is no refusal; `load.mjs` loads a packed package with its files, refuses one whose template-literal import the tarball lacks, and gives the package nothing but its peers; the test jobs' container steps, replayed in the workflow's order with an install that generates a file the extension needs, fail at the load, and pass with the file in the commit. |

@@ -7,9 +7,13 @@
 //   compare FILE COMMIT SHIPS     the tarball and the commit match both ways: the tarball holds exactly the files of
 //                                 SHIPS (what npm packs from COMMIT, one path per line), each a regular file of
 //                                 COMMIT with the same bytes, as npm's own node-tar extracts it with pacote's
-//                                 options; prints one difference per line; exit 0, else 4. Also refused: a link,
-//                                 an entry outside package/, any node-tar warning (an entry it skips), and no
-//                                 bundled node-tar or no readable version of it
+//                                 options; prints one difference per line; exit 0, else 4. First, independent of
+//                                 any node-tar version, every tar header must pass a strict pre-scan
+//                                 (headers.mjs: plain ustar files and folders under package/, per-file PAX headers
+//                                 with only npm pack's keys); anything else is refused before extraction. Also
+//                                 refused: a link, an entry outside package/, any node-tar warning (an entry it
+//                                 skips), files node-tar writes other than the scanned ones, and no bundled
+//                                 node-tar or no readable version of it
 //   export COMMIT DIR             writes COMMIT's regular files (no link, no submodule) into DIR, a new folder, so
 //                                 that npm can list what it would pack from them; runs nothing of them
 //   registered PKGJSON PACKED     every extension package.json registers (pi.extensions) is in PACKED (one path per
@@ -20,6 +24,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
+import { expectedFiles, scanHeaders } from "./headers.mjs";
 import { entryProblems, extractLikeNpm, npmTar } from "./nodetar.mjs";
 
 const MAX = 64 * 1024 * 1024;
@@ -61,7 +66,13 @@ try {
 		if (!/^[0-9a-f]{40}$/.test(commit ?? "") || !shipsFile) fail("compare FILE COMMIT SHIPS (a full commit id)");
 		const ships = new Set(lines(shipsFile));
 		const bad = [];
-		// npm's own reader, or a refusal: no tar is parsed here.
+		// The headers, classified before any extraction: what two node-tar versions could read differently is refused.
+		const scan = scanHeaders(file);
+		if (scan.problems.length) {
+			for (const p of scan.problems) console.log(`tarball: refused before extraction: ${p}`);
+			process.exit(4);
+		}
+		// npm's own reader, or a refusal: no file's bytes are taken from the pre-scan.
 		let nt;
 		try {
 			nt = npmTar();
@@ -81,6 +92,10 @@ try {
 		for (const b of entryProblems(got.entries)) bad.push(`tarball: ${b}`);
 		for (const w of got.warnings) bad.push(`tarball: npm's node-tar ${nt.tarVersion} warns: ${w.slice(0, 300)}`);
 		for (const p of got.others) bad.push(`tarball: ${show(p)} is not a regular file once extracted`);
+		// node-tar must have written exactly the files the pre-scan classified.
+		const want = new Set(expectedFiles(scan.files));
+		for (const p of got.files) if (!want.has(p)) bad.push(`tarball: npm's node-tar wrote ${show(p)}, which the header scan did not see`);
+		for (const p of want) if (!got.files.includes(p)) bad.push(`tarball: npm's node-tar did not write ${show(p)}, which the header scan saw`);
 		const seen = new Set(got.files);
 		for (const p of got.files) {
 			const tree = git(["ls-tree", "-z", commit, "--", p]).toString("utf8");
