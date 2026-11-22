@@ -1,13 +1,15 @@
 #!/usr/bin/env node
-// What an npm release ships, checked against git (docs/FOLLOWING.md 2.1, 4.2). Node's own modules and git only;
-// the tarball is read in memory, never unpacked to disk.
+// What an npm release ships, checked against git (docs/FOLLOWING.md 2.1, 4.2). Node's own modules, git, and the
+// tar reader bundled with the npm on PATH (nodetar.mjs): the tarball is extracted as npm extracts it on install, into
+// a fresh temporary folder, and nothing in it is run.
 //
 //   verify FILE INTEGRITY         FILE's sha512 is the registry's integrity ("sha512-<base64>"); exit 0, else 4
 //   compare FILE COMMIT SHIPS     the tarball and the commit match both ways: the tarball holds exactly the files of
 //                                 SHIPS (what npm packs from COMMIT, one path per line), each a regular file of
-//                                 COMMIT with the same bytes; prints one difference per line; exit 0, else 4. A
-//                                 tarball with any header tar.mjs does not read exactly as npm's node-tar (PAX or
-//                                 GNU extended headers, links, non-ustar formats) is refused (4)
+//                                 COMMIT with the same bytes, as npm's own node-tar extracts it with pacote's
+//                                 options; prints one difference per line; exit 0, else 4. Also refused: a link,
+//                                 an entry outside package/, any node-tar warning (an entry it skips), and no
+//                                 bundled node-tar or no readable version of it
 //   export COMMIT DIR             writes COMMIT's regular files (no link, no submodule) into DIR, a new folder, so
 //                                 that npm can list what it would pack from them; runs nothing of them
 //   registered PKGJSON PACKED     every extension package.json registers (pi.extensions) is in PACKED (one path per
@@ -15,9 +17,19 @@
 // Exit 1: the check itself failed (unreadable input, git error).
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
-import { entries, MAX, safePath } from "./tar.mjs";
+import { entryProblems, extractLikeNpm, npmTar } from "./nodetar.mjs";
+
+const MAX = 64 * 1024 * 1024;
+const safePath = (p) =>
+	typeof p === "string" &&
+	p.length > 0 &&
+	p.length < 4096 &&
+	!p.startsWith("/") &&
+	!/[\0\\\n\r]/.test(p) &&
+	!p.split("/").some((s) => s === ".." || s === "." || s === "");
 
 const fail = (msg) => {
 	console.error(`tarball.mjs: ${msg}`);
@@ -49,37 +61,28 @@ try {
 		if (!/^[0-9a-f]{40}$/.test(commit ?? "") || !shipsFile) fail("compare FILE COMMIT SHIPS (a full commit id)");
 		const ships = new Set(lines(shipsFile));
 		const bad = [];
-		const seen = new Set();
-		let files = 0;
-		// A tarball read otherwise than npm reads it (extended headers, other types, other formats) is refused.
-		let all;
+		// npm's own reader, or a refusal: no tar is parsed here.
+		let nt;
 		try {
-			all = entries(file);
+			nt = npmTar();
 		} catch (e) {
-			console.log(`tarball: ${e instanceof Error ? e.message : e}`);
+			console.log(`tarball: npm's bundled node-tar cannot be found or read: ${e instanceof Error ? e.message : e}`);
 			process.exit(4);
 		}
-		for (const e of all) {
-			if (e.type === "5") continue;
-			if (!e.path.startsWith("package/")) {
-				bad.push(`tarball: ${show(e.path)} is outside package/`);
-				continue;
-			}
-			const p = e.path.slice("package/".length);
-			if (!safePath(p)) {
-				bad.push(`tarball: ${show(p)} is not a plain relative path`);
-				continue;
-			}
-			if (e.type !== "0" && e.type !== "\0") {
-				bad.push(`tarball: ${show(p)} is not a regular file (type ${show(e.type)})`);
-				continue;
-			}
-			if (seen.has(p)) {
-				bad.push(`tarball: ${show(p)} is in it twice`);
-				continue;
-			}
-			seen.add(p);
-			files++;
+		const dir = mkdtempSync(join(tmpdir(), "follow-release-"));
+		let got;
+		try {
+			got = extractLikeNpm(nt.tar, file, join(dir, "package"));
+		} catch (e) {
+			rmSync(dir, { recursive: true, force: true });
+			console.log(`tarball: npm's node-tar ${nt.tarVersion} cannot read it: ${e instanceof Error ? e.message : e}`);
+			process.exit(4);
+		}
+		for (const b of entryProblems(got.entries)) bad.push(`tarball: ${b}`);
+		for (const w of got.warnings) bad.push(`tarball: npm's node-tar ${nt.tarVersion} warns: ${w.slice(0, 300)}`);
+		for (const p of got.others) bad.push(`tarball: ${show(p)} is not a regular file once extracted`);
+		const seen = new Set(got.files);
+		for (const p of got.files) {
 			const tree = git(["ls-tree", "-z", commit, "--", p]).toString("utf8");
 			const m = /^(\d{6}) (\w+) ([0-9a-f]{40})\t/.exec(tree);
 			if (!m) {
@@ -91,12 +94,13 @@ try {
 				continue;
 			}
 			const blob = git(["cat-file", "blob", m[3]]);
-			if (!blob.equals(e.data)) bad.push(`tarball: ${show(p)} differs from the commit`);
+			if (!blob.equals(readFileSync(join(dir, "package", p)))) bad.push(`tarball: ${show(p)} differs from the commit`);
 			else if (!ships.has(p)) bad.push(`tarball: ${show(p)} is in it, but npm would not pack it from the commit`);
 		}
-		// The other way: what npm packs from the commit, the tarball must hold.
+		// The other way: what npm packs from the commit, npm must install from the tarball.
 		for (const p of ships) if (!seen.has(p)) bad.push(`tarball: the commit ships ${show(p)}, npm's tarball lacks it`);
-		if (files === 0 || !seen.has("package.json")) bad.push("tarball: no package/package.json");
+		if (!seen.has("package.json")) bad.push("tarball: no package/package.json");
+		rmSync(dir, { recursive: true, force: true });
 		for (const b of bad) console.log(b);
 		process.exit(bad.length ? 4 : 0);
 	} else if (cmd === "export") {

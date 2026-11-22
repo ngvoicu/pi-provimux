@@ -2,7 +2,8 @@
 // The delivered package, loaded as pi loads it (docs/FOLLOWING.md 4.2). Run in the test container only, after
 // npm ci, on the tarball npm pack made there:
 //
-//   load.mjs TGZ NODE_MODULES   unpacks TGZ into a consumer folder of its own (node_modules/<name>, nothing else of
+//   load.mjs TGZ NODE_MODULES   extracts TGZ as npm installs it (npm's own node-tar, pacote's options) into a
+//                               consumer folder of its own (node_modules/<name>, nothing else of
 //                               the tree), links in only the package's peerDependencies from NODE_MODULES (what pi
 //                               provides at run time), then has pi's own loader (discoverAndLoadExtensions of
 //                               @earendil-works/pi-coding-agent) load the package: every extension pi.extensions
@@ -11,11 +12,11 @@
 // Exit 0 loaded, 4 the package does not load, 1 the check itself could not run (pi is not installed).
 // The consumer's HOME and pi's agent folder are new and empty, and the CLIPROXYAPI_* variables are cleared: the
 // extension loads unconfigured.
-import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { packageFiles } from "./tar.mjs";
+import { entryProblems, extractLikeNpm, npmTar } from "./nodetar.mjs";
 
 const PI = "@earendil-works/pi-coding-agent";
 const NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/;
@@ -31,30 +32,37 @@ const fail = (msg) => {
 const [tgz, nodeModules] = process.argv.slice(2);
 if (!tgz || !nodeModules) fail("usage: load.mjs TGZ NODE_MODULES");
 
-let files;
+// The tarball, extracted by npm's own node-tar with pacote's options (nodetar.mjs) into a staging folder, then
+// moved to node_modules/<name> of a consumer folder of its own.
+let nt;
 try {
-	files = packageFiles(tgz);
+	nt = npmTar();
 } catch (e) {
-	refuse(`the tarball is not a plain package: ${e instanceof Error ? e.message : e}`);
+	refuse(`npm's bundled node-tar cannot be found or read: ${e instanceof Error ? e.message : e}`);
 }
-const manifest = files.find((f) => f.path === "package.json");
-if (!manifest) refuse("the tarball has no package.json");
-const pkg = JSON.parse(manifest.data.toString("utf8"));
+const consumer = mkdtempSync(join(tmpdir(), "follow-consumer-"));
+const staging = join(consumer, "staging");
+let got;
+try {
+	got = extractLikeNpm(nt.tar, tgz, staging);
+} catch (e) {
+	refuse(`npm's node-tar ${nt.tarVersion} cannot read the tarball: ${e instanceof Error ? e.message : e}`);
+}
+const problems = [...entryProblems(got.entries), ...got.warnings.map((w) => `node-tar warns: ${w}`), ...got.others.map((p) => `${p} is not a regular file`)];
+if (problems.length) refuse(`the tarball is not a plain package: ${problems.join("; ").slice(0, 2000)}`);
+if (!got.files.includes("package.json")) refuse("the tarball has no package.json");
+const pkg = JSON.parse(readFileSync(join(staging, "package.json"), "utf8"));
 if (typeof pkg.name !== "string" || !NAME.test(pkg.name)) refuse("package.json has no plain name");
 const exts = pkg?.pi?.extensions;
 if (!Array.isArray(exts) || exts.length === 0) refuse("package.json registers no extension (pi.extensions)");
 
-const consumer = mkdtempSync(join(tmpdir(), "follow-consumer-"));
 const home = join(consumer, "home");
 const agent = join(consumer, "agent");
 mkdirSync(home);
 mkdirSync(agent);
 const dir = join(consumer, "node_modules", pkg.name);
-for (const f of files) {
-	const to = join(dir, f.path);
-	mkdirSync(dirname(to), { recursive: true });
-	writeFileSync(to, f.data);
-}
+mkdirSync(dirname(dir), { recursive: true });
+renameSync(staging, dir);
 // What pi provides at run time: the peers, and only those.
 for (const peer of Object.keys(pkg.peerDependencies ?? {})) {
 	if (!NAME.test(peer)) refuse(`peerDependencies has ${JSON.stringify(peer)}`);

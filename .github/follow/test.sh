@@ -120,15 +120,17 @@ pack_release() {
 # mktar.mjs OUT MODE REPO COMMIT LIST: a gzipped tar as npm makes it (plain ustar, package/<path>, regular files),
 # of the files of LIST at COMMIT. MODE plain, or one extended header for extensions/lib.ts: pax-size (a PAX "size"
 # longer than the base header's, the extra bytes after git's: node-tar installs them, a reader of the base size
-# sees git's bytes), x (a PAX path), g (a PAX global header), L (a GNU long name), K (a GNU long link name).
+# sees git's bytes), x (a PAX path), g (a PAX global header), L (a GNU long name), K (a GNU long link name),
+# linkname (a regular-file header with a link target, which npm's node-tar reads as invalid and skips).
 cat >"$T/mktar.mjs" <<-'JS'
 	import { execFileSync } from "node:child_process";
 	import { readFileSync, writeFileSync } from "node:fs";
 	import { gzipSync } from "node:zlib";
 	const [out, mode, repo, commit, list] = process.argv.slice(2);
-	const header = (name, size, type) => {
+	const header = (name, size, type, link = "") => {
 		const h = Buffer.alloc(512);
 		h.write(name, 0, 100, "utf8");
+		h.write(link, 157, 100, "utf8");
 		h.write("0000644\0", 100, "latin1");
 		h.write("0000000\0", 108, "latin1");
 		h.write("0000000\0", 116, "latin1");
@@ -163,6 +165,10 @@ cat >"$T/mktar.mjs" <<-'JS'
 			else if (mode === "L") ext("L", Buffer.from(`${name}\0`));
 			else if (mode === "K") ext("K", Buffer.from("x\0"));
 			if (mode !== "pax-size") size = data.length;
+			if (mode === "linkname") {
+				parts.push(header(name, size, "0", "x"), pad(data));
+				continue;
+			}
 		}
 		parts.push(header(name, size, "0"), pad(data));
 	}
@@ -711,11 +717,14 @@ t_f2_release() {
 	eq "$(state)" refused "a tarball without a file the commit ships: refused"
 	has "$(field reasons)" 'tarball: the commit ships "extensions/lib.ts", npm'"'"'s tarball lacks it' "says which file"
 	no_bundle "lacks"
-	# Extended tar headers, which npm's node-tar applies and a plain reader would not: refused, whatever they say.
-	# pax-size is the third review's case: a PAX size longer than the base header's, so npm installs git's bytes and
-	# a hidden line after them, while a reader of the base size would see only git's.
-	local mode
-	for mode in pax-size x g L K; do
+	# Tar headers are read by npm's own node-tar, as npm installs the package: what it installs is compared, both
+	# ways. pax-size (a PAX size longer than the base header's: npm installs git's bytes and a hidden line) differs;
+	# a regular file with a link target (linkname, the final review's case) is an entry node-tar skips, so the file
+	# git ships is missing; a PAX path (x), a PAX global header (g), a GNU long name (L) and a GNU long link name (K,
+	# which node-tar applies after its check of the header's own link field) leave the same file, read as npm reads
+	# them, and pass.
+	local mode want
+	for mode in pax-size linkname K x g L; do
 		fresh "f2-header-$mode"
 		change extensions/lib.ts 'export const x = 82;' "fix: x is 82"
 		release 1.5.1
@@ -723,10 +732,48 @@ t_f2_release() {
 		PACK_MODE=$mode pack_release "$(git rev-parse HEAD)" 1.5.1
 		cd "$F"
 		run prepare
-		eq "$(state)" refused "a tarball with a $mode header: refused"
-		has "$(field reasons)" "not read as npm reads it" "$mode: says why"
-		no_bundle "header-$mode"
+		case $mode in
+		pax-size) want='tarball: "extensions/lib.ts" differs from the commit' ;;
+		linkname) want='tarball: the commit ships "extensions/lib.ts", npm'"'"'s tarball lacks it' ;;
+		*) want='' ;;
+		esac
+		if [[ -n $want ]]; then
+			eq "$(state)" refused "a tarball with a $mode header: refused"
+			has "$(field reasons)" "$want" "$mode: what npm installs is not git's"
+			no_bundle "header-$mode"
+		else
+			eq "$(state)" candidate "a tarball with a $mode header naming the same file: read as npm reads it: $(field reasons)"
+		fi
 	done
+	# A file name npm pack writes with a PAX header (non-ASCII), packed by npm itself: read the same as npm's.
+	CASE=f2-pax-name
+	local P=$T/f2-pax-name
+	rm -rf "$P"
+	mkdir -p "$P/repo/docs" "$P/out"
+	(
+		cd "$P/repo"
+		git init -q
+		printf '{"name": "pax-name", "version": "1.0.0", "files": ["docs"]}\n' >package.json
+		printf 'caf\303\251\n' >$'docs/caf\303\251.md'
+		git add -A && commit "café"
+		npm pack --ignore-scripts --pack-destination "$P/out" >/dev/null 2>&1
+		npm pack --dry-run --ignore-scripts --json 2>/dev/null | jq -r '.[0].files[].path' | LC_ALL=C sort >"$P/ships"
+	)
+	local tgz=$P/out/pax-name-1.0.0.tgz
+	eq "$(gzip -dc "$tgz" | LC_ALL=C grep -ac 'path=package/docs/café.md' || true)" 1 "npm pack wrote a PAX header for the name"
+	has "$(cat "$P/ships")" "docs/café.md" "npm ships docs/café.md"
+	cd "$P/repo"
+	runc node "$SCRIPTS/tarball.mjs" compare "$tgz" "$(git -C "$P/repo" rev-parse HEAD)" "$P/ships"
+	eq "$RUN_RC" 0 "a PAX file name: read as npm reads it, the same as git's: $RUN_OUT"
+	# No bundled node-tar (an npm on PATH whose install has none): refused, never read another way.
+	mkdir -p "$P/fakenpm/bin" "$P/fakenpm/lib/npm"
+	printf '{"name": "npm", "version": "0.0.0-fake"}\n' >"$P/fakenpm/lib/npm/package.json"
+	printf '#!/bin/sh\ncase "$1" in --version) echo 0.0.0-fake ;; root) echo "%s" ;; *) exit 1 ;; esac\n' "$P/fakenpm/lib" >"$P/fakenpm/bin/npm"
+	chmod +x "$P/fakenpm/bin/npm"
+	PATH="$P/fakenpm/bin:$PATH" runc node "$SCRIPTS/tarball.mjs" compare "$tgz" "$(git -C "$P/repo" rev-parse HEAD)" "$P/ships"
+	eq "$RUN_RC" 4 "no bundled node-tar: refused"
+	has "$RUN_OUT" "node-tar cannot be found or read" "says so"
+	cd "$F"
 	# The bytes are not what the registry's integrity says.
 	fresh f2-integrity
 	release 1.5.1
