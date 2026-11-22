@@ -348,3 +348,72 @@ export function withSupportedLevel<O extends object | undefined>(model: LevelMod
 	}
 	return (next ?? options) as O;
 }
+
+/** What a level is sent as: its `thinkingLevelMap` entry, else its name (off: "none"); undefined when it is not sent. */
+function effortOfLevel(model: LevelModel, level: PiLevel): string | undefined {
+	const mapped = model.thinkingLevelMap?.[level];
+	if (level === "off") return mapped === undefined ? "none" : (mapped ?? undefined);
+	return mapped ?? level;
+}
+
+/** The level an effort on the wire stands for: the one the model's map sends as it, else the level of that name. */
+function levelOfEffort(model: LevelModel, effort: string): PiLevel | undefined {
+	const mapped = PI_LEVELS.find((level) => model.thinkingLevelMap?.[level] === effort);
+	if (mapped) return mapped;
+	if (effort === "none") return "off";
+	return isPiLevel(effort) ? effort : undefined;
+}
+
+/** An effort the model has: as it is; one it lacks, moved the way pi moves its level. Not a level: as it is. */
+export function supportedEffort(model: LevelModel, effort: string): string | undefined {
+	const level = levelOfEffort(model, effort);
+	if (!level || supportedThinkingLevels(model).includes(level)) return effort;
+	return effortOfLevel(model, clampThinkingLevel(model, level));
+}
+
+interface EffortItem {
+	type?: unknown;
+	reasoning?: { effort?: unknown };
+}
+
+/**
+ * A Codex-format body with no effort the model lacks, wherever the effort came from. With mid-conversation changes
+ * (`configuration_update`), the request-level `reasoning.effort` is the first turn's, recovered from the history, and
+ * each update the level a later turn ran at: after a catalog refresh took a level away, a resumed conversation would
+ * send it again. Each is moved the way pi moves a level the model lacks, and an update that then names the effort
+ * already in force says nothing and is left out. A body with no effort to move is returned as it is.
+ */
+export function withSupportedEfforts<T extends Record<string, unknown>>(model: LevelModel, body: T): T {
+	if (!model.reasoning) return body;
+	let moved = false;
+	const reasoning = body.reasoning as { effort?: unknown } | undefined;
+	let nextReasoning = reasoning;
+	let inForce: string | undefined;
+	if (reasoning && typeof reasoning === "object" && typeof reasoning.effort === "string") {
+		inForce = supportedEffort(model, reasoning.effort);
+		if (inForce !== reasoning.effort) {
+			moved = true;
+			nextReasoning = { ...reasoning, effort: inForce };
+		}
+	}
+	const input = Array.isArray(body.input) ? (body.input as EffortItem[]) : undefined;
+	const nextInput: EffortItem[] = [];
+	for (const item of input ?? []) {
+		const effort = item?.type === "configuration_update" ? item.reasoning?.effort : undefined;
+		if (typeof effort !== "string") {
+			nextInput.push(item);
+			continue;
+		}
+		const next = supportedEffort(model, effort);
+		if (next !== effort) moved = true;
+		if (next === undefined || (inForce !== undefined && next === inForce)) continue;
+		nextInput.push(next === effort ? item : { ...item, reasoning: { ...item.reasoning, effort: next } });
+		inForce = next;
+	}
+	if (!moved) return body;
+	return {
+		...body,
+		...(nextReasoning !== reasoning ? { reasoning: nextReasoning } : {}),
+		...(input ? { input: nextInput } : {}),
+	};
+}

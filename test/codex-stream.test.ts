@@ -1516,6 +1516,42 @@ describe("mid-convo effort streams", () => {
 		expect(wireUserItemIndex(captured[2].body, "second question")).toBe(replayedUpdateIndex + 1);
 	});
 
+	it("a resumed conversation whose first effort the catalog no longer has: moved as pi moves it, never sent", async () => {
+		// The review's case: the first turn ran at low; a catalog refresh then took low away from the model, and the
+		// conversation resumes with medium. pi recovers low from the history as the request-level effort.
+		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		const captured: CapturedRequest[] = [];
+		const fetchImpl = cannedSseFetch(captured);
+		const before = midConvoModel(true);
+		const options = (reasoning: string) =>
+			({ apiKey: "sk-test", transport: "sse", reasoning, fetch: fetchImpl, sessionId: "refreshed-catalog" }) as any;
+		const first = await streams
+			.streamSimple(before, { messages: [systemMessage(), userMessage("first question")] }, options("low"))
+			.result();
+		expect(first.providerThinkingLevel).toBe("low");
+
+		const after = midConvoModel(true);
+		after.thinkingLevelMap = { off: null, minimal: null, low: null, medium: "medium", high: "high", xhigh: null };
+		const history = [systemMessage(), userMessage("first question"), first, userMessage("second question")];
+		const resumed = await streams.streamSimple(after, { messages: history }, options("medium")).result();
+		expect(resumed.errorMessage).toBeUndefined();
+		expect(captured).toHaveLength(2);
+		expect(captured[1].body.reasoning?.effort).toBe("medium");
+		expect(configurationUpdates(captured[1].body)).toEqual([]);
+
+		// A later change to a level the model has still goes as an update.
+		const third = await streams
+			.streamSimple(after, { messages: [...history, resumed, userMessage("third question")] }, options("high"))
+			.result();
+		expect(third.errorMessage).toBeUndefined();
+		expect(captured[2].body.reasoning?.effort).toBe("medium");
+		expect(configurationUpdates(captured[2].body)).toEqual(["high"]);
+		for (const request of captured.slice(1)) {
+			const efforts = [request.body.reasoning?.effort, ...configurationUpdates(request.body)];
+			expect(efforts.filter((effort) => !["medium", "high"].includes(effort))).toEqual([]);
+		}
+	});
+
 	it("keeps request-level effort for models without the compat flag", async () => {
 		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
 		const captured: CapturedRequest[] = [];

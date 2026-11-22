@@ -35,6 +35,7 @@ import {
 	registerThinkingLevelGuard,
 	requestedThinkingLevel,
 	supportedThinkingLevels,
+	withSupportedEfforts,
 	withSupportedLevel,
 } from "../extensions/thinking-levels.ts";
 
@@ -296,6 +297,53 @@ describe("withSupportedLevel", () => {
 		expect(withSupportedLevel(model, undefined)).toBeUndefined();
 		const noReasoning = { ...model, reasoning: false } as Model<Api>;
 		expect(withSupportedLevel(noReasoning, { reasoning: "high" })).toEqual({ reasoning: undefined });
+	});
+});
+
+describe("withSupportedEfforts: a Codex body's efforts, recovered from the history, against the model as it is now", () => {
+	const update = (effort: string) => ({ type: "configuration_update", reasoning: { effort } });
+	const user = (text: string) => ({ role: "user", content: [{ type: "input_text", text }] });
+	const assistant = { type: "message", role: "assistant", content: [] };
+
+	it("moves a first-turn effort the catalog no longer has, as pi moves the level, and drops an update it makes moot", () => {
+		// The review's resumed conversation: first turn at low, low then removed, resumed with --thinking medium.
+		const body = {
+			reasoning: { effort: "low", summary: "auto" },
+			input: [user("1"), assistant, update("medium"), user("2")],
+		};
+		expect(withSupportedEfforts(nemotron(), body)).toEqual({
+			reasoning: { effort: "medium", summary: "auto" },
+			input: [user("1"), assistant, user("2")],
+		});
+	});
+
+	it("moves an update of a removed level, and keeps later changes the model has", () => {
+		const body = {
+			reasoning: { effort: "medium" },
+			input: [user("1"), assistant, update("low"), user("2"), assistant, update("high"), user("3")],
+		};
+		// low goes up to medium, the effort already in force: said nowhere; high stays.
+		expect(withSupportedEfforts(nemotron(), body)).toEqual({
+			reasoning: { effort: "medium" },
+			input: [user("1"), assistant, user("2"), assistant, update("high"), user("3")],
+		});
+		const xhigh = { reasoning: { effort: "high" }, input: [user("1"), assistant, update("xhigh"), user("2")] };
+		expect(withSupportedEfforts(nemotron(), xhigh)).toEqual({
+			reasoning: { effort: "high" },
+			input: [user("1"), assistant, user("2")],
+		});
+	});
+
+	it("returns a body whose efforts the model has as it is, and leaves efforts that are no level alone", () => {
+		const body = { reasoning: { effort: "medium" }, input: [user("1"), assistant, update("high"), user("2")] };
+		expect(withSupportedEfforts(nemotron(), body)).toBe(body);
+		const unknown = { reasoning: { effort: "turbo" }, input: [user("1")] };
+		expect(withSupportedEfforts(nemotron(), unknown)).toBe(unknown);
+		const plain = { input: [user("1")] };
+		expect(withSupportedEfforts(nemotron(), plain)).toBe(plain);
+		const noReasoning = { ...nemotron(), reasoning: false } as Model<Api>;
+		const low = { reasoning: { effort: "low" } };
+		expect(withSupportedEfforts(noReasoning, low)).toBe(low);
 	});
 });
 

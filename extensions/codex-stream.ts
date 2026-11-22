@@ -22,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { getPackageDir } from "@earendil-works/pi-coding-agent";
 import type { FastServiceTier } from "./fast.ts";
-import { withSupportedLevel } from "./thinking-levels.ts";
+import { withSupportedEfforts, withSupportedLevel } from "./thinking-levels.ts";
 
 export const CLIPROXYAPI_CODEX_API = "cliproxyapi-codex-responses" as const;
 
@@ -1470,7 +1470,11 @@ export async function loadCliproxyCodexStreams(
 	// follows pi's converter layout; reshape payloads to the documented layout
 	// in the wrapper instead of inside the patched module.
 	const nativeMidConvoEffort = hasNativeMidConvoEffort(originalSource);
-	const adaptOptions = (context: Context, streamOptions?: SimpleStreamOptions): SimpleStreamOptions => ({
+	const adaptOptions = (
+		model: Model<Api>,
+		context: Context,
+		streamOptions?: SimpleStreamOptions,
+	): SimpleStreamOptions => ({
 		...streamOptions,
 		onPayload: async (payload, payloadModel) => {
 			const builtInstructions =
@@ -1480,7 +1484,10 @@ export async function loadCliproxyCodexStreams(
 			if (!effective || typeof effective !== "object" || Array.isArray(effective)) return effective;
 
 			const body = effective as Record<string, unknown>;
-			const reshaped = nativeMidConvoEffort ? reshapeConfigurationUpdates(body) : body;
+			// The efforts recovered from the history (the first turn's at the request level, later turns' in
+			// configuration_update items) are checked against the model as it is now: a level the catalog no longer has
+			// is moved, as pi moves it, and never sent.
+			const reshaped = withSupportedEfforts(model, nativeMidConvoEffort ? reshapeConfigurationUpdates(body) : body);
 			// A hook (pi's before_provider_request) that removed the built instructions, deleting them or setting them
 			// to undefined, decided what the model is told: send its body as it is, with no base prompt put back.
 			if (builtInstructions !== undefined && body.instructions === undefined) {
@@ -1496,11 +1503,11 @@ export async function loadCliproxyCodexStreams(
 	// A level the model lacks never reaches the proxy, which would pick a variant of its own: it is moved first.
 	const adaptedStreamSimple: CliproxyCodexStreamSimple = (model, context, streamOptions) => {
 		const levelled = withSupportedLevel(model, streamOptions);
-		return mod.streamSimple(adaptModel(model), adaptContext(context), adaptOptions(context, levelled));
+		return mod.streamSimple(adaptModel(model), adaptContext(context), adaptOptions(model, context, levelled));
 	};
 	const adaptedStream: CliproxyCodexStreamSimple = (model, context, streamOptions) => {
 		const levelled = withSupportedLevel(model, streamOptions);
-		return mod.stream(adaptModel(model), adaptContext(context), adaptOptions(context, levelled));
+		return mod.stream(adaptModel(model), adaptContext(context), adaptOptions(model, context, levelled));
 	};
 
 	const streamSimple = wrapStreamForServiceTier(adaptedStreamSimple, options.resolveServiceTier);
