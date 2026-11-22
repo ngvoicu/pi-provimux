@@ -5,10 +5,11 @@
 # Started by a push to main (the owner's own releases), or by follow.yml and by hand (workflow_dispatch:
 # gh workflow run publish.yml -R ngvoicu/pi-provimux -f dry_run=no).
 #
-# DRY RUN. Until the owner's one-time npm steps are done (docs/FOLLOWING.md 4.4), "publish" runs npm publish
-# --dry-run on the tested archive with the OIDC request variables removed (no token exchange, nothing uploaded),
-# "tag" only says what it would do, and no issue is closed. A push takes the default below; a run by hand can choose. To switch it on, change 'yes' to 'no' in both
-# places marked "the switch" (and the same in follow.yml).
+# LIVE. A push takes the default below, 'no': it publishes the version main names if npm lacks it (docs/FOLLOWING.md
+# 4.5). A run by hand can choose; with dry_run=yes "publish" runs npm publish --dry-run on the tested archive with the
+# OIDC request variables removed (no token exchange, nothing uploaded), "tag" only says what it would do, and no
+# issue is closed. To make pushes dry again, change 'no' to 'yes' in both places marked "the switch" (and the same in
+# follow.yml).
 #
 # Every job runs on GitHub only and from refs/heads/main only, checked exactly by the shell before anything else;
 # every job that can write or holds the OIDC token is in an environment GitHub admits from the branch main alone
@@ -38,7 +39,7 @@ on:
         type: choice
         options: ['yes', 'no']
         # The switch (1 of 2).
-        default: 'yes'
+        default: 'no'
 
 # One publish at a time, never cancelled midway.
 concurrency:
@@ -49,7 +50,7 @@ permissions: {}
 
 env:
   # The switch (2 of 2): what a push does.
-  DRY_RUN: ${{ inputs.dry_run || 'yes' }}
+  DRY_RUN: ${{ inputs.dry_run || 'no' }}
   NODE_IMAGE: node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 
 jobs:

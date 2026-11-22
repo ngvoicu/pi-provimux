@@ -71,7 +71,8 @@ on the original's 1.5.1.
 
 Versions on npm are published from this repository's `main` by GitHub Actions, with npm provenance. A workflow
 follows the original's releases: once a day old, one that merges cleanly and passes every check is merged into `main`
-and released. [docs/FOLLOWING.md](docs/FOLLOWING.md) says how, what that accepts, and whether it is switched on yet.
+and released, with no person in between: this is switched on. [docs/FOLLOWING.md](docs/FOLLOWING.md) says how, and
+what that accepts.
 
 It needs pi 0.99.0 or newer: the Codex WebSocket reports which kind of account answered through pi's
 `provider_stream_event`, which older pi does not have.

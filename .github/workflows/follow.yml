@@ -7,9 +7,10 @@
 # passing candidate is checked again, pushed to main (fast-forward only) and publish.yml is started. Anything else
 # lands nothing and is said in an issue, once per state.
 #
-# DRY RUN. Until the owner's one-time npm steps are done (docs/FOLLOWING.md 4.4), "land" only says what it would do:
-# it pushes nothing and starts nothing. Scheduled runs take the default below; a run by hand can choose. To switch
-# it on, change 'yes' to 'no' in both places marked "the switch" (and the same in publish.yml), in one commit.
+# LIVE. Scheduled runs take the default below, 'no': a passing release lands and publish.yml is started, with no
+# person in between (docs/FOLLOWING.md 4.5, 6.2). A run by hand can choose; with dry_run=yes "land" only says what it
+# would do: it pushes nothing and starts nothing. To make scheduled runs dry again, change 'no' to 'yes' in both
+# places marked "the switch" (and the same in publish.yml), in one commit.
 #
 # Trust (docs/FOLLOWING.md 6.1): every job runs on GitHub only, from refs/heads/main only (checked exactly, by the
 # shell, before anything else), checks out this run's own commit and runs its own .github/follow scripts. The jobs
@@ -38,7 +39,7 @@ on:
         type: choice
         options: ['yes', 'no']
         # The switch (1 of 2).
-        default: 'yes'
+        default: 'no'
 
 # One run at a time; a scheduled run waits for the one before.
 concurrency:
@@ -50,7 +51,7 @@ permissions: {}
 env:
   FOLLOW_WAIT_HOURS: '24'
   # The switch (2 of 2): what a scheduled run does.
-  DRY_RUN: ${{ inputs.dry_run || 'yes' }}
+  DRY_RUN: ${{ inputs.dry_run || 'no' }}
   # The image the original's and the candidate's code run in.
   NODE_IMAGE: node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 

@@ -1,9 +1,11 @@
 # pi-provimux: following the original, versions, npm, the mirror, the rename
 
-**Status: merged into `main` with 105.0.2, in dry run.** The scripts, the two workflows and the mirror are on `main`
-(10). `land` and `publish` run as a dry run until the owner switches it off, after his one-time npm steps (4.4);
-[the dry run](#45-the-dry-run-switch) says how. A run of `publish.yml` by hand with `dry_run=no` publishes before
-that: that is how 105.0.2, the first version this automation publishes, goes out. 105.0.1 was published by hand
+**Status: on `main` since 105.0.2, and live: the dry run is switched off.** The scripts, the two workflows and the
+mirror are on `main` (10). Since the switch (4.5), after 105.0.2, scheduled `follow` runs land a release of the
+original that passes and `publish.yml` publishes it, with no person in between: the owner's choice of fully automatic
+releases (2.8, the risk he accepted in 6.2). A dry run is now only one asked for by hand with `dry_run=yes`. 105.0.2,
+the first version this automation published, went out through a run of `publish.yml` by hand with `dry_run=no`, while
+the runs were still dry. 105.0.1 was published by hand
 from the owner's Mac and tagged by hand (4.4 step 2). When a build shows this file wrong, it is corrected.
 
 - **The original:** `router-for-me/pi-cliproxyapi-provider` (MIT), npm `@router-for-me/pi-cliproxyapi-provider`.
@@ -597,7 +599,7 @@ Steps 2 to 5 belong together: do them on one day, when the chief says the automa
    push to `main` only dry-runs. Then `gh workflow run publish.yml -R ngvoicu/pi-provimux --ref main -f dry_run=no`
    publishes it from GitHub, which binds the publisher (it must happen within 2 days of step 4). Check the
    version's page on npmjs.com: it shows "Provenance" with the commit. The switch (4.5) is a later commit of its
-   own.
+   own. Done: 105.0.2 was published this way on 2026-11-22, and the switch followed.
 6. **Close the door to tokens:** the package → Settings → Publishing access → **Require two-factor authentication
    and disallow tokens** → Update Package Settings.
 
@@ -605,8 +607,11 @@ There is no secret to store on GitHub.
 
 ### 4.5 The dry-run switch
 
-Both workflows have an input `dry_run` (`yes` or `no`) and the line `DRY_RUN: ${{ inputs.dry_run || 'yes' }}`. A run
-by hand chooses; a scheduled `follow` run and a `push` to `main` have no input and take the fallback, `yes`.
+Both workflows have an input `dry_run` (`yes` or `no`, default `no`) and the line
+`DRY_RUN: ${{ inputs.dry_run || 'no' }}`. A run by hand chooses; a scheduled `follow` run and a `push` to `main` have
+no input and take the fallback, `no`: **they are live.** The switch was turned off after 105.0.2 was published (4.4
+step 5); until then both lines said `'yes'`. A dry run is now one started by hand:
+`gh workflow run follow.yml -R ngvoicu/pi-provimux --ref main -f dry_run=yes` (or `publish.yml`).
 
 In a dry run everything is checked and nothing changes: `follow`'s `land` fetches and rechecks the candidate, checks
 the push with `git push --dry-run`, and says what it would push and start; `publish` runs every check and
@@ -618,11 +623,14 @@ and release it would make. Failure issues are still written; a dry run never clo
 `report` nor `publish`'s `notify` (`DRY_RUN` unset counts as a dry run). The `publish` job still
 enters the environment `npm` and holds `id-token: write`; it uses neither.
 
-**Switching it off** is one commit, after 4.4 steps 1 to 4: in `.github/workflows/follow.yml` and
-`.github/workflows/publish.yml`, change `default: 'yes'` ("the switch (1 of 2)") and `inputs.dry_run || 'yes'`
-("the switch (2 of 2)") to `'no'`, four lines in all. Switching it back on is the same commit reversed. A single
-live run without the commit: `gh workflow run publish.yml -R ngvoicu/pi-provimux -f dry_run=no` (and
-`follow.yml` likewise).
+**The switch** is one commit: in `.github/workflows/follow.yml` and `.github/workflows/publish.yml`,
+`default: '…'` ("the switch (1 of 2)") and `inputs.dry_run || '…'` ("the switch (2 of 2)"), four lines in all.
+It was switched off (`'yes'` to `'no'`) after 4.4 steps 1 to 5. **To put the dry run back**, for example while a
+release of the original is in doubt, change the four lines back to `'yes'`, in one commit pushed by a person (the
+workflows' own token cannot change workflow files); or, at once and without a commit,
+`gh workflow disable follow.yml -R ngvoicu/pi-provimux` stops the scheduled runs. A single dry run without the
+commit: `gh workflow run follow.yml -R ngvoicu/pi-provimux --ref main -f dry_run=yes` (and `publish.yml`
+likewise).
 
 Before **any** run of either workflow, dry or not, the environments `npm` and `main-only` must exist with their
 branch rule (4.4 step 3, 6.3): a job that names an environment GitHub does not know makes GitHub create it with no
@@ -988,7 +996,8 @@ workflows of a public repository are still disabled after 60 days without activi
    (findings 2 to 12), and again after the second review of the same day, with the scope narrowed: no scripted
    recovery (2.7), environments for every writing job (6.3), development dependencies by the lock's graph (2.6),
    only exported trees for the test containers (6.1).
-2. Done. `follow.yml` and `publish.yml`, with `land` and `publish` behind the dry run (4.5).
+2. Done. `follow.yml` and `publish.yml`, with `land` and `publish` behind the dry run (4.5) until 105.0.2 was
+   published, live since the switch.
 3. Done. `.forgejo/workflows/follow-github.yml`.
 4. The runbook of 7, with the owner's steps of 4.4.
 
