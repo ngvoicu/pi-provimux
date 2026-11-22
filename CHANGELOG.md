@@ -54,6 +54,11 @@ plain CLIProxyAPI too.
   changes `instructions` still has its text moved, and without a hook the caching fix from 1.5.0 is unchanged.
 - **Claude Messages models keep their standard price under `/fast` and `/ultrafast`.** They are sent to
   `/v1/messages` without a speed tier, so the Fast price from models.dev no longer applies to them.
+- **A thinking level the model doesn't have is refused in `pi -p`, never changed silently.** `pi -p --thinking low`
+  (or `--model cliproxyapi/<model>:low`, or `--mode json`) on a model whose levels don't include `low` now stops
+  before sending anything, says which levels the model has, and exits with 1; pi used to move it to the nearest level
+  without a word. Interactive and RPC sessions keep pi's own move, and a Codex-format request, an extension's own
+  included, now names the level pi moves to, never one the model lacks, so the proxy never picks a variant itself.
 
 ### From pi-cliproxyapi-provider 1.5.0 (merged)
 

@@ -64,6 +64,7 @@ import {
 import type { PauseController } from "./pause.ts";
 import { pauseController, waitForPauseToEnd } from "./pause.ts";
 import { registerTransientNetworkErrorRetry } from "./retry.ts";
+import { registerThinkingLevelGuard } from "./thinking-levels.ts";
 import registerTpsStatus from "./tps.ts";
 import { answeredClaudeMessages, answeredStream, UpstreamsAnnouncer } from "./upstreams.ts";
 
@@ -965,6 +966,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		onRefreshOutcome: handleRefreshOutcome,
 	});
 	registerTransientNetworkErrorRetry(pi, identity.providerId);
+	// `pi -p --thinking low` on a model without low is refused, not moved silently.
+	registerThinkingLevelGuard(pi, identity.providerId);
 	// Where each model really comes from (login or API key, which lab), for other extensions.
 	const upstreams = new UpstreamsAnnouncer(pi, identity.providerId, () =>
 		resolveConnection(agentDir, identity.providerId),

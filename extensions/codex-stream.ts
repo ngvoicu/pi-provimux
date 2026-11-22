@@ -22,6 +22,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { getPackageDir } from "@earendil-works/pi-coding-agent";
 import type { FastServiceTier } from "./fast.ts";
+import { withSupportedLevel } from "./thinking-levels.ts";
 
 export const CLIPROXYAPI_CODEX_API = "cliproxyapi-codex-responses" as const;
 
@@ -1492,11 +1493,14 @@ export async function loadCliproxyCodexStreams(
 		},
 	});
 
+	// A level the model lacks never reaches the proxy, which would pick a variant of its own: it is moved first.
 	const adaptedStreamSimple: CliproxyCodexStreamSimple = (model, context, streamOptions) => {
-		return mod.streamSimple(adaptModel(model), adaptContext(context), adaptOptions(context, streamOptions));
+		const levelled = withSupportedLevel(model, streamOptions);
+		return mod.streamSimple(adaptModel(model), adaptContext(context), adaptOptions(context, levelled));
 	};
 	const adaptedStream: CliproxyCodexStreamSimple = (model, context, streamOptions) => {
-		return mod.stream(adaptModel(model), adaptContext(context), adaptOptions(context, streamOptions));
+		const levelled = withSupportedLevel(model, streamOptions);
+		return mod.stream(adaptModel(model), adaptContext(context), adaptOptions(context, levelled));
 	};
 
 	const streamSimple = wrapStreamForServiceTier(adaptedStreamSimple, options.resolveServiceTier);

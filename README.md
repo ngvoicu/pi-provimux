@@ -263,7 +263,7 @@ From CPA catalog entry → pi model:
 | `supports_reasoning_effort_updates` | `compat.supportsMidConvoEffort` |
 | `visibility: "hide"` | skipped |
 
-Unsupported pi thinking levels are set to `null` so they are hidden in the UI. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller prices are not selected arbitrarily and fall back to zero. These are catalog/list prices, not a guarantee of CPA's own markup or billing.
+Unsupported pi thinking levels are set to `null` so they are hidden in the UI. A level the model lacks asked on the command line of a one-shot run (`pi -p --thinking low`, or `--model cliproxyapi/<model>:low`; also `--mode json`) is refused: nothing is sent, the error names the levels the model has, and pi exits with 1. Elsewhere (the level picker, a saved default level, `--thinking` in an interactive or RPC session) pi moves the level to the nearest one the model has, and the request names that level, never the missing one. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller prices are not selected arbitrarily and fall back to zero. These are catalog/list prices, not a guarantee of CPA's own markup or billing.
 
 ## GPT Responses prompt caching
 
