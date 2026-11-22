@@ -449,32 +449,69 @@ describe("each request's own callbacks", () => {
 		const seen: Array<{ provider: string; options: unknown }> = [];
 		const record = (model: { provider: string }, _context: unknown, options?: unknown) =>
 			seen.push({ provider: model.provider, options });
-		const implementation = { api: "anthropic-messages", stream: record, streamSimple: record };
+		/** pi-ai's implementation of the API, as its registry holds it: replaced by a new one on a reload. */
+		const make = () => ({ api: "anthropic-messages", stream: record.bind(null), streamSimple: record.bind(null) });
+		let implementation = make();
 		const lookup = (api: string) => (api === "anthropic-messages" ? implementation : undefined);
-		const release = answeredClaudeMessages("cliproxyapi", lookup);
-		// A second copy of the extension in the process: the implementation is wrapped once.
-		const releaseAgain = answeredClaudeMessages("cliproxyapi", lookup);
-		const wrapped = implementation.streamSimple;
-		expect(lookup("anthropic-messages")).toBe(implementation);
-
 		const options = { onProviderStreamEvent: () => {} };
-		implementation.streamSimple({ provider: "cliproxyapi" }, {}, options);
-		implementation.stream({ provider: "cliproxyapi" }, {}, options);
-		implementation.streamSimple({ provider: "anthropic" }, {}, options);
-		expect(seen[0]!.options).not.toBe(options);
-		expect(seen[1]!.options).not.toBe(options);
-		// Another provider's request: unchanged.
-		expect(seen[2]!.options).toBe(options);
+		const wrappedFor = (provider: string, method: "stream" | "streamSimple" = "streamSimple") => {
+			implementation[method]({ provider }, {}, options);
+			return seen.at(-1)!.options !== options;
+		};
 
-		// Once every copy has shut down, this provider's requests go through unchanged too.
-		release();
-		release();
-		implementation.streamSimple({ provider: "cliproxyapi" }, {}, options);
-		expect(seen[3]!.options).not.toBe(options);
-		releaseAgain();
-		implementation.streamSimple({ provider: "cliproxyapi" }, {}, options);
-		expect(seen[4]!.options).toBe(options);
-		expect(implementation.streamSimple).toBe(wrapped);
+		// Load: the same object, its two methods wrapped; only this provider's requests get their own callbacks.
+		const original = { stream: implementation.stream, streamSimple: implementation.streamSimple };
+		const first = answeredClaudeMessages("cliproxyapi", lookup);
+		expect(lookup("anthropic-messages")).toBe(implementation);
+		expect(implementation.stream).not.toBe(original.stream);
+		expect(implementation.streamSimple).not.toBe(original.streamSimple);
+		const wrapper = { stream: implementation.stream, streamSimple: implementation.streamSimple };
+		expect(wrappedFor("cliproxyapi")).toBe(true);
+		expect(wrappedFor("cliproxyapi", "stream")).toBe(true);
+		expect(wrappedFor("anthropic")).toBe(false);
+
+		// A second session (another copy of the extension): the one wrapper, not one over the other.
+		const second = answeredClaudeMessages("cliproxyapi", lookup);
+		expect(implementation.stream).toBe(wrapper.stream);
+		expect(implementation.streamSimple).toBe(wrapper.streamSimple);
+
+		// One quits (twice: the release counts once): the other still needs the wrap.
+		first();
+		first();
+		expect(implementation.streamSimple).toBe(wrapper.streamSimple);
+		expect(wrappedFor("cliproxyapi")).toBe(true);
+
+		// The last quits: the implementation's own methods back, the same functions.
+		second();
+		expect(implementation.stream).toBe(original.stream);
+		expect(implementation.streamSimple).toBe(original.streamSimple);
+		expect(wrappedFor("cliproxyapi")).toBe(false);
+
+		// A reload: the session shuts down (release), pi makes a new implementation, the extension loads again.
+		const before = implementation;
+		const loaded = answeredClaudeMessages("cliproxyapi", lookup);
+		loaded();
+		expect(before.streamSimple).toBe(original.streamSimple);
+		implementation = make();
+		const fresh = { stream: implementation.stream, streamSimple: implementation.streamSimple };
+		const reloaded = answeredClaudeMessages("cliproxyapi", lookup);
+		expect(implementation.streamSimple).not.toBe(fresh.streamSimple);
+		expect(wrappedFor("cliproxyapi")).toBe(true);
+		// A new implementation while a copy still holds the old one (a load without a release): the old gets its own back.
+		const stale = implementation;
+		implementation = make();
+		const newest = { stream: implementation.stream, streamSimple: implementation.streamSimple };
+		const other = answeredClaudeMessages("cliproxyapi", lookup);
+		expect(stale.stream).toBe(fresh.stream);
+		expect(stale.streamSimple).toBe(fresh.streamSimple);
+		expect(implementation.streamSimple).not.toBe(newest.streamSimple);
+		reloaded();
+		expect(wrappedFor("cliproxyapi")).toBe(true);
+		other();
+		// The last quit after all of it: the implementation's own methods, nothing wrapped.
+		expect(implementation.stream).toBe(newest.stream);
+		expect(implementation.streamSimple).toBe(newest.streamSimple);
+		expect(wrappedFor("cliproxyapi")).toBe(false);
 		// No implementation: nothing to wrap, nothing breaks.
 		answeredClaudeMessages("cliproxyapi", () => undefined)();
 	});

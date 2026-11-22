@@ -350,13 +350,29 @@ interface ApiImplementation {
 	streamSimple: (model: { provider: string }, context: unknown, options?: AnswerCallbacks<never>) => unknown;
 }
 
-const CLAUDE_SCOPE_KEY = Symbol.for("pi-provimux.claude-messages-scope");
+const CLAUDE_SCOPE_KEY = Symbol.for("pi-provimux.claude-messages-scope.v2");
+
+type Method = "stream" | "streamSimple";
+
+/** What is wrapped, and what was there before. */
+interface Wrap {
+	implementation: ApiImplementation;
+	originals: Pick<ApiImplementation, Method>;
+	wrappers: Pick<ApiImplementation, Method>;
+}
 
 interface ClaudeScope {
 	/** Provider id → how many loaded copies of the extension want it. */
 	providers: Map<string, number>;
-	/** The implementations already wrapped (pi replaces its implementation when it reloads extensions). */
-	wrapped: WeakSet<object>;
+	/** The one wrap in the process, however many copies of the extension are loaded. */
+	wrap?: Wrap;
+}
+
+/** Puts back what was there before, where the wrapper is still in place (a later wrapper of another is kept). */
+function unwrap(wrap: Wrap): void {
+	for (const method of ["stream", "streamSimple"] as const) {
+		if (wrap.implementation[method] === wrap.wrappers[method]) wrap.implementation[method] = wrap.originals[method];
+	}
 }
 
 /**
@@ -365,6 +381,10 @@ interface ClaudeScope {
  * implementation, not the provider's stream, so its calls are wrapped where pi looks the implementation up; other
  * providers' requests go through unchanged. The implementation is changed in place, not registered anew: pi-ai's
  * compat functions treat their built-in providers as built-in only while the implementation is the one they made.
+ *
+ * One wrap for the process: every loaded copy of the extension shares it. When the last copy shuts down, the
+ * implementation gets its own `stream` and `streamSimple` back, the same functions as before. pi replaces the
+ * implementation when it reloads extensions; a copy loaded after that wraps the new one.
  * Returns what to call when this copy of the extension shuts down.
  */
 export function answeredClaudeMessages(
@@ -373,21 +393,26 @@ export function answeredClaudeMessages(
 	api = "anthropic-messages",
 ): () => void {
 	const global = globalThis as { [CLAUDE_SCOPE_KEY]?: ClaudeScope };
-	global[CLAUDE_SCOPE_KEY] ??= { providers: new Map(), wrapped: new WeakSet() };
+	global[CLAUDE_SCOPE_KEY] ??= { providers: new Map() };
 	const scope = global[CLAUDE_SCOPE_KEY];
-	const implementation = getApiProvider(api) as ApiImplementation | undefined;
-	if (
-		implementation &&
-		typeof implementation.stream === "function" &&
-		typeof implementation.streamSimple === "function" &&
-		!scope.wrapped.has(implementation)
-	) {
-		scope.wrapped.add(implementation);
-		for (const method of ["stream", "streamSimple"] as const) {
-			const original = implementation[method];
-			implementation[method] = (model, context, options) =>
+	const found = getApiProvider(api) as ApiImplementation | undefined;
+	const implementation =
+		found && typeof found.stream === "function" && typeof found.streamSimple === "function" ? found : undefined;
+	// pi made a new implementation (a reload): the old one is no longer used; it gets its own back.
+	if (scope.wrap && scope.wrap.implementation !== implementation) {
+		unwrap(scope.wrap);
+		scope.wrap = undefined;
+	}
+	if (implementation && !scope.wrap) {
+		const originals = { stream: implementation.stream, streamSimple: implementation.streamSimple };
+		const wrap =
+			(original: ApiImplementation[Method]): ApiImplementation[Method] =>
+			(model, context, options) =>
 				original(model, context, scope.providers.has(model.provider) ? answeredOptions(options) : options);
-		}
+		const wrappers = { stream: wrap(originals.stream), streamSimple: wrap(originals.streamSimple) };
+		implementation.stream = wrappers.stream;
+		implementation.streamSimple = wrappers.streamSimple;
+		scope.wrap = { implementation, originals, wrappers };
 	}
 	scope.providers.set(providerId, (scope.providers.get(providerId) ?? 0) + 1);
 	let released = false;
@@ -397,6 +422,10 @@ export function answeredClaudeMessages(
 		const count = (scope.providers.get(providerId) ?? 1) - 1;
 		if (count > 0) scope.providers.set(providerId, count);
 		else scope.providers.delete(providerId);
+		if (scope.providers.size === 0 && scope.wrap) {
+			unwrap(scope.wrap);
+			scope.wrap = undefined;
+		}
 	};
 }
 

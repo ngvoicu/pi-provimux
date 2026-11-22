@@ -16,11 +16,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import {
 	type AgentSession,
-	createAgentSession,
-	DefaultResourceLoader,
+	createAgentSessionFromServices,
+	createAgentSessionRuntime,
+	createAgentSessionServices,
 	type ExtensionAPI,
 	SessionManager,
 	SettingsManager,
@@ -277,9 +279,12 @@ interface Harness {
 	/** Requests whose first stream event pi passed to extensions. */
 	firstEvents: string[];
 	/** The callbacks pi gives a request of this session (as pi's own calls and an extension's reuse get them). */
-	sessionOptions: () => Promise<SimpleStreamOptions>;
+	sessionOptions: (fresh?: boolean) => Promise<SimpleStreamOptions>;
 	model: (id: string) => Model<Api>;
-	dispose: () => void;
+	/** `/reload`: the session's extensions shut down and load again. */
+	reload: () => Promise<void>;
+	/** Quits the session. */
+	dispose: () => Promise<void>;
 }
 
 const savedEnv = new Map<string, string | undefined>();
@@ -413,26 +418,28 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 			},
 		});
 	};
-	const resourceLoader = new DefaultResourceLoader({
+	const services = await createAgentSessionServices({
 		cwd,
 		agentDir,
 		settingsManager,
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-		extensionFactories: [providerExtension, testExtension],
+		resourceLoaderOptions: {
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+			extensionFactories: [providerExtension, testExtension],
+		},
 	});
-	await resourceLoader.reload();
-	const { session } = await createAgentSession({
-		cwd,
-		agentDir,
-		settingsManager,
-		resourceLoader,
-		sessionManager: SessionManager.inMemory(cwd),
-		noTools: "all",
-	});
+	// pi's session runtime, as the CLI runs one: quitting it tells extensions `session_shutdown` ("quit").
+	const runtime = await createAgentSessionRuntime(
+		async (target) => {
+			const result = await createAgentSessionFromServices({ ...target, services, noTools: "all" });
+			return { ...result, services, diagnostics: services.diagnostics };
+		},
+		{ cwd, agentDir, sessionManager: SessionManager.inMemory(cwd) },
+	);
+	const session = runtime.session;
 	await session.bindExtensions({ mode: "print", onError: (error) => console.error(error) });
 	await until("the routes", () => routesTold);
 	const model = (id: string) => {
@@ -440,20 +447,30 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 		if (!found) throw new Error(`no model ${id}`);
 		return found;
 	};
+	let quit: Promise<void> | undefined;
 	return {
 		session,
 		reports,
 		headersSeen,
 		firstEvents,
 		model,
-		sessionOptions: async () => {
-			if (!captured) {
+		sessionOptions: async (fresh = false) => {
+			if (!captured || fresh) {
+				captured = undefined;
 				await session.setModel(session.modelRuntime.getModel("capture", "capture")!);
 				await session.prompt("capture the callbacks");
 			}
 			return captured!;
 		},
-		dispose: () => session.dispose(),
+		reload: async () => {
+			routesTold = false;
+			await session.reload();
+			await until("the routes after the reload", () => routesTold);
+		},
+		dispose: () => {
+			quit ??= runtime.dispose();
+			return quit;
+		},
 	};
 }
 
@@ -503,7 +520,7 @@ describe("what answered, when requests overlap", { timeout: 20_000 }, () => {
 			await turn;
 			expect(pi.reports).toEqual([report(CLAUDE, [CLAUDE_LOGIN]), report(CLAUDE, [CLAUDE_KEY])]);
 		} finally {
-			pi.dispose();
+			await pi.dispose();
 		}
 	});
 
@@ -527,7 +544,7 @@ describe("what answered, when requests overlap", { timeout: 20_000 }, () => {
 			await second;
 			expect(pi.reports).toEqual([report(CLAUDE, [CLAUDE_LOGIN]), report(CLAUDE, [CLAUDE_KEY])]);
 		} finally {
-			pi.dispose();
+			await pi.dispose();
 		}
 	});
 
@@ -553,7 +570,7 @@ describe("what answered, when requests overlap", { timeout: 20_000 }, () => {
 			await helper;
 			expect(pi.reports).toEqual([report(GPT, []), report(GPT_HELPER, [OPENAI_KEY])]);
 		} finally {
-			pi.dispose();
+			await pi.dispose();
 		}
 	});
 
@@ -575,7 +592,83 @@ describe("what answered, when requests overlap", { timeout: 20_000 }, () => {
 			await side;
 			expect(pi.reports).toEqual([report(GPT, [CODEX_LOGIN]), report(GPT_HELPER, [OPENAI_KEY])]);
 		} finally {
-			pi.dispose();
+			await pi.dispose();
 		}
+	});
+});
+
+/** pi-ai's shared Claude Messages implementation, as pi looks it up for every provider without its own stream. */
+const claudeMessages = () =>
+	getApiProvider("anthropic-messages") as unknown as Record<"stream" | "streamSimple", unknown>;
+const methodsOf = (implementation: Record<"stream" | "streamSimple", unknown>) => ({
+	implementation,
+	stream: implementation.stream,
+	streamSimple: implementation.streamSimple,
+});
+
+describe("the Claude Messages wrap, as sessions load, reload and quit", { timeout: 20_000 }, () => {
+	/** One Claude request with the session's callbacks, answered at once by a login. */
+	async function ask(pi: Harness, marker: string) {
+		plans.set(marker, { headers: login("claude") });
+		immediate.add(marker);
+		await send(pi, pi.model(CLAUDE), marker);
+	}
+	const claudeLogin = report(CLAUDE, [CLAUDE_LOGIN]);
+
+	it("one wrap however many sessions; after the last quit, pi-ai's own methods, the same functions", async () => {
+		const original = methodsOf(claudeMessages());
+
+		// Load: the same implementation, both methods wrapped.
+		const first = await startPi();
+		const installed = methodsOf(claudeMessages());
+		expect(installed.implementation).toBe(original.implementation);
+		expect(installed.stream).not.toBe(original.stream);
+		expect(installed.streamSimple).not.toBe(original.streamSimple);
+		await ask(first, "one");
+		expect(first.reports).toEqual([claudeLogin]);
+
+		// A second session loads the extension too: the one wrap, unchanged.
+		const second = await startPi();
+		expect(methodsOf(claudeMessages())).toEqual(installed);
+		await ask(second, "two");
+		expect(second.reports).toEqual([claudeLogin]);
+
+		// The first quits: the second still reports.
+		await first.dispose();
+		expect(methodsOf(claudeMessages())).toEqual(installed);
+		await ask(second, "three");
+		expect(second.reports).toEqual([claudeLogin, claudeLogin]);
+
+		// The last quits: pi-ai's own methods back on the same implementation.
+		await second.dispose();
+		const after = methodsOf(claudeMessages());
+		expect(after.implementation).toBe(original.implementation);
+		expect(after.stream).toBe(original.stream);
+		expect(after.streamSimple).toBe(original.streamSimple);
+	});
+
+	it("a reload: the old implementation gets its own methods back, the new one is wrapped once; then the quit", async () => {
+		const pi = await startPi();
+		for (const round of ["a", "b"]) {
+			const before = claudeMessages();
+			const wrapped = methodsOf(before);
+			await pi.reload();
+			// pi made a new implementation on the reload; the extension, loaded again, wrapped that one.
+			const now = claudeMessages();
+			expect(now).not.toBe(before);
+			expect(before.stream).not.toBe(wrapped.stream);
+			expect(before.streamSimple).not.toBe(wrapped.streamSimple);
+			expect(now.streamSimple).not.toBe(before.streamSimple);
+			await pi.sessionOptions(true);
+			await ask(pi, `reload${round}`);
+		}
+		expect(pi.reports).toEqual([claudeLogin, claudeLogin]);
+		// What the reload replaced was pi-ai's own; after the quit the current one is unwrapped too: a request of this
+		// provider made directly through it gets the callbacks it was given.
+		const current = claudeMessages();
+		const wrapper = current.streamSimple;
+		await pi.dispose();
+		expect(current.streamSimple).not.toBe(wrapper);
+		expect(current.stream).not.toBe(wrapper);
 	});
 });
