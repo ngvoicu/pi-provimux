@@ -140,6 +140,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      # Only for follow.sh's npm gate on the host (npm 11.5.1 or later, docs/FOLLOWING.md 2.1), before any code of the
+      # candidate is written out; that code runs only in the container below.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
       # Before any code of the candidate runs: prepare's artifact by its id and digest, its tree written out by git
       # (checkout-index, which no export attribute can thin out).
       - name: The candidate's tree (git only)
@@ -288,6 +294,11 @@ jobs:
           ref: ${{ github.sha }}
           sparse-checkout: .github/follow
           persist-credentials: false
+      # follow.sh needs npm 11.5.1 or later (docs/FOLLOWING.md 2.1): Node 24's.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: Report
         env:
           GH_TOKEN: ${{ github.token }}

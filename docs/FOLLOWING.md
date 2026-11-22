@@ -642,10 +642,13 @@ environment would reach upstream code. npm 11.19.1 starts no hook.
    `npm_config_globalconfig` pointing at empty files, `npm_config_ignore_scripts=true` and the registry. No
    `GH_TOKEN`, `GITHUB_TOKEN`, `NODE_AUTH_TOKEN`, `ACTIONS_*` or any other variable reaches npm, or anything it
    starts.
-2. **npm 11.5.1 or later, or no run.** Every command that runs npm (`select`, `prepare`, `recheck`, `land`, `plan`,
-   `tag`, `report-publish`) first checks `npm --version`. Older npm stops the run with the reason, before any npm
-   call touches a tree. The jobs that run these commands (`follow.yml`'s `prepare` and `land`, and every
-   `publish.yml` job that runs `follow.sh`) set up Node 24 with `actions/setup-node`.
+2. **npm 11.5.1 or later, or no run.** At the top of the dispatcher, **every command** first checks
+   `npm --version`. That includes `merge`, which selects and dry-packs the release like `prepare`, and any unknown
+   word. There is no list of commands to keep up to date; only a plain help (no command, `help`, `-h`, `--help`)
+   skips the check. Older npm stops the run with the reason, before any other npm call. Every job that runs
+   `follow.sh` sets up Node 24 with `actions/setup-node` first, and `test.sh` checks this. In `test (candidate)`
+   that is on the host, only for this check, before the candidate's tree is written out; its code still runs only
+   in the container.
 
 **What remains:** the container has the network (npm needs it), so code in it can reach anything public; the
 runner around it still holds its runtime credential, which a container escape would expose; and the job's own
@@ -941,6 +944,11 @@ tools), offline, with real `npm` for `npm pack` only, and `follow.yml` runs it b
 part of `npm run check`, which only `package.json`'s `scripts` decide. What only GitHub can show (environments,
 mounts, the container steps) is checked as text in `workflows`.
 
+**Under npm older than 11.5.1** (npm 10), `follow.sh` refuses every command, and the suite takes that refusal as
+the expected outcome. `run` asserts it: exit 1, the reason, and no npm call but `--version`. The case's later
+assertions about what would follow are skipped and counted, and a group whose next steps build on a candidate stops
+there and says so. Cases that do not run `follow.sh` (e.g. `tarball.mjs`'s header checks) run in full.
+
 | Case | What it shows |
 |---|---|
 | `numbers` | `1.5.0` → `105.0`, `2.0.3` → `200.3`, back again; a minor of 100 and other forms refused. |
@@ -960,8 +968,9 @@ mounts, the container steps) is checked as text in `workflows`.
 | `f9_issues` | Past 350 issues; a contributor's issue with the bot's title and key untouched; the bot's closed issue reopened, not duplicated; the failure issue first, written even when the README issue fails; a 5000-line list kept under GitHub's limit; a README issue quoting the failure key, and a bot issue without the label, untouched. |
 | `f10_publish`, `f10_land` | A dry run closes nothing; a success without the version on npm closes nothing; an annotated tag at the commit passes; a missing release is made; no `gitHead` and no tag fails; a long changelog; a commit outside the live `main` is not tagged; a tag or `gitHead` at a commit of `main` naming another version is not taken; `plan` names the version when it refuses an `.npmrc`; a failed retry dispatch is red with an issue; a failed dispatch is `dispatch-failed`, never `landed`; a tampered candidate is refused by `land` and nothing is pushed; `main` moved during the push is `moved`. |
 | `f11_mirror` | A tag the NAS refuses leaves `main` unmoved too; a tag named `origin/main` does not stand in for the branch; the mirror follows; in a reused workspace, a tag gone from GitHub is seen as on the NAS only. |
-| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; every job that writes is in `main-only`, the OIDC job in `npm`, the others in none, and this file has the `gh api` commands for both; the version input checked; the test jobs in a container with no `setup-node` and no `git archive`, mounting only the exported tree and the scripts, never the workspace; the clean tree packed read-only before `npm ci` and nothing packed after, and that archive given read-only to the loader, in `test (candidate)` and `publish`'s `test`; no cache; `land` by `follow.sh land`; no credentialed job (nor `follow.sh`) runs `npm ci`, `npm install` or `npm rebuild`, `npm pack` and `npm publish` only with `--ignore-scripts`, and the test jobs install only in the container; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA. |
+| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; every job that writes is in `main-only`, the OIDC job in `npm`, the others in none, and this file has the `gh api` commands for both; the version input checked; the test jobs in a container with no `setup-node` and no `git archive` (`test (candidate)`: one `setup-node`, for `follow.sh`'s npm gate, before the tree and any container); every job that runs `follow.sh` sets up Node 24 before it, mounting only the exported tree and the scripts, never the workspace; the clean tree packed read-only before `npm ci` and nothing packed after, and that archive given read-only to the loader, in `test (candidate)` and `publish`'s `test`; no cache; `land` by `follow.sh land`; no credentialed job (nor `follow.sh`) runs `npm ci`, `npm install` or `npm rebuild`, `npm pack` and `npm publish` only with `--ignore-scripts`, and the test jobs install only in the container; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA. |
 | `f12_history` | No commit has `.github/workflows/` without `.forgejo/workflows/`. |
+| `npm_gate` | Every command of `follow.sh`'s dispatcher, read from the script itself, and an unknown word, under a stand-in npm 10.9.3 with tokens in the environment: each exits 1 with the reason after exactly one `--version`, with no other npm call. The review's `merge` of a release whose tree has a `prepare` starts no hook and leaves the fork alone. `help`, `-h` and `--help` run without npm. |
 | `npm_boundary` | npm 10.9.3 (a stand-in that would start `prepare`) with tokens in the environment: `prepare` and `plan` stop at the version check, saying why, before any npm call, and no hook runs; 11.5.0 refused, 11.5.1 runs. An npm that starts `prepare` as npm 10 does, given synthetic `GH_TOKEN`, `GITHUB_TOKEN`, `NODE_AUTH_TOKEN`, `NPM_TOKEN`, `ACTIONS_*` and another variable: the upstream tree's and the fork's `prepare` and every npm call see none of them, only `PATH`, `HOME`, the two empty configurations, `ignore_scripts=true` and the registry. The real npm (11.5.1 or later) with tokens set and a `prepare` that prints its environment: no token. |
 | `shape` | Candidates spoiled after the merge: the fork's own test changed, README changed, `R` changing another file or more than the version, a wrong version, a third commit, no merge. |
 | `readme` | The original's README change: the fork's README byte for byte, the diff kept; both sides changing it is no conflict. |

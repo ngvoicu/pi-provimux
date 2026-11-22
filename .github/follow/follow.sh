@@ -1428,10 +1428,14 @@ cmd_report_publish() {
 # --- main --------------------------------------------------------------------------------------------------------
 cmd=${1:-}
 [[ $# -eq 0 ]] || shift
-# Every command that runs npm (on an upstream tree, or the registry's data) checks its version first.
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
+# Only a plain help (no command, help, -h, --help) runs without the npm gate. Every command, and anything else,
+# first needs npm 11.5.1 or later (need_npm): there is no list of commands to keep up to date.
 case $cmd in
-select | prepare | recheck | land | plan | tag | report-publish) need_npm ;;
+'') usage && exit 2 ;;
+help | -h | --help) usage && exit 0 ;;
 esac
+need_npm
 case $cmd in
 select) cmd_select "$@" ;;
 merge) cmd_merge "$@" ;;
@@ -1446,7 +1450,7 @@ tag) cmd_tag "$@" ;;
 report) cmd_report ;;
 report-publish) cmd_report_publish "$@" ;;
 *)
-	sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+	usage
 	exit 2
 	;;
 esac

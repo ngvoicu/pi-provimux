@@ -45,6 +45,19 @@ PASS=0
 FAIL=0
 CASE=''
 FAILED_CASES=''
+# Under an npm older than 11.5.1, follow.sh refuses every command (2.1): run() then asserts that refusal, and the
+# case's assertions about what follows it are skipped (counted in SKIP), not failed. GATED_CASE is that case.
+SKIP=0
+GATED_CASE=''
+gated() { [[ -n $GATED_CASE && $GATED_CASE == "$CASE" ]] && SKIP=$((SKIP + 1)); }
+# past_gate: false (and says so) when the current case was refused by the npm gate; a group whose next steps build on
+# what follow.sh made (a candidate, a bundle) stops there: `past_gate || return 0`.
+past_gate() {
+	if [[ -n $GATED_CASE && $GATED_CASE == "$CASE" ]]; then
+		echo "  [$CASE] stops at the npm gate's refusal (asserted); the rest of the group needs npm 11.5.1 or later"
+		return 1
+	fi
+}
 ok() { PASS=$((PASS + 1)); }
 bad() {
 	FAIL=$((FAIL + 1))
@@ -52,10 +65,16 @@ bad() {
 	echo "  FAIL [$CASE] $*" >&2
 	if [[ -n ${FOLLOW_TEST_VERBOSE:-} ]]; then printf '%s\n' "${RUN_OUT:-}" | awk '{ print "    | " $0 }' >&2; fi
 }
-eq() { if [[ $1 == "$2" ]]; then ok; else bad "$3: got '$1', want '$2'"; fi; }
-has() { if grep -Fq -- "$2" <<<"$1"; then ok; else bad "$3: '$2' not in: $(head -c 600 <<<"$1")"; fi; }
-hasnt() { if grep -Fq -- "$2" <<<"$1"; then bad "$3: '$2' is in it"; else ok; fi; }
-yes_() { if "$@"; then ok; else bad "${CHECK:-check}: $*"; fi; }
+eq() { gated && return 0; if [[ $1 == "$2" ]]; then ok; else bad "$3: got '$1', want '$2'"; fi; }
+has() { gated && return 0; if grep -Fq -- "$2" <<<"$1"; then ok; else bad "$3: '$2' not in: $(head -c 600 <<<"$1")"; fi; }
+hasnt() { gated && return 0; if grep -Fq -- "$2" <<<"$1"; then bad "$3: '$2' is in it"; else ok; fi; }
+yes_() { gated && return 0; if "$@"; then ok; else bad "${CHECK:-check}: $*"; fi; }
+# npm_older V: V is not a plain version of 11.5.1 or later (follow.sh's need_npm).
+npm_older() {
+	[[ $1 =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 0
+	local a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]} c=${BASH_REMATCH[3]}
+	((a < 11 || (a == 11 && (b < 5 || (b == 5 && c < 1)))))
+}
 
 export GIT_CONFIG_GLOBAL=$T/gitconfig GIT_CONFIG_NOSYSTEM=1
 git config --global user.name Tester
@@ -370,6 +389,24 @@ change() { # change FILE TEXT MESSAGE, in the current repository
 }
 run() { # run ARGS…: follow.sh in the current repository; output and exit code in RUN_OUT, RUN_RC
 	RUN_RC=0
+	local v real
+	v=$(npm --version 2>/dev/null | head -n 1) || v=''
+	if [[ ! ${1:-} =~ ^(help|-h|--help)?$ ]] && npm_older "$v"; then
+		# The npm follow.sh would get is too old: the refusal is the expected outcome, before any npm call but
+		# --version (a shim in front of that npm logs every other call).
+		real=$(command -v npm)
+		mkdir -p "$T/gate-shim"
+		: >"$T/gate-shim/calls"
+		printf '#!/bin/sh\n[ "$1" = --version ] || echo "$*" >>"%s"\nexec "%s" "$@"\n' "$T/gate-shim/calls" "$real" >"$T/gate-shim/npm"
+		chmod +x "$T/gate-shim/npm"
+		RUN_OUT=$(PATH="$T/gate-shim:$PATH" bash "$FOLLOW" "$@" 2>&1) || RUN_RC=$?
+		GATED_CASE=''
+		eq "$RUN_RC" 1 "npm $v: follow.sh ${1:-} refused"
+		has "$RUN_OUT" "npm $v is older than 11.5.1" "npm $v: follow.sh ${1:-} says why"
+		eq "$(cat "$T/gate-shim/calls")" "" "npm $v: follow.sh ${1:-} made no npm call but --version"
+		GATED_CASE=$CASE
+		return 0
+	fi
 	RUN_OUT=$(bash "$FOLLOW" "$@" 2>&1) || RUN_RC=$?
 }
 runc() { # runc CMD…: any command; output and exit code in RUN_OUT, RUN_RC
@@ -399,6 +436,7 @@ t_clean() {
 	eq "$RUN_RC" 0 "prepare exits 0"
 	eq "$(state)" candidate "state"
 	eq "$(field new_version)" 105.1.1 "new version"
+	past_gate || return 0
 	local r m main
 	r=$(field candidate)
 	m=$(git rev-parse "$r^")
@@ -913,6 +951,7 @@ t_f3_handoff() {
 	change extensions/lib.ts 'export const x = 12;' "fix: x is 12"
 	release 1.5.1
 	run prepare
+	past_gate || return 0
 	local r d z=$T/f3-handoff/zip out ga
 	r=$(field candidate)
 	mkdir -p "$z"
@@ -1235,7 +1274,8 @@ t_f8_recovery() {
 	RUN_RC=0
 	RUN_OUT=$(bash .github/follow/follow.sh merge 2>&1) || RUN_RC=$?
 	eq "$RUN_RC" 1 "merge from inside the tree: refused"
-	has "$RUN_OUT" "outside the tree" "says why"
+	# Under an npm older than 11.5.1 the npm gate refuses first.
+	if npm_older "$(npm --version 2>/dev/null | head -n 1)"; then has "$RUN_OUT" "is older than 11.5.1" "says why (the npm gate)"; else has "$RUN_OUT" "outside the tree" "says why"; fi
 	rm -rf .github
 	# A conflict that also carries a refused change: the merge by hand ends in the guard's refusal.
 	fresh f8-conflict-refused
@@ -1282,7 +1322,7 @@ t_f8_recovery() {
 	FOLLOW_NPM_DIR='' PATH="$T/fakenpm:$PATH" run plan
 	eq "$RUN_RC" 4 "an .npmrc: refused"
 	# Only the version check (npm 11.5.1 or later), from the neutral folder; npm never ran on the tree.
-	eq "$(cut -d' ' -f2- "$T/fakenpm/log" | tr '\n' ' ')" "--version " "npm never ran but --version"
+	eq "$(cut -d' ' -f2- "$T/fakenpm/log" | grep -vx -- '--version' || true)" "" "npm never ran but --version"
 	hasnt "$(cut -d' ' -f1 "$T/fakenpm/log")" "$F" "the version check not from the tree"
 	# Without one, npm runs from a neutral folder against the public registry.
 	git rm -q .npmrc && commit "chore: no npmrc"
@@ -1381,6 +1421,7 @@ t_report() {
 	release 1.5.1
 	change extensions/index.ts "$(printf 'line 1\nline 2 (the fork)\nline 3')" "feat: the fork's line 2"
 	run prepare
+	past_gate || return 0
 	rm "$OUT/readme.diff" # the report job has only the result
 	gh_run report
 	eq "$RUN_RC" 1 "a conflict is red"
@@ -1569,6 +1610,7 @@ t_f10_land() {
 	change extensions/lib.ts 'export const x = 11;' "fix: x is 11"
 	release 1.5.1
 	run prepare
+	past_gate || return 0
 	local r main
 	r=$(field candidate)
 	main=$(git rev-parse HEAD)
@@ -1706,7 +1748,15 @@ t_workflows() {
 		# shellcheck disable=SC2086
 		b=$(job $j)
 		has "$b" 'docker run --rm' "7: $j runs the tree in a container"
-		hasnt "$b" 'setup-node' "7: $j has no setup-node"
+		# Node on the host only for follow.sh's npm gate (test-candidate's fetch-candidate), before the tree is written
+		# out and before any container; the others run no follow.sh and have none.
+		if [[ $j == *test-candidate ]]; then
+			eq "$(awk '/setup-node@/ { print "node" } /checkout-index|docker run/ { print "tree" }' <<<"$b" | uniq | head -n 1)" node \
+				"7: $j sets up Node before the tree and any container"
+			eq "$(grep -c 'setup-node@' <<<"$b")" 1 "7: $j has one setup-node"
+		else
+			hasnt "$b" 'setup-node' "7: $j has no setup-node"
+		fi
 		hasnt "$b" 'git archive' "7: $j writes the tree with checkout-index"
 		# 7: the container sees an exported tree and this run's scripts read-only: never the workspace (its .git, which
 		# the checkout's cleanup opens with a credential afterwards) or the current folder.
@@ -1732,6 +1782,19 @@ t_workflows() {
 		has "$b" 'node /follow/load.mjs "$1" /w/node_modules' "5: $j loads that archive"
 	done
 	hasnt "$(cat "$f" "$p")" '        cache:' "7: no cache input"
+	# Every job that runs follow.sh sets up Node 24 before it: follow.sh refuses npm older than 11.5.1 (2.1).
+	for j in $(grep -oE '^  [A-Za-z0-9_-]+:$' "$f" | tr -d ' :'); do
+		b=$(job "$f" "$j")
+		grep -q 'follow/follow.sh' <<<"$b" || continue
+		eq "$(awk '/setup-node@/ { print "node" } /follow\/follow.sh/ { print "follow" } /node-version: .24./ { print "24" }' <<<"$b" | head -n 2 | tr '\n' ' ')" "node 24 " \
+			"2.1: follow.yml's $j sets up Node 24 before follow.sh"
+	done
+	for j in $(grep -oE '^  [A-Za-z0-9_-]+:$' "$p" | tr -d ' :'); do
+		b=$(job "$p" "$j")
+		grep -q 'follow/follow.sh' <<<"$b" || continue
+		eq "$(awk '/setup-node@/ { print "node" } /follow\/follow.sh/ { print "follow" } /node-version: .24./ { print "24" }' <<<"$b" | head -n 2 | tr '\n' ' ')" "node 24 " \
+			"2.1: publish.yml's $j sets up Node 24 before follow.sh"
+	done
 	eq "$(grep -c 'actions/setup-node@' "$f" "$p" | awk -F: '{ s += $2 } END { print s }')" \
 		"$(grep -c 'package-manager-cache: false' "$f" "$p" | awk -F: '{ s += $2 } END { print s }')" "7: every setup-node without its cache"
 	# 3, 10: land runs follow.sh land (recheck, landed only after the dispatch); one writer of main at a time.
@@ -1839,9 +1902,10 @@ fake_npm_as() {
 	real=$(command -v npm)
 	mkdir -p "$d/bin"
 	: >"$d/calls"
+	: >"$d/versions"
 	cat >"$d/bin/npm" <<-SH
 		#!/bin/sh
-		if [ "\$1" = --version ]; then echo $v; exit 0; fi
+		if [ "\$1" = --version ]; then echo x >>"$d/versions"; echo $v; exit 0; fi
 		n=\$(wc -l <"$d/calls" | tr -d ' ')
 		echo "\$*" >>"$d/calls"
 		env >"$d/env.\$n"
@@ -1888,7 +1952,7 @@ t_npm_boundary() {
 	eq "$RUN_RC" 1 "npm 10.9.3: plan stops"
 	has "$RUN_OUT" "npm 10.9.3 is older than 11.5.1" "plan says why"
 	eq "$(wc -l <"$B/npm10/calls" | tr -d ' ')" 0 "npm 10: no call but --version"
-	yes_ test ! -e "$B/hook-old.env"
+	if [[ -e $B/hook-old.env ]]; then bad "npm 10: a hook ran"; else ok; fi
 	# The bound itself: 11.5.0 is refused, 11.5.1 runs.
 	for v in 11.5.0 11.5.1; do
 		fake_npm_as "$B/npm-$v" "$v"
@@ -1931,11 +1995,53 @@ t_npm_boundary() {
 	if [[ -e $B/hook-real.env ]]; then hasnt "$(cat "$B/hook-real.env")" "synthetic" "real npm: no token"; else ok; fi
 }
 
+# Every command follow.sh's dispatcher accepts (read from follow.sh itself, so a new one cannot be left out), and an
+# unknown one, under a stand-in npm 10.9.3 with tokens in the environment: each stops at --version, says why, and
+# makes no other npm call. Only a plain help runs without npm. And the review's case: merge of a release whose
+# tree has a prepare hook starts no hook.
+t_npm_gate() {
+	local B=$T/npm-gate c cmds n=0
+	rm -rf "$B"
+	fresh npm-gate
+	with_prepare "$B/hook-merge.env"
+	release 1.5.1
+	fake_npm_as "$B/npm10" 10.9.3
+	cmds=$(sed -n '/^# --- main/,$p' "$FOLLOW" | grep -oE '^[a-z-]+\) cmd_' | sed 's/) cmd_//')
+	has "$cmds" "merge" "the dispatcher's commands, merge among them"
+	for c in $cmds no-such-command; do
+		n=$((n + 1))
+		: >"$B/npm10/versions"
+		RUN_RC=0
+		RUN_OUT=$(PATH="$B/npm10/bin:$PATH" with_tokens bash "$FOLLOW" "$c" 1.5.1 "$(git rev-parse HEAD)" x 2>&1) || RUN_RC=$?
+		eq "$RUN_RC" 1 "npm 10.9.3: $c refused"
+		has "$RUN_OUT" "npm 10.9.3 is older than 11.5.1" "npm 10.9.3: $c says why"
+		eq "$(cat "$B/npm10/calls")" "" "npm 10.9.3: $c made no npm call but --version"
+		eq "$(wc -l <"$B/npm10/versions" | tr -d ' ')" 1 "npm 10.9.3: $c asked --version once"
+	done
+	yes_ test "$n" -ge 13
+	yes_ test ! -e "$B/hook-merge.env"
+	eq "$(git rev-parse HEAD)" "$(git rev-parse main)" "merge left the fork alone"
+	yes_ git diff --quiet
+	# A plain help, and only that, without npm.
+	for c in help -h --help; do
+		: >"$B/npm10/versions"
+		RUN_RC=0
+		RUN_OUT=$(PATH="$B/npm10/bin:$PATH" bash "$FOLLOW" "$c" 2>&1) || RUN_RC=$?
+		eq "$RUN_RC" 0 "$c: the usage"
+		has "$RUN_OUT" "follow.sh select" "$c: says the commands"
+		eq "$(cat "$B/npm10/versions" "$B/npm10/calls")" "" "$c: no npm"
+	done
+	# The same merge with the npm on PATH: npm 10 is refused at --version (run asserts it), npm 11.5.1 or later
+	# merges; neither starts the release's prepare hook.
+	with_tokens run merge 1.5.1
+	if [[ -e $B/hook-merge.env ]]; then bad "merge with the npm on PATH started the hook"; else ok; fi
+}
+
 # --- run ----------------------------------------------------------------------------------------------------------
 build_fixture >/dev/null
 ALL='numbers clean rerun waiting states conflict manifest_conflict manifest_merge refusals shape readme report plan
 f2_release f3_strings f3_handoff f3_links f3_checker f4_deps f4_dev_lands f5_paths f5_pack f5_load f5_order f6_refs f8_recovery
-f9_issues f10_publish f10_land f11_mirror workflows f12_history npm_boundary'
+f9_issues f10_publish f10_land f11_mirror workflows f12_history npm_boundary npm_gate'
 # shellcheck disable=SC2086 # the names
 [[ $# -gt 0 ]] || set -- $ALL
 for t in "$@"; do
@@ -1943,4 +2049,5 @@ for t in "$@"; do
 	"t_$t"
 done
 echo "follow tests: $PASS passed, $FAIL failed${FAILED_CASES:+ (in:$FAILED_CASES)}"
+if ((SKIP)); then echo "follow tests: $SKIP assertions skipped past a refusal of an npm older than 11.5.1 (each refusal asserted)"; fi
 ((FAIL == 0))
