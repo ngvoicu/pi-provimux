@@ -2,7 +2,8 @@
 #
 # Every 3 hours, or by hand: takes the original's newest release (npm's latest, the commit on its main that set that
 # version, and npm's tarball of it, file by file the same) once it has been public for 24 hours, merges it into main,
-# stamps the version and the changelog, runs the guard, then npm ci and npm run check on the merged tree. A clean,
+# stamps the version and the changelog, runs the guard, then npm ci and npm run check on the merged tree, on pi 1.3.0
+# (the lockfile's) and on pi 1.6.0. A clean,
 # passing candidate is checked again, pushed to main (fast-forward only) and publish.yml is started. Anything else
 # lands nothing and is said in an issue, once per state.
 #
@@ -120,7 +121,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The merged tree: npm ci, the packed package loaded by pi, and npm run check, in a container. Runs the original's
+  # The merged tree: npm ci, the packed package loaded by pi, and npm run check, in a container, on the lockfile's
+  # pi 1.3.0 and again on pi 1.6.0. Runs the original's
   # and the fork's code and their dev dependencies. The container sees the tree (no .git) and this run's own scripts,
   # read-only; neither the workspace nor anything a later step reads.
   test-candidate:
@@ -183,10 +185,28 @@ jobs:
           -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack:ro"
           -v "$RUNNER_TEMP/follow:/follow:ro" -w /w "$NODE_IMAGE"
           sh -c 'set -- /pack/*.tgz && [ "$#" -eq 1 ] && [ -f "$1" ] && node /follow/load.mjs "$1" /w/node_modules'
-      - name: npm run check
+      - name: npm run check, on pi 1.3.0 (package-lock.json)
         run: >-
           docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
           -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm run check
+      # The same load and checks on pi 1.6.0, as publish.yml's test runs them, so that nothing lands that the publish
+      # would then refuse: installed over the lockfile's pi without saving and without scripts, in the container.
+      - name: pi 1.6.0, without saving
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE"
+          npm install --no-save --ignore-scripts @earendil-works/pi-ai@1.6.0 @earendil-works/pi-coding-agent@1.6.0
+      - name: The packed package loads, on pi 1.6.0
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack:ro"
+          -v "$RUNNER_TEMP/follow:/follow:ro" -w /w "$NODE_IMAGE"
+          sh -c 'set -- /pack/*.tgz && [ "$#" -eq 1 ] && [ -f "$1" ] && node /follow/load.mjs "$1" /w/node_modules'
+      - name: npm run check, on pi 1.6.0
+        run: >-
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
+          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE"
+          sh -c 'npm ls @earendil-works/pi-ai @earendil-works/pi-coding-agent && npm run check'
 
   # The original's release alone, the same way. Information only: it tells whether a failure is the original's own.
   test-original:
