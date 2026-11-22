@@ -43,6 +43,9 @@ REPO=${FOLLOW_REPO:-${GITHUB_REPOSITORY:-ngvoicu/pi-provimux}}
 UPSTREAM_URL=${FOLLOW_UPSTREAM_URL:-https://github.com/$REPO.git}
 REGISTRY=https://registry.npmjs.org/
 WAIT_HOURS=${FOLLOW_WAIT_HOURS:-24}
+# report-publish: how long npm may take to show a version just uploaded, and how often it is asked (seconds).
+NPM_SHOW_WAIT=${FOLLOW_NPM_SHOW_WAIT:-900}
+NPM_SHOW_POLL=${FOLLOW_NPM_SHOW_POLL:-30}
 LABEL=${FOLLOW_LABEL:-follow-bot}
 BOT_LOGINS=${FOLLOW_BOT_LOGINS:-github-actions[bot]}
 ORIGINAL_REF=refs/follow/original
@@ -88,6 +91,8 @@ RES=$OUT/result.json
 
 [[ $WAIT_HOURS =~ ^[0-9]{1,4}$ ]] || die "FOLLOW_WAIT_HOURS is not a number of hours"
 [[ -z ${FOLLOW_NOW:-} || $FOLLOW_NOW =~ ^[0-9]{1,12}$ ]] || die "FOLLOW_NOW is not a time in seconds"
+[[ $NPM_SHOW_WAIT =~ ^[0-9]{1,5}$ ]] || die "FOLLOW_NPM_SHOW_WAIT is not a number of seconds"
+[[ $NPM_SHOW_POLL =~ ^[1-9][0-9]{0,3}$ ]] || die "FOLLOW_NPM_SHOW_POLL is not a number of seconds"
 
 # run_rc CMD…: runs CMD in a subshell with -e in force (a function called as `f || rc=$?` runs without it) and
 # leaves its exit code in RC.
@@ -274,7 +279,34 @@ npm_meta() {
 		if [[ -f $(stub "$1" .json) ]]; then cat "$(stub "$1" .json)"; else echo '{}'; fi
 		return 0
 	fi
-	npm_json "$1" dist-tags time
+	npm_json "$1" dist-tags time --prefer-online
+}
+
+# npm_shows PKG VERSION: npm's metadata of PKG lists VERSION. A failed request counts as not yet.
+npm_shows() {
+	local meta
+	meta=$(npm_meta "$1") || return 1
+	jq -e --arg v "$2" '(.time // {}) | has($v)' >/dev/null 2>&1 <<<"$meta"
+}
+
+# npm_wait_for PKG VERSION: true as soon as npm shows VERSION, asking every NPM_SHOW_POLL seconds for up to
+# NPM_SHOW_WAIT seconds; false when it never does. npm takes a while after an upload before its metadata lists the
+# new version: asked at once, a publish that worked looks like one that failed.
+npm_wait_for() {
+	local start=$SECONDS n=0
+	while :; do
+		n=$((n + 1))
+		if npm_shows "$1" "$2"; then
+			((n == 1)) || say "npm shows $1 $2 (after $((SECONDS - start)) s)"
+			return 0
+		fi
+		if ((SECONDS - start + NPM_SHOW_POLL > NPM_SHOW_WAIT)); then
+			say "npm does not show $1 $2 after $((SECONDS - start)) s ($n requests)"
+			return 1
+		fi
+		((n > 1)) || say "npm does not show $1 $2 yet: asking again every $NPM_SHOW_POLL s, for up to $NPM_SHOW_WAIT s"
+		sleep "$NPM_SHOW_POLL"
+	done
 }
 
 # npm_dist PKG VERSION: {"tarball", "integrity"} of that version, {} when npm lacks it.
@@ -1440,7 +1472,8 @@ readme_issue() {
 }
 
 # report-publish VERSION RESULT: success, outside a dry run and with the version on npm, closes the bot's publish
-# issue of VERSION; anything else opens or updates it. A dry run closes nothing.
+# issue of VERSION; anything else opens or updates it. A dry run closes nothing. After a success, npm is given up
+# to NPM_SHOW_WAIT seconds to show the version before the publish counts as failed (npm_wait_for).
 cmd_report_publish() {
 	local v=$1 result=$2 key n dry=${DRY_RUN:-yes}
 	# plan names "!" for a version that is not plain: still a report, never a close.
@@ -1454,7 +1487,7 @@ cmd_report_publish() {
 			say "dry run: no issue is closed"
 			return 0
 		fi
-		if jq -e --arg v "$v" '(.time // {}) | has($v)' >/dev/null <<<"$(npm_meta "$PKG")"; then
+		if npm_wait_for "$PKG" "$v"; then
 			bot_issues >"$TMP/bot.json" || return 1
 			for n in $(jq -r --arg m "$(key_marker "$key")" "$JQ_KEY"' .[] | select(.state == "open" and keyline == $m) | .number' "$TMP/bot.json"); do
 				gh issue close "$n" -R "$REPO" --comment "npm has $PKG $v now${RUN_URL:+ ($RUN_URL)}." >/dev/null || return 1
@@ -1462,7 +1495,7 @@ cmd_report_publish() {
 			done
 			return 0
 		fi
-		result="the jobs succeeded, but npm does not show $v"
+		result="the jobs succeeded, but npm does not show $v after $NPM_SHOW_WAIT s"
 	fi
 	{
 		echo "main names $PKG \`$v\`; publishing it did not complete${RUN_URL:+: $RUN_URL}. Git installs already have it."

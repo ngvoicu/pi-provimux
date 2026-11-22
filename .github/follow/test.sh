@@ -1539,12 +1539,49 @@ t_f10_publish() {
 	jq --arg m "<!-- follow-bot:key=publish:105.0.1 -->" '.[0].body = "\($m)\n<!-- follow-state: failed -->"' "$GH_ISSUES" >"$T/i" && mv "$T/i" "$GH_ISSUES"
 	DRY_RUN=yes gh_run report-publish 105.0.1 success
 	eq "$(jq -r '.[0].state' "$GH_ISSUES")" open "a dry run closes nothing"
-	DRY_RUN=no gh_run report-publish 105.0.1 success
+	FOLLOW_NPM_SHOW_WAIT=2 FOLLOW_NPM_SHOW_POLL=1 DRY_RUN=no gh_run report-publish 105.0.1 success
 	eq "$(jq -r '.[0].state' "$GH_ISSUES")" open "success without the version on npm closes nothing"
 	npm_set pi-provimux 105.0.1 "105.0.1 1"
 	npm_done
 	DRY_RUN=no gh_run report-publish 105.0.1 success
 	eq "$(jq -r '.[0].state' "$GH_ISSUES")" closed "closed once npm shows it"
+	# npm shows a version a while after its upload. One that appears within the wait opens no issue; one that never
+	# appears opens "publish: <v> — failed" once the wait is over, not before.
+	local stub_meta=$FOLLOW_NPM_DIR/pi-provimux.json t0 waited
+	echo '[]' >"$GH_ISSUES"
+	rm -f "$stub_meta"
+	npm_set pi-provimux 105.0.2 "105.0.1 2" "105.0.2 0"
+	mkdir -p "$T/f10-later"
+	mv "$T/npm/pi-provimux.json" "$T/f10-later/pi-provimux.json"
+	(sleep 3 && mv "$T/f10-later/pi-provimux.json" "$stub_meta") &
+	local later=$!
+	t0=$SECONDS
+	FOLLOW_NPM_SHOW_WAIT=30 FOLLOW_NPM_SHOW_POLL=1 DRY_RUN=no gh_run report-publish 105.0.2 success
+	waited=$((SECONDS - t0))
+	wait "$later" || true
+	eq "$RUN_RC" 0 "a version npm shows after a delay: a success: $RUN_OUT"
+	eq "$(jq -r 'length' "$GH_ISSUES")" 0 "a version npm shows after a delay: no issue"
+	has "$RUN_OUT" "npm does not show pi-provimux 105.0.2 yet" "it waited for npm"
+	has "$RUN_OUT" "npm shows pi-provimux 105.0.2 (after " "it saw the version come"
+	CHECK="waited for the delayed version (${waited}s)" yes_ test "$waited" -ge 2
+	rm -f "$stub_meta"
+	npm_set pi-provimux 105.0.1 "105.0.1 2"
+	npm_done
+	t0=$SECONDS
+	FOLLOW_NPM_SHOW_WAIT=3 FOLLOW_NPM_SHOW_POLL=1 DRY_RUN=no gh_run report-publish 105.0.2 success
+	waited=$((SECONDS - t0))
+	eq "$RUN_RC" 1 "a version npm never shows: red"
+	eq "$(jq -r '[.[] | select(.state == "open")] | .[0].title' "$GH_ISSUES")" "publish: 105.0.2 — failed" "a version npm never shows: the issue"
+	has "$(jq -r '.[0].body' "$GH_ISSUES")" "npm does not show 105.0.2 after 3 s" "the issue says npm was waited for"
+	CHECK="the full wait before the issue (${waited}s)" yes_ test "$waited" -ge 2
+	# A dry run neither waits nor closes.
+	t0=$SECONDS
+	FOLLOW_NPM_SHOW_WAIT=30 FOLLOW_NPM_SHOW_POLL=1 DRY_RUN=yes gh_run report-publish 105.0.2 success
+	eq "$(jq -r '.[0].state' "$GH_ISSUES")" open "a dry run still closes nothing"
+	CHECK="a dry run does not wait" yes_ test $((SECONDS - t0)) -lt 10
+	# The wait is checked as a number.
+	FOLLOW_NPM_SHOW_WAIT=soon DRY_RUN=no gh_run report-publish 105.0.2 success
+	has "$RUN_OUT" "FOLLOW_NPM_SHOW_WAIT is not a number of seconds" "a wait that is not a number"
 	# The tag: an annotated tag at the right commit is the right tag; a missing release is made.
 	git init -q --bare "$T/f10-publish/up.git"
 	git push -q "$T/f10-publish/up.git" "$main:refs/heads/main"

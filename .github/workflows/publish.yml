@@ -24,7 +24,8 @@
 #            its files exactly the commit's), then, in one step, main checked to be that commit and npm publish
 #            --ignore-scripts of the archive; no npm ci, no script, no pack; id-token: write and the environment npm
 #   tag      v<version> at the published commit of the live main, and the GitHub release; environment main-only
-#   notify   the issue "publish: <version> — failed", or closes it once npm shows the version (never in a dry run)
+#   notify   the issue "publish: <version> — failed", or closes it once npm shows the version (never in a dry run);
+#            after a publish, npm is given up to 15 minutes to show the version before it counts as failed
 name: publish
 
 on:
@@ -302,7 +303,8 @@ jobs:
     needs: [plan, test, publish, tag]
     if: always() && github.server_url == 'https://github.com' && needs.plan.outputs.version != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Up to 15 minutes of waiting for npm to show a version just published (follow.sh report-publish).
+    timeout-minutes: 20
     environment: main-only
     permissions:
       contents: read
