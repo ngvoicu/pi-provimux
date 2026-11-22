@@ -913,7 +913,7 @@ describe("reshapeConfigurationUpdates", () => {
 	});
 
 	it("reshapes the captured request log shape with a tool turn", () => {
-		// Mirrors ~/Downloads/openai.json: converter layout for turns run at
+		// Mirrors a captured request log: converter layout for turns run at
 		// high then xhigh, the second turn ending in tool output.
 		const body = reshapeConfigurationUpdates({
 			model: "gpt-6-sol",

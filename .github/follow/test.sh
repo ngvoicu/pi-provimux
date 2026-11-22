@@ -78,7 +78,7 @@ npm_older() {
 
 export GIT_CONFIG_GLOBAL=$T/gitconfig GIT_CONFIG_NOSYSTEM=1
 git config --global user.name Tester
-git config --global user.email tester@example.invalid
+git config --global user.email office@providers.dev
 git config --global init.defaultBranch main
 git config --global advice.detachedHead false
 git config --global protocol.file.allow always

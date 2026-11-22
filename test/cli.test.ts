@@ -1,5 +1,5 @@
 /**
- * pi's own CLI, with this extension loaded, against a fixture proxy: the release review's cases (T-352), run on
+ * pi's own CLI, with this extension loaded, against a fixture proxy: the release review's cases, run on
  * whichever pi the tests have installed (1.3.0 from package-lock.json, 1.6.0 in CI's second pass).
  *
  * - A lookup of the credential list still out when its session ends (`pi -p` quitting, `/reload`) never ends pi.

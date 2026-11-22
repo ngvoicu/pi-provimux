@@ -834,8 +834,8 @@ automation is built and reviewed on a branch but **not merged**; nobody is worki
 5. **Other places that name the old repository** (list them first: `grep -rIl pi-cliproxyapi-provider` over
    `providers.dev`, without `node_modules` and `.git`): `pi-cache-keeper/README.md` links it; the
    `providers-dev-sme` brain names it (through kluris, never by hand). Mentions of the original
-   (`router-for-me/…`, `@router-for-me/…`) stay as they are. The owner's project `team-vs-solo` is **not** in this
-   step: it is his, and it is step 9.
+   (`router-for-me/…`, `@router-for-me/…`) stay as they are. The owner's project that loads this extension by path
+   is **not** in this step: it is his, and it is step 9.
 6. **Owner: npm account and first publish** (4.4, steps 1 and 2). A worker then tags that commit on GitHub
    (`git tag v<version> <the commit>`, `git push upstream v<version>`): no workflow exists yet to do it. Done for
    105.0.1 (`v105.0.1`), with step 1, on 2026-11-22.
@@ -855,13 +855,12 @@ automation is built and reviewed on a branch but **not merged**; nobody is worki
    pi install npm:pi-provimux
    pi list
    ```
-   `pi list` must show `npm:pi-provimux` once and the old source not at all. Then, at once, `team-vs-solo`
-   (below): its setups stop working at the `pi remove`.
+   `pi list` must show `npm:pi-provimux` once and the old source not at all. Then, at once, the owner's
+   project (below): its setups stop working at the `pi remove`.
 
-**`team-vs-solo` (the owner's project, the owner's step).** Twelve files under `v1/` load this extension by the path
-of pi's git checkout, `pi -e ~/.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/extensions/index.ts`:
-`judges/deepseek.json`, five setups in `suites/smoke/setups/` and six in `suites/tally/setups/` (15 lines), and
-`suites/tally/README.md:111` shows the same line.
+**The owner's project (the owner's step).** Twelve files under its `v1/` load this extension by the path of pi's
+git checkout, `pi -e ~/.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/extensions/index.ts` (15 lines),
+and one README there shows the same line.
 
 - **What keeps them working through the rename:** that folder is named after the source in the owner's pi settings,
   not after the repository on GitHub. Renaming the repository on GitHub and on the NAS, and the local folder,
@@ -869,17 +868,17 @@ of pi's git checkout, `pi -e ~/.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-p
   nothing there, and for as long as the owner keeps the git install, nothing ever does.
 - **What breaks them:** only `pi remove git:github.com/ngvoicu/pi-cliproxyapi-provider` in step 9. pi deletes the
   checkout with the entry.
-- **The owner's step, right after `pi install npm:pi-provimux`**, with no team-vs-solo run in progress. The npm
+- **The owner's step, right after `pi install npm:pi-provimux`**, with no run of the project in progress. The npm
   install lives in `~/.pi/agent/npm/node_modules/pi-provimux/` (check: `ls ~/.pi/agent/npm/node_modules/pi-provimux/extensions/index.ts`):
   ```sh
-  cd <the local checkout of team-vs-solo>
+  cd <the local checkout of the project>
   grep -rIl '.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/' v1 |
     xargs sed -i '' 's#~/.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/#~/.pi/agent/npm/node_modules/pi-provimux/#g'
   grep -rn 'pi-cliproxyapi-provider' v1    # nothing left
   git diff --stat                           # 13 files, 16 lines
   ```
 - **Or he does not switch.** Step 9 is his to do when he likes, or never: the git install keeps following `main`,
-  which has every release the npm package has. Then `team-vs-solo` stays as it is.
+  which has every release the npm package has. Then the project stays as it is.
 
 **The README says the move once**, in "Coming from pi-cliproxyapi-provider", for anyone who installed from git:
 
