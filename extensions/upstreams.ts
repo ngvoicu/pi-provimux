@@ -117,36 +117,47 @@ const OWNERS: Record<string, Upstream[]> = {
 	meta: [{ provider: "meta" }],
 };
 
-/** Groq's own ids with a slash: these labs' models (`openai/gpt-oss-120b`); its other ids have none. */
-const GROQ_LABS = new Set(["openai", "qwen"]);
+/** A provider's model ids as pi's catalog has them; undefined when the catalog has none for it. */
+export type Catalog = (provider: string) => ReadonlySet<string> | undefined;
 
 /**
- * How many of a model id's last `/`-parts are the provider's own id, as pi's catalog has it; what comes before is a
- * prefix the proxy added. One for a provider whose ids have no slash (everyone not here).
+ * Without a catalog: how many of a model id's last `/`-parts are the provider's own id, by the shape all its ids have
+ * (`openai/gpt-5`, `Qwen/Qwen3.6-Plus`, `google/gemma-3-12b-it`, `accounts/fireworks/models/…`); one for everyone else.
  */
-const OWN_ID_PARTS: Record<string, (parts: string[]) => number> = {
-	openrouter: () => 2, // `openai/gpt-5`
-	together: () => 2, // `Qwen/Qwen3.6-Plus`
-	nvidia: () => 2, // `google/gemma-3-12b-it`
-	fireworks: () => 4, // `accounts/fireworks/models/deepseek-v4p1-flash`
-	groq: (parts) => (parts.length >= 2 && GROQ_LABS.has(parts[parts.length - 2]!) ? 2 : 1),
-};
+const ID_PARTS: Record<string, number> = { openrouter: 2, together: 2, nvidia: 2, fireworks: 4 };
 
-/** A model's id at a provider: the proxy's id without a prefix the proxy added. */
-export function ownModelId(provider: string, modelId: string): string {
+const partsOf = (id: string) => id.split("/").length;
+
+/**
+ * A model's id at a provider, as pi's catalog has it: the proxy's id without a prefix (the proxy's own or one an
+ * operator configured). A prefix is left out unless what is left is not in the catalog and the id with it is: of the
+ * id and what is left after each `/`, the shortest the catalog has. When the catalog has none of them (a model newer
+ * than it), the parts the provider's ids have, if nearly all have as many; else the last part. Without a catalog for the
+ * provider, the shape its ids are known to have.
+ */
+export function ownModelId(provider: string, modelId: string, catalog?: Catalog): string {
 	const parts = modelId.split("/");
-	const count = own(OWN_ID_PARTS, provider)?.(parts) ?? 1;
+	const tails = parts.map((_, index) => parts.slice(index).join("/"));
+	const ids = catalog?.(provider);
+	let count = own(ID_PARTS, provider) ?? 1;
+	if (ids && ids.size > 0) {
+		for (const tail of [...tails].reverse()) if (ids.has(tail)) return tail;
+		const counts = new Map<number, number>();
+		for (const id of ids) counts.set(partsOf(id), (counts.get(partsOf(id)) ?? 0) + 1);
+		const [common, many] = [...counts].sort((a, b) => b[1] - a[1])[0]!;
+		count = many * 10 >= ids.size * 9 ? common : 1;
+	}
 	return parts.slice(-count).join("/");
 }
 
 /** A credential's upstream for a model; undefined when it leads somewhere not known. */
-export function upstreamOf(account: Account, modelId: string): Upstream | undefined {
+export function upstreamOf(account: Account, modelId: string, catalog?: Catalog): Upstream | undefined {
 	const provider =
 		account.kind === "apikey" && account.host
 			? own(API_HOSTS, account.host)
 			: own(own(CREDENTIALS, account.provider) ?? {}, account.kind);
 	if (!provider) return undefined;
-	const model = ownModelId(provider, modelId);
+	const model = ownModelId(provider, modelId, catalog);
 	return { provider, ...(model !== modelId ? { model } : {}), subscription: account.kind !== "apikey" };
 }
 
@@ -159,22 +170,22 @@ const unique = (upstreams: Upstream[]): Upstream[] => {
 };
 
 /** The upstreams of some credentials; empty when one of them leads somewhere not known (it may answer). */
-function upstreamsOf(accounts: Account[], modelId: string): Upstream[] {
-	const upstreams = accounts.map((account) => upstreamOf(account, modelId));
+function upstreamsOf(accounts: Account[], modelId: string, catalog?: Catalog): Upstream[] {
+	const upstreams = accounts.map((account) => upstreamOf(account, modelId, catalog));
 	return upstreams.every((upstream) => upstream !== undefined) ? unique(upstreams as Upstream[]) : [];
 }
 
 /** A model's route: from its credentials when CLIProxyAPI lists them, else from its owner and CLIProxyAPI's own prefix. */
-export function routeOf(modelId: string, listed: ModelAccounts): Route {
+export function routeOf(modelId: string, listed: ModelAccounts, catalog?: Catalog): Route {
 	const accounts = own(listed.accounts, modelId);
 	if (accounts && accounts.length > 0) {
 		const likely = likelyAccounts(accounts);
-		const upstreams = upstreamsOf(likely, modelId);
+		const upstreams = upstreamsOf(likely, modelId, catalog);
 		const main = new Set(upstreams.map((upstream) => JSON.stringify(upstream)));
 		const fallbacks = unique(
 			accounts
 				.filter((account) => !likely.includes(account))
-				.map((account) => upstreamOf(account, modelId))
+				.map((account) => upstreamOf(account, modelId, catalog))
 				.filter((upstream): upstream is Upstream => upstream !== undefined && !main.has(JSON.stringify(upstream))),
 		);
 		return { upstreams, ...(fallbacks.length > 0 ? { fallbacks } : {}) };
@@ -201,22 +212,27 @@ export interface StatedCredential {
  * credential that leads to a service not known is still named, so a change of route is seen: by its host for an API
  * key that has one, else by its provider as the response gives it.
  */
-export function statedUpstream(modelId: string, stated: StatedCredential): Upstream {
+export function statedUpstream(modelId: string, stated: StatedCredential, catalog?: Catalog): Upstream {
 	const account: Account = {
 		provider: stated.provider.toLowerCase(),
 		kind: stated.kind,
 		priority: 0,
 		...(stated.host ? { host: stated.host.toLowerCase() } : {}),
 	};
-	const known = upstreamOf(account, modelId);
+	const known = upstreamOf(account, modelId, catalog);
 	if (known) return known;
 	const provider = stated.kind === "apikey" && account.host ? account.host : stated.provider;
 	return { provider, subscription: stated.kind !== "apikey" };
 }
 
 /** What answered a request to a model, from the kind of credential CLIProxyAPI names; undefined when not known. */
-export function answeredUpstreams(modelId: string, kind: string, listed: ModelAccounts): Upstream[] | undefined {
-	const upstreams = upstreamsOf(likelyAccounts(own(listed.accounts, modelId) ?? [], kind), modelId);
+export function answeredUpstreams(
+	modelId: string,
+	kind: string,
+	listed: ModelAccounts,
+	catalog?: Catalog,
+): Upstream[] | undefined {
+	const upstreams = upstreamsOf(likelyAccounts(own(listed.accounts, modelId) ?? [], kind), modelId, catalog);
 	return upstreams.length > 0 ? upstreams : undefined;
 }
 
@@ -384,6 +400,11 @@ export function answeredClaudeMessages(
 	};
 }
 
+/** The session's models, as pi's `ctx.modelRegistry` lists them. */
+interface ModelList {
+	getAll(): Array<{ provider: string; id: string }>;
+}
+
 /** Tells other extensions where this provider's models come from, and what answered each request. */
 export class UpstreamsAnnouncer {
 	private listed: ModelAccounts | undefined;
@@ -392,17 +413,61 @@ export class UpstreamsAnnouncer {
 	private wanted = false;
 	/** Whether the proxy named what answered a request in this session: it is one that names answers. */
 	private namedBefore = false;
+	/** The session's models (pi's catalog with its updates and models.json), from the context pi gives handlers. */
+	private registry: ModelList | undefined;
+	/** The catalog pi-ai is built with, once loaded: when the session's models have none of a provider. */
+	private builtin: ((provider: string) => Array<{ id: string }>) | undefined;
+	private builtinLoading: Promise<void> | undefined;
 
 	constructor(
 		private readonly pi: ExtensionAPI,
 		private readonly providerId: string,
 		private readonly connection: () => { baseUrlInput: string; apiKey: string } | null,
 		private readonly fetchAccounts: typeof fetchModelAccounts = fetchModelAccounts,
+		/** pi's catalog, as a test gives it; else the session's models, else pi-ai's own. */
+		private readonly givenCatalog?: Catalog,
 	) {}
+
+	/** A provider's model ids as pi's catalog has them, for the model ids said (`ownModelId`). */
+	readonly catalog: Catalog = (provider) => {
+		if (this.givenCatalog) return this.givenCatalog(provider);
+		let ids: string[] = [];
+		try {
+			ids = (this.registry?.getAll() ?? []).filter((model) => model.provider === provider).map((model) => model.id);
+		} catch {
+			// A context from before a reload: pi-ai's own catalog.
+			this.registry = undefined;
+		}
+		if (ids.length === 0) {
+			try {
+				ids = (this.builtin?.(provider) ?? []).map((model) => model.id);
+			} catch {
+				ids = [];
+			}
+		}
+		return ids.length > 0 ? new Set(ids) : undefined;
+	};
+
+	private loadBuiltin(): Promise<void> {
+		this.builtinLoading ??= import("@earendil-works/pi-ai/providers/all")
+			.then((module: { getBuiltinModels?: unknown }) => {
+				if (typeof module.getBuiltinModels === "function")
+					this.builtin = module.getBuiltinModels as (provider: string) => Array<{ id: string }>;
+			})
+			.catch(() => {});
+		return this.builtinLoading;
+	}
+
+	private keepRegistry(ctx: unknown): void {
+		const registry = (ctx as { modelRegistry?: ModelList } | undefined)?.modelRegistry;
+		if (registry && typeof registry.getAll === "function") this.registry = registry;
+	}
 
 	register(): void {
 		// pi without a bus between extensions (older, or a test's stand-in): nobody to tell.
 		if (!this.pi.events) return;
+		void this.loadBuiltin();
+		this.pi.on("session_start", (_event, ctx) => this.keepRegistry(ctx));
 		this.pi.events.on(REQUEST_EVENT, () => {
 			this.wanted = true;
 			void this.announce();
@@ -410,11 +475,12 @@ export class UpstreamsAnnouncer {
 		// The event a request's answer is told with, marked by that request's own callbacks (`answeredOptions`); its
 		// model is the one the request was sent to, not the session's selection (a virtual model, or another provider's).
 		// pi's events name no request, so nothing else here is read from them.
-		this.pi.on("provider_stream_event", (event) => {
+		this.pi.on("provider_stream_event", (event, ctx) => {
 			if (event.provider !== this.providerId || !isRecord(event.data)) return;
 			const stated = statements().get(event.data);
 			if (!stated) return;
 			statements().delete(event.data);
+			this.keepRegistry(ctx);
 			this.answered(event.model, stated.kind, stated.provider, stated.host);
 		});
 	}
@@ -440,12 +506,12 @@ export class UpstreamsAnnouncer {
 			// Named: from the response alone, without waiting for the credential list; only once an extension asked.
 			this.namedBefore = true;
 			if (!this.wanted) return;
-			upstreams = [statedUpstream(modelId, { provider, kind, ...(host ? { host } : {}) })];
+			upstreams = [statedUpstream(modelId, { provider, kind, ...(host ? { host } : {}) }, this.catalog)];
 		} else {
 			// Kind only (an older Provimux): a guess from the list, once it came.
 			this.namedBefore = true;
 			if (!this.listed) return;
-			upstreams = answeredUpstreams(modelId, kind, this.listed) ?? [];
+			upstreams = answeredUpstreams(modelId, kind, this.listed, this.catalog) ?? [];
 		}
 		if (upstreams) this.pi.events.emit(ANSWERED_EVENT, { provider: this.providerId, model: modelId, upstreams });
 	}
@@ -461,14 +527,19 @@ export class UpstreamsAnnouncer {
 			const connection = this.connection();
 			if (!connection) return;
 			try {
-				this.listed = await this.fetchAccounts(connection.baseUrlInput, connection.apiKey);
+				[this.listed] = await Promise.all([
+					this.fetchAccounts(connection.baseUrlInput, connection.apiKey),
+					this.givenCatalog ? undefined : this.loadBuiltin(),
+				]);
 			} catch {
 				return;
 			}
 			const listed = this.listed;
 			const ids = new Set([...Object.keys(listed.owners), ...Object.keys(listed.accounts)]);
 			// fromEntries: a model called `__proto__` is an entry, not the object's prototype.
-			const models: Record<string, Route> = Object.fromEntries([...ids].map((id) => [id, routeOf(id, listed)]));
+			const models: Record<string, Route> = Object.fromEntries(
+				[...ids].map((id) => [id, routeOf(id, listed, this.catalog)]),
+			);
 			this.pi.events.emit(UPSTREAMS_EVENT, { provider: this.providerId, models });
 		})().finally(() => {
 			this.running = undefined;

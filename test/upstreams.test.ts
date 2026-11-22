@@ -8,9 +8,11 @@ import {
 	answeredClaudeMessages,
 	answeredOptions,
 	answeredUpstreams,
+	type Catalog,
 	fetchModelAccounts,
 	likelyAccounts,
 	type ModelAccounts,
+	ownModelId,
 	REQUEST_EVENT,
 	routeOf,
 	statedUpstream,
@@ -79,50 +81,119 @@ describe("where a credential leads", () => {
 
 	/**
 	 * Ids from pi's catalogs as providers.dev keeps them (site/data/pi/providers, at ec012af). The proxy's id of an
-	 * OpenAI-compatible model is the upstream's own (or `prefix/` before it); the id said is the provider's, never a part
-	 * of it, in the routes and in what answered.
+	 * OpenAI-compatible model is the upstream's own, or a prefix (the proxy's, or one an operator configured) before it.
+	 * The id said is the catalog's, in the routes and in what answered: a prefix is left out unless what is left is not
+	 * in the catalog and the id with it is.
 	 */
 	describe("keeps each provider's own model id, as pi's catalog has it", () => {
-		const cases: Array<{ provider: string; host: string; ids: string[] }> = [
-			{
-				provider: "groq",
-				host: "api.groq.com",
-				ids: ["openai/gpt-oss-120b", "qwen/qwen3.6-27b", "llama-3.3-70b-versatile"],
-			},
-			{
-				provider: "fireworks",
-				host: "api.fireworks.ai",
-				ids: ["accounts/fireworks/models/deepseek-v4p1-flash", "accounts/fireworks/routers/kimi-latest"],
-			},
-			{
-				provider: "together",
-				host: "api.together.ai",
-				ids: ["Qwen/Qwen3.6-Plus", "deepseek-ai/DeepSeek-V4.1-Flash"],
-			},
-			{ provider: "nvidia", host: "integrate.api.nvidia.com", ids: ["google/gemma-3-12b-it", "z-ai/glm-5.3-flash"] },
-			{ provider: "deepseek", host: "api.deepseek.com", ids: ["deepseek-v4-pro"] },
-			{ provider: "cerebras", host: "api.cerebras.ai", ids: ["gpt-oss-120b"] },
-		];
-		for (const { provider, host, ids } of cases) {
-			it(provider, () => {
-				const account = at(host);
+		const CATALOG: Record<string, string[]> = {
+			groq: [
+				"llama-3.1-8b-instant",
+				"llama-3.3-70b-versatile",
+				"openai/gpt-oss-120b",
+				"openai/gpt-oss-20b",
+				"openai/gpt-oss-safeguard-20b",
+				"qwen/qwen3.6-27b",
+				"qwen/qwen3.8-27b",
+			],
+			fireworks: ["accounts/fireworks/models/deepseek-v4p1-flash", "accounts/fireworks/routers/kimi-latest"],
+			together: ["Qwen/Qwen3.6-Plus", "deepseek-ai/DeepSeek-V4.1-Flash"],
+			nvidia: ["google/gemma-3-12b-it", "z-ai/glm-5.3-flash"],
+			deepseek: ["deepseek-flash", "deepseek-v4-pro"],
+			cerebras: ["gpt-oss-120b", "qwen-3.8-27b"],
+		};
+		const catalog: Catalog = (provider) => (CATALOG[provider] ? new Set(CATALOG[provider]) : undefined);
+		const hosts: Record<string, string> = {
+			groq: "api.groq.com",
+			fireworks: "api.fireworks.ai",
+			together: "api.together.ai",
+			nvidia: "integrate.api.nvidia.com",
+			deepseek: "api.deepseek.com",
+			cerebras: "api.cerebras.ai",
+		};
+		/** The id said for the proxy's id, in a listed route and in what answered: both must agree. */
+		function said(provider: string, proxyId: string, given: Catalog | undefined = catalog): string {
+			const host = hosts[provider]!;
+			const routed = routeOf(proxyId, listed({ [proxyId]: [at(host)] }), given).upstreams;
+			const answered = statedUpstream(proxyId, { provider: "openai-compatible-lab", kind: "apikey", host }, given);
+			expect(routed).toEqual([answered]);
+			expect(answered.provider).toBe(provider);
+			return answered.model ?? proxyId;
+		}
+
+		for (const [provider, ids] of Object.entries(CATALOG)) {
+			it(`${provider}: its ids as they are, and without a prefix before them`, () => {
 				for (const id of ids) {
-					const plain = { provider, subscription: false };
-					const prefixed = { provider, model: id, subscription: false };
-					// As the proxy names it: the provider's own id, said as it is.
-					expect(upstreamOf(account, id)).toEqual(plain);
-					expect(routeOf(id, listed({ [id]: [account] })).upstreams).toEqual([plain]);
-					expect(statedUpstream(id, { provider: "openai-compatible-lab", kind: "apikey", host })).toEqual(plain);
-					// With a prefix the proxy added: the provider's id, without it.
-					const ours = `team/${id}`;
-					expect(upstreamOf(account, ours)).toEqual(prefixed);
-					expect(routeOf(ours, listed({ [ours]: [account] })).upstreams).toEqual([prefixed]);
-					expect(statedUpstream(ours, { provider: "openai-compatible-lab", kind: "apikey", host })).toEqual(
-						prefixed,
-					);
+					expect(said(provider, id)).toBe(id);
+					expect(said(provider, `team/${id}`)).toBe(id);
 				}
 			});
 		}
+
+		it("groq: a prefix that is also a lab name is left out when the catalog has the model without it", () => {
+			// A configured prefix `openai` or `qwen` before Groq's own llama ids.
+			expect(said("groq", "openai/llama-3.3-70b-versatile")).toBe("llama-3.3-70b-versatile");
+			expect(said("groq", "qwen/llama-3.1-8b-instant")).toBe("llama-3.1-8b-instant");
+			// The lab's part of Groq's own id is kept; a prefix before it is not.
+			expect(said("groq", "openai/gpt-oss-120b")).toBe("openai/gpt-oss-120b");
+			expect(said("groq", "openai/openai/gpt-oss-120b")).toBe("openai/gpt-oss-120b");
+			expect(said("groq", "qwen/qwen/qwen3.6-27b")).toBe("qwen/qwen3.6-27b");
+		});
+
+		it("a model the catalog does not have: the parts nearly all the provider's ids have, else the last part", () => {
+			expect(said("together", "team/Qwen/Qwen9-New")).toBe("Qwen/Qwen9-New");
+			expect(said("fireworks", "team/accounts/fireworks/models/new-1")).toBe("accounts/fireworks/models/new-1");
+			// Groq's ids have one part or two: nothing tells, so the last part.
+			expect(said("groq", "openai/gpt-oss-999b")).toBe("gpt-oss-999b");
+			expect(said("deepseek", "team/deepseek-new")).toBe("deepseek-new");
+		});
+
+		it("without a catalog for the provider: the shape its ids are known to have", () => {
+			const none: Catalog = () => undefined;
+			expect(said("together", "team/Qwen/Qwen3.6-Plus", none)).toBe("Qwen/Qwen3.6-Plus");
+			expect(said("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash", none)).toBe(
+				"accounts/fireworks/models/deepseek-v4p1-flash",
+			);
+			expect(said("nvidia", "google/gemma-3-12b-it", none)).toBe("google/gemma-3-12b-it");
+			expect(said("groq", "openai/llama-3.3-70b-versatile", none)).toBe("llama-3.3-70b-versatile");
+		});
+
+		it("the catalog is pi's: the session's models, else the one pi-ai is built with", async () => {
+			const pi = { on: () => {}, events: { on: () => () => {}, emit: () => {} } } as unknown as ExtensionAPI;
+			const announcer = new UpstreamsAnnouncer(
+				pi,
+				"cliproxyapi",
+				() => ({ baseUrlInput: "x", apiKey: "k" }),
+				async () => listed({}),
+			);
+			announcer.register();
+			await announcer.announce();
+			// pi-ai's own catalog (this pi's version) has Groq's ids, with and without a lab part.
+			const groq = announcer.catalog("groq");
+			expect(groq?.has("llama-3.3-70b-versatile")).toBe(true);
+			expect(groq?.has("openai/gpt-oss-120b")).toBe(true);
+			expect(ownModelId("groq", "openai/llama-3.3-70b-versatile", announcer.catalog)).toBe(
+				"llama-3.3-70b-versatile",
+			);
+			expect(ownModelId("groq", "qwen/llama-3.1-8b-instant", announcer.catalog)).toBe("llama-3.1-8b-instant");
+			expect(ownModelId("groq", "team/openai/gpt-oss-120b", announcer.catalog)).toBe("openai/gpt-oss-120b");
+
+			// The session's models, once pi gives a handler its context: they come first.
+			const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+			const withSession = {
+				on: (name: string, handler: (event: unknown, ctx: unknown) => void) => handlers.set(name, handler),
+				events: { on: () => () => {}, emit: () => {} },
+			} as unknown as ExtensionAPI;
+			const fromSession = new UpstreamsAnnouncer(withSession, "cliproxyapi", () => null);
+			fromSession.register();
+			handlers.get("session_start")!(
+				{ type: "session_start" },
+				{ modelRegistry: { getAll: () => [{ provider: "groq", id: "openai/llama-3.3-70b-versatile" }] } },
+			);
+			expect(ownModelId("groq", "openai/llama-3.3-70b-versatile", fromSession.catalog)).toBe(
+				"openai/llama-3.3-70b-versatile",
+			);
+		});
 	});
 
 	it("an API key goes by the host it is sent to, whatever its entry is called", () => {
@@ -861,6 +932,14 @@ describe("the events", () => {
 		unread.respond({ "x-cpa-auth-kind": "oauth", "x-cpa-auth-provider": "claude" });
 		unread.respond({});
 		expect(unread.emitted).toEqual([claude, unnamed]);
+
+		// Kind only while the list is pending: not said itself, but the proxy names answers, so the next unnamed is `[]`.
+		const pending = await asked(() => new Promise<ModelAccounts>(() => {}), false);
+		pending.respond({});
+		pending.respond({ "x-cpa-auth-kind": "oauth" });
+		expect(pending.emitted).toEqual([]);
+		pending.respond({});
+		expect(pending.emitted).toEqual([unnamed]);
 
 		// Kind only, with no listed credential of that kind: answered, by what is not known.
 		const keyless = await asked(async () => listed({ "claude-opus-5-5": [login] }));
