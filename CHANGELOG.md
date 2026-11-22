@@ -1,5 +1,22 @@
 # Changelog
 
+## 105.0.2
+
+The extension is the same as in 105.0.1; what changes is how pi-provimux is released.
+
+- **Published from GitHub, with provenance.** npm versions are published by the repository's `publish.yml` through
+  npm trusted publishing: no token, and each version on npm names the workflow run and the commit it was built
+  from. A version is published when `main` names one that npm does not have; its tag `v<version>` and GitHub release
+  are made by the same run.
+- **Following the original.** A workflow takes each new release of
+  [pi-cliproxyapi-provider](https://github.com/router-for-me/pi-cliproxyapi-provider) once it has been public for
+  24 hours. When it merges cleanly, passes a guard and passes every check, it is merged into `main` and released as
+  the next version (`105.1.1` for the original's 1.5.1). Anything else lands nothing and is reported in an issue.
+  Until it is switched on, it runs as a dry run: everything is checked, and it only says what it would land.
+  How it works, and what it accepts: [docs/FOLLOWING.md](docs/FOLLOWING.md).
+- **Checked on pi 1.3.0 and pi 1.6.0** before anything lands and before anything is published, with the packed
+  package loaded by pi's own loader on both.
+
 ## 105.0.1 - 2026-11-22
 
 The extension is now **pi-provimux**, Provimux's pi extension, a fork of
