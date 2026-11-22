@@ -1,0 +1,68 @@
+# Publishes pi-provimux to npm when a tag v<version> is pushed. npm's trusted publisher for pi-provimux names this
+# file and the environment npm: the publish job gets a short-lived OIDC token, with no npm token or secret anywhere.
+#
+#   test     npm ci and npm run check; read-only, no environment, no secrets
+#   publish  refuses unless the tag's commit is on main and the tag is v + package.json's version; then
+#            npm publish --provenance, with nothing installed and no package script run
+# Both run on GitHub only: a mirror of the repository on another forge may read .github/workflows too.
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+jobs:
+  test:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run check
+
+  publish:
+    needs: test
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      # The whole history, so that origin/main is there to check the tag against.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # No registry-url: setup-node would write an .npmrc with an _authToken, which npm would use instead of OIDC.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Refuse unless the tag is v + package.json's version, at a commit on main, with npm 11.5.1 or later
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          [[ $GITHUB_REF == refs/tags/v* ]] || fail "$GITHUB_REF is not a tag v*"
+          version=$(jq -r .version package.json)
+          [ "$GITHUB_REF_NAME" = "v$version" ] || fail "the tag $GITHUB_REF_NAME is not v$version (package.json)"
+          commit=$(git rev-parse --verify "$GITHUB_SHA^{commit}") || fail "$GITHUB_SHA names no commit"
+          [ "$(git rev-parse HEAD)" = "$commit" ] || fail "the checkout is not $commit"
+          git merge-base --is-ancestor "$commit" origin/main || fail "$commit is not on origin/main"
+          [ -z "$(git status --porcelain --ignored)" ] || fail "the checkout is not clean"
+          v=$(npm --version)
+          [ "$(printf '%s\n%s\n' 11.5.1 "$v" | sort -V | head -n 1)" = 11.5.1 ] || fail "npm $v is older than 11.5.1"
+          echo "pi-provimux $version from $commit, node $(node --version), npm $v"
+      - run: npm publish --provenance --access public --ignore-scripts
