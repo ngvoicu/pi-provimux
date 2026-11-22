@@ -57,10 +57,18 @@ plain CLIProxyAPI too.
 - **Claude Messages models keep their standard price under `/fast` and `/ultrafast`.** They are sent to
   `/v1/messages` without a speed tier, so the Fast price from models.dev no longer applies to them.
 - **A thinking level the model doesn't have is refused in `pi -p`, never changed silently.** `pi -p --thinking low`
-  (or `--model cliproxyapi/<model>:low`, or `--mode json`) on a model whose levels don't include `low` now stops
-  before sending anything, says which levels the model has, and exits with 1; pi used to move it to the nearest level
-  without a word. Interactive and RPC sessions keep pi's own move, and a Codex-format request, an extension's own
-  included, now names the level pi moves to, never one the model lacks, so the proxy never picks a variant itself.
+  (or `--model cliproxyapi/<model>:low`, `--models cliproxyapi/<model>:low`, or `--mode json`) on a model whose
+  levels don't include `low` now stops before sending anything, says which levels the model has, and exits with 1;
+  pi used to move it to the nearest level without a word. The model flags are read as pi reads them: a `:high` that
+  is part of a model's id (`--model cliproxyapi/local-assistant:high`) asks for no level, and a `--models` level counts
+  only where pi takes it (a new session, no `--model`). Interactive and RPC sessions keep pi's own move, and a
+  Codex-format request, an extension's own included, now names the level pi moves to, never one the model lacks, so
+  the proxy never picks a variant itself. That holds for a resumed conversation too: the first turn's level, which
+  the request keeps from the history, and later turns' levels are moved the same way when a catalog refresh took
+  them away.
+- **A route lookup still out when its session ends is dropped.** On quit, `/reload` or a session change, the
+  `model-upstreams` lookup in flight is aborted and a late answer is ignored; nothing is emitted through a disposed
+  extension, so `pi -p` no longer exits with 1 after its answer, nor `/reload` ends the new session.
 
 ### From pi-cliproxyapi-provider 1.5.0 (merged)
 

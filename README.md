@@ -267,7 +267,7 @@ From CPA catalog entry → pi model:
 | `supports_reasoning_effort_updates` | `compat.supportsMidConvoEffort` |
 | `visibility: "hide"` | skipped |
 
-Unsupported pi thinking levels are set to `null` so they are hidden in the UI. A level the model lacks asked on the command line of a one-shot run (`pi -p --thinking low`, or `--model cliproxyapi/<model>:low`; also `--mode json`) is refused: nothing is sent, the error names the levels the model has, and pi exits with 1. Elsewhere (the level picker, a saved default level, `--thinking` in an interactive or RPC session) pi moves the level to the nearest one the model has, and the request names that level, never the missing one. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller prices are not selected arbitrarily and fall back to zero. These are catalog/list prices, not a guarantee of CPA's own markup or billing.
+Unsupported pi thinking levels are set to `null` so they are hidden in the UI. A level the model lacks asked on the command line of a one-shot run (`pi -p --thinking low`, `--model cliproxyapi/<model>:low`, or `--models cliproxyapi/<model>:low` when that pattern selects the model; also `--mode json`) is refused: nothing is sent, the error names the levels the model has, and pi exits with 1. The flags are read as pi reads them: a suffix that is part of a model's id (`--model cliproxyapi/local-assistant:high`, for a model listed as `local-assistant:high`) asks for no level. Elsewhere (the level picker, a saved default level, `--thinking` in an interactive or RPC session) pi moves the level to the nearest one the model has, and the request names that level, never the missing one. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller prices are not selected arbitrarily and fall back to zero. These are catalog/list prices, not a guarantee of CPA's own markup or billing.
 
 ## GPT Responses prompt caching
 
@@ -349,6 +349,8 @@ from providers.dev.
 - **`model-upstreams:request`**: an extension that wants the routes sends this (any payload). This package then asks
   CLIProxyAPI `GET /v1/models?include=accounts` again and answers. Without such an extension this adds no request;
   the model list itself is always loaded with `?include=accounts`, for the names and the Claude Messages format.
+  The answer belongs to the session that asked: when it ends (quit, `/reload`, another session) before the list
+  arrives, the lookup is aborted and nothing is said.
 - **`model-upstreams`**: `{ provider, models: { [modelId]: { upstreams, fallbacks? } } }`, the answer, and again after
   `/cliproxyapi-refresh`. `upstreams` are what may serve the model (several: it is not known which), `fallbacks` what
   may answer when those fail or cool down.
