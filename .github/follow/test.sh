@@ -390,7 +390,10 @@ change() { # change FILE TEXT MESSAGE, in the current repository
 run() { # run ARGS…: follow.sh in the current repository; output and exit code in RUN_OUT, RUN_RC
 	RUN_RC=0
 	local v real
-	v=$(npm --version 2>/dev/null | head -n 1) || v=''
+	# The npm follow.sh would get, asked from a neutral folder: never from the fixture tree, so that no log of npm's
+	# working folders (f8's fake npm) mistakes this probe for a call of follow.sh's.
+	mkdir -p "$T/neutral"
+	v=$(cd "$T/neutral" && npm --version 2>/dev/null | head -n 1) || v=''
 	if [[ ! ${1:-} =~ ^(help|-h|--help)?$ ]] && npm_older "$v"; then
 		# The npm follow.sh would get is too old: the refusal is the expected outcome, before any npm call but
 		# --version (a shim in front of that npm logs every other call).
@@ -1323,12 +1326,15 @@ t_f8_recovery() {
 	eq "$RUN_RC" 4 "an .npmrc: refused"
 	# Only the version check (npm 11.5.1 or later), from the neutral folder; npm never ran on the tree.
 	eq "$(cut -d' ' -f2- "$T/fakenpm/log" | grep -vx -- '--version' || true)" "" "npm never ran but --version"
-	hasnt "$(cut -d' ' -f1 "$T/fakenpm/log")" "$F" "the version check not from the tree"
+	# Physical paths on both sides (pwd -P): a TMPDIR with a symbolic link or a trailing slash cannot hide a match.
+	local fp
+	fp=$(cd "$F" && pwd -P)
+	hasnt "$(cut -d' ' -f1 "$T/fakenpm/log")" "$fp" "the version check not from the tree"
 	# Without one, npm runs from a neutral folder against the public registry.
 	git rm -q .npmrc && commit "chore: no npmrc"
 	FOLLOW_NPM_DIR='' PATH="$T/fakenpm:$PATH" run plan
 	has "$(cat "$T/fakenpm/log")" "--registry=https://registry.npmjs.org/" "the public registry"
-	hasnt "$(cut -d' ' -f1 "$T/fakenpm/log")" "$F" "not from the tree"
+	hasnt "$(cut -d' ' -f1 "$T/fakenpm/log")" "$fp" "not from the tree"
 	# publishConfig may only say access public.
 	jq --tab '.publishConfig.tag = "next"' package.json >p && mv p package.json
 	git add -A && commit "chore: next"
@@ -1344,7 +1350,7 @@ fake_npm() {
 	: >"$T/fakenpm/log"
 	cat >"$T/fakenpm/npm" <<-SH
 		#!/usr/bin/env bash
-		echo "\$PWD \$*" >>"$T/fakenpm/log"
+		echo "\$(pwd -P) \$*" >>"$T/fakenpm/log"
 		case "\$1" in
 		view) echo '{"error":{"code":"E404"}}'; exit 1 ;;
 		*) exec "$(command -v npm)" "\$@" ;;
