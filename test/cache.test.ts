@@ -507,7 +507,15 @@ describe("provider startup cache behavior", () => {
 			const remoteResponse = new Promise<Response>((resolve) => {
 				releaseRemote = resolve;
 			});
+			// The startup's three requests (the catalog, models.dev's prices, the credential list), however long the
+			// extension takes to send them: a fixed wait failed under a parallel run.
+			let sent = 0;
+			let allSent!: () => void;
+			const threeSent = new Promise<void>((resolve) => {
+				allSent = resolve;
+			});
 			const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				if (++sent === 3) allSent();
 				if (isSideRequest(input)) {
 					return new Response("{}", { status: 200 });
 				}
@@ -517,7 +525,7 @@ describe("provider startup cache behavior", () => {
 
 			try {
 				const startup = providerExtension(pi);
-				await waitForAsyncRefresh();
+				await threeSent;
 				expect(fetchMock).toHaveBeenCalledTimes(3);
 				releaseRemote(
 					new Response(JSON.stringify({ models: [createCodexModel("startup-remote")] }), { status: 200 }),
