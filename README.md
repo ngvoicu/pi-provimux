@@ -368,6 +368,8 @@ answered: OpenRouter api
 
 - It is read from the answer itself: the `X-CPA-AUTH-*` response headers, or on the Codex WebSocket the `cpa_auth_*`
   fields of the turn's `response.created`. No other extension is needed.
+- Whatever routes an install has and however it orders them, the footer names the one that answered: the credential
+  list and its priorities play no part, and a route that is not in the list is named all the same.
 - Only the session's own turns count: pi's cache warmer and other extensions' requests, which can run at the same
   time, never change it.
 - `answered: unknown`: the proxy names answers, but not this one (Provimux leaves an answer unnamed when plugin code

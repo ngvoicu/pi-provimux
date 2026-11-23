@@ -30,6 +30,7 @@ import {
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ANSWERED_STATUS_KEY } from "../extensions/answered-footer.ts";
 import providerExtension from "../extensions/index.ts";
+import type { Account } from "../extensions/sources.ts";
 import { ANSWERED_EVENT, REQUEST_EVENT, UPSTREAMS_EVENT } from "../extensions/upstreams.ts";
 import { acceptWebSocket } from "./websocket-fixture.ts";
 
@@ -81,6 +82,20 @@ const plans = new Map<string, Plan>();
 const held = new Map<string, Held>();
 /** Requests the proxy answers at once, headers and body. */
 const immediate = new Set<string>();
+
+/** The credentials the proxy lists for its models, as an install configured them; "plain": it lists none. */
+type Listing = { claude: Account[]; codex: Account[] } | "plain";
+const DEFAULT_LISTING = {
+	claude: [
+		{ provider: "claude", kind: "oauth", priority: 0 },
+		{ provider: "claude", kind: "apikey", priority: 0 },
+	],
+	codex: [
+		{ provider: "codex", kind: "oauth", priority: 0 },
+		{ provider: "codex", kind: "apikey", priority: 0 },
+	],
+};
+let listing: Listing = DEFAULT_LISTING;
 
 function claudeFrames(id: string) {
 	return [
@@ -171,21 +186,16 @@ function serveHttp(req: IncomingMessage, res: ServerResponse) {
 		if (req.method === "GET" && url.pathname === "/v1/models") {
 			res.writeHead(200, { "content-type": "application/json" });
 			if (url.searchParams.get("include") === "accounts") {
-				const claude = [
-					{ provider: "claude", kind: "oauth", priority: 0 },
-					{ provider: "claude", kind: "apikey", priority: 0 },
-				];
-				const codex = [
-					{ provider: "codex", kind: "oauth", priority: 0 },
-					{ provider: "codex", kind: "apikey", priority: 0 },
-				];
+				// A plain CLIProxyAPI does not know the parameter: its plain list, with no credentials.
+				const accounts = (list: Account[]) => (listing === "plain" ? {} : { accounts: list });
+				const { claude, codex } = listing === "plain" ? DEFAULT_LISTING : listing;
 				res.end(
 					JSON.stringify({
 						object: "list",
 						data: [
-							{ id: CLAUDE, object: "model", owned_by: "anthropic", accounts: claude },
-							{ id: GPT, object: "model", owned_by: "openai", accounts: codex },
-							{ id: GPT_HELPER, object: "model", owned_by: "openai", accounts: codex },
+							{ id: CLAUDE, object: "model", owned_by: "anthropic", ...accounts(claude) },
+							{ id: GPT, object: "model", owned_by: "openai", ...accounts(codex) },
+							{ id: GPT_HELPER, object: "model", owned_by: "openai", ...accounts(codex) },
 						],
 					}),
 				);
@@ -303,6 +313,7 @@ afterEach(() => {
 	}
 	savedEnv.clear();
 	plans.clear();
+	listing = DEFAULT_LISTING;
 	held.clear();
 	immediate.clear();
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -786,6 +797,133 @@ describe("the footer says which route answered the session's turn", { timeout: 2
 		} finally {
 			await pi.dispose();
 		}
+	});
+
+	describe("any install: whatever routes it has, in whatever order, the footer says what answered", () => {
+		const oauth = (provider: string) => ({ "X-CPA-AUTH-KIND": "oauth", "X-CPA-AUTH-PROVIDER": provider });
+		const key = (provider: string, host?: string) => ({
+			"X-CPA-AUTH-KIND": "apikey",
+			"X-CPA-AUTH-PROVIDER": provider,
+			...(host ? { "X-CPA-AUTH-HOST": host } : {}),
+		});
+		/** Answers a proxy can give, and what the footer must say for each. */
+		const ANSWERS: Array<[Record<string, string>, string]> = [
+			[oauth("claude"), "Anthropic sub"],
+			[key("claude", "api.anthropic.com"), "Anthropic api"],
+			[key("claude"), "Anthropic api"],
+			[oauth("devin"), "Devin sub"],
+			[key("openai-compatible-openrouter", "openrouter.ai"), "OpenRouter api"],
+			// An entry named anything, sent to openrouter.ai: OpenRouter.
+			[key("openai-compatible-myrouter", "openrouter.ai"), "OpenRouter api"],
+			[oauth("antigravity"), "Antigravity sub"],
+			[oauth("codex"), "OpenAI sub"],
+			[oauth("kimi"), "Kimi sub"],
+			[key("gemini", "generativelanguage.googleapis.com"), "Google api"],
+			// Services nobody here knows: named as the proxy names them.
+			[key("openai-compatible-acme", "api.acme.test"), "api.acme.test api"],
+			[oauth("MysteryLab"), "MysteryLab sub"],
+		];
+		const account = (provider: string, kind: string, priority: number, host?: string): Account => ({
+			provider,
+			kind,
+			priority,
+			...(host ? { host } : {}),
+		});
+		/** Installs as owners set them up: different routes, different priorities. */
+		const INSTALLS: Array<[string, Listing]> = [
+			[
+				"subscription first, then the Claude key, OpenRouter, Devin",
+				{
+					claude: [
+						account("claude", "oauth", 10),
+						account("claude", "apikey", 5, "api.anthropic.com"),
+						account("openai-compatible-openrouter", "apikey", 1, "openrouter.ai"),
+						account("devin", "oauth", 0),
+					],
+					codex: [account("codex", "oauth", 10), account("codex", "apikey", 0, "api.openai.com")],
+				},
+			],
+			[
+				"the reverse: OpenRouter first, the subscription last",
+				{
+					claude: [
+						account("openai-compatible-openrouter", "apikey", 10, "openrouter.ai"),
+						account("devin", "oauth", 5),
+						account("claude", "apikey", 1, "api.anthropic.com"),
+						account("claude", "oauth", 0),
+					],
+					codex: [account("codex", "apikey", 10, "api.openai.com"), account("codex", "oauth", 0)],
+				},
+			],
+			[
+				"no Anthropic at all: OpenRouter and Antigravity, same priority",
+				{
+					claude: [
+						account("openai-compatible-openrouter", "apikey", 0, "openrouter.ai"),
+						account("antigravity", "oauth", 0),
+					],
+					codex: [account("openai-compatible-openrouter", "apikey", 0, "openrouter.ai")],
+				},
+			],
+			[
+				"services nobody here knows, mixed with known ones",
+				{
+					claude: [
+						account("openai-compatible-acme", "apikey", 3, "api.acme.test"),
+						account("MysteryLab", "oauth", 2),
+						account("kimi", "oauth", 1),
+						account("claude", "oauth", 0),
+					],
+					codex: [account("gemini", "apikey", 0, "generativelanguage.googleapis.com")],
+				},
+			],
+		];
+		/** A deterministic order of every answer, different for each install. */
+		const orderFor = (seed: number) =>
+			ANSWERS.map((answer, index) => ({ answer, rank: (index * (2 * seed + 5) + seed * 7) % 13 }))
+				.sort((a, b) => a.rank - b.rank)
+				.map(({ answer }) => answer);
+		const letters = (n: number) => String.fromCharCode(97 + Math.floor(n / 26), 97 + (n % 26));
+
+		for (const [index, [name, installed]] of INSTALLS.entries()) {
+			for (const ask of [true, false]) {
+				it(`${name}${ask ? ", with the routes asked for" : ""}`, async () => {
+					listing = installed;
+					const pi = await startPi({ ask, transport: "sse" });
+					try {
+						const order = orderFor(index);
+						// Every answer, once: some are in the install's list, at any priority; some are not in it at all.
+						expect(new Set(order)).toEqual(new Set(ANSWERS));
+						const shown: Array<string | undefined> = [];
+						for (const [turnIndex, [headers]] of order.entries()) {
+							// Turns alternate between the Claude Messages model and the Codex SSE model.
+							await turn(pi, turnIndex % 2 ? GPT : CLAUDE, `i${letters(index)}t${letters(turnIndex)}`, {
+								headers,
+							});
+							shown.push(footer(pi));
+						}
+						expect(shown).toEqual(order.map(([, said]) => `answered: ${said}`));
+					} finally {
+						await pi.dispose();
+					}
+				});
+			}
+		}
+
+		it("plain CLIProxyAPI, which lists no credentials and names no answer: nothing, asked or not", async () => {
+			listing = "plain";
+			for (const ask of [true, false]) {
+				const pi = await startPi({ ask, transport: "sse" });
+				try {
+					for (const [turnIndex, model] of [CLAUDE, GPT, CLAUDE, GPT].entries())
+						await turn(pi, model, `plain${letters(turnIndex)}`, { headers: {} });
+					expect(pi.statuses.every((status) => status === undefined)).toBe(true);
+					expect(pi.reports).toEqual([]);
+				} finally {
+					await pi.dispose();
+				}
+			}
+		});
 	});
 
 	it('"answered": false in cliproxyapi.json turns it off; the routes are still told', async () => {
