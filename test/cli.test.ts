@@ -830,7 +830,10 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		).toEqual(["api_key"]);
 		const restarted = await pi(["--no-session", "--model", `provimux/${GPT}`, "-p", "say hi"]);
 		expect(restarted.code, said(restarted)).toBe(1);
-		expect(restarted.stderr).toContain("Provider is not configured: provimux");
+		// pi words this failure in one of two ways (macOS and Linux differ): either says provimux has no usable key.
+		expect(restarted.stderr, said(restarted)).toMatch(
+			/Provider is not configured: provimux\b|No API key found for "?provimux\b/,
+		);
 		expect(restarted.requests).toEqual([]);
 	});
 
