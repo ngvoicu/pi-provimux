@@ -28,6 +28,7 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { ANSWERED_STATUS_KEY } from "../extensions/answered-footer.ts";
 import providerExtension from "../extensions/index.ts";
 import { ANSWERED_EVENT, REQUEST_EVENT, UPSTREAMS_EVENT } from "../extensions/upstreams.ts";
 import { acceptWebSocket } from "./websocket-fixture.ts";
@@ -134,7 +135,8 @@ function codexFrames(id: string, created: Record<string, unknown>) {
 
 /** Which request a body is: the marker `#<id>` in its prompt; a one-token replay is the cache warmer's. */
 function idOf(body: string): string {
-	const marker = /#([a-z]+)/.exec(body)?.[1] ?? "unknown";
+	// The last marker: a session's later turns carry the earlier ones in their history.
+	const marker = [...body.matchAll(/#([a-z]+)/g)].at(-1)?.[1] ?? "unknown";
 	return /"max_tokens":1[,}]/.test(body) ? `${marker}-warm` : marker;
 }
 
@@ -274,6 +276,8 @@ interface Harness {
 	session: AgentSession;
 	/** The reports, as other extensions hear them. */
 	reports: unknown[];
+	/** Every value the footer's "answered" status was set to, in order (undefined: cleared). */
+	statuses: Array<string | undefined>;
 	/** Requests whose headers pi passed to extensions, by the fixture's request id. */
 	headersSeen: string[];
 	/** Requests whose first stream event pi passed to extensions. */
@@ -310,7 +314,32 @@ function setEnv(name: string, value: string | undefined) {
 	else process.env[name] = value;
 }
 
-async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
+interface StartOptions {
+	/** pi's cache warmer refreshes the Claude model while a turn is out. */
+	warm?: boolean;
+	/** An extension asks for the routes, as pi-cache-keeper does (default); false: nobody asks. */
+	ask?: boolean;
+	/** The session's transport setting. */
+	transport?: "sse" | "websocket";
+	/** The footer switch in cliproxyapi.json; absent: not set. */
+	answered?: boolean;
+}
+
+/** A UI for the session: the footer's "answered" status is recorded, everything else does nothing. */
+function recordingUi(statuses: Array<string | undefined>) {
+	const ui: Record<string | symbol, unknown> = {
+		setStatus: (key: string, text: string | undefined) => {
+			if (key === ANSWERED_STATUS_KEY) statuses.push(text);
+		},
+		theme: { fg: (_color: string, text: string) => text },
+	};
+	return new Proxy(ui, {
+		get: (target, name) => (name in target ? target[name] : () => undefined),
+	}) as never;
+}
+
+async function startPi(options: StartOptions = {}): Promise<Harness> {
+	const ask = options.ask ?? true;
 	const root = mkdtempSync(join(tmpdir(), "pi-provimux-overlap-"));
 	tempDirs.push(root);
 	const agentDir = join(root, "agent");
@@ -323,7 +352,12 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 		setEnv(name, undefined);
 	writeFileSync(
 		join(agentDir, "cliproxyapi.json"),
-		JSON.stringify({ baseUrl, apiKey: "sk-fixture", claudeMessages: true }),
+		JSON.stringify({
+			baseUrl,
+			apiKey: "sk-fixture",
+			claudeMessages: true,
+			...(options.answered === undefined ? {} : { answered: options.answered }),
+		}),
 	);
 	// A cache lifetime of 11 s: pi's warmer refreshes after 1 s, while the turn it warms is still out.
 	if (options.warm)
@@ -343,16 +377,18 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 	}) as typeof fetch;
 
 	const reports: unknown[] = [];
+	const statuses: Array<string | undefined> = [];
 	const headersSeen: string[] = [];
 	const firstEvents: string[] = [];
 	let routesTold = false;
 	let captured: SimpleStreamOptions | undefined;
 	const settingsManager = SettingsManager.inMemory();
 	settingsManager.setCacheWarmingMode(options.warm ? "streaming" : "off");
+	if (options.transport) settingsManager.setTransport(options.transport);
 	const testExtension = (pi: ExtensionAPI) => {
 		// pi-cache-keeper's part: it asks for the routes and hears what answered.
 		pi.on("session_start", () => {
-			pi.events.emit(REQUEST_EVENT, {});
+			if (ask) pi.events.emit(REQUEST_EVENT, {});
 		});
 		pi.events.on(UPSTREAMS_EVENT, () => {
 			routesTold = true;
@@ -440,8 +476,13 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 		{ cwd, agentDir, sessionManager: SessionManager.inMemory(cwd) },
 	);
 	const session = runtime.session;
-	await session.bindExtensions({ mode: "print", onError: (error) => console.error(error) });
-	await until("the routes", () => routesTold);
+	await session.bindExtensions({
+		mode: "print",
+		uiContext: recordingUi(statuses),
+		onError: (error) => console.error(error),
+	});
+	if (ask) await until("the routes", () => routesTold);
+	else await until("the models", () => !!session.modelRuntime.getModel(PROVIDER, CLAUDE));
 	const model = (id: string) => {
 		const found = session.modelRuntime.getModel(PROVIDER, id);
 		if (!found) throw new Error(`no model ${id}`);
@@ -451,6 +492,7 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 	return {
 		session,
 		reports,
+		statuses,
 		headersSeen,
 		firstEvents,
 		model,
@@ -591,6 +633,167 @@ describe("what answered, when requests overlap", { timeout: 20_000 }, () => {
 			heldRequest("side").sendBody();
 			await side;
 			expect(pi.reports).toEqual([report(GPT, [CODEX_LOGIN]), report(GPT_HELPER, [OPENAI_KEY])]);
+		} finally {
+			await pi.dispose();
+		}
+	});
+});
+
+const CLAUDE_HOST = "api.anthropic.com";
+const devinLogin = () => login("devin");
+const claudeKey = () => ({ ...apiKey("claude"), "X-CPA-AUTH-HOST": CLAUDE_HOST });
+const openRouterKey = () => ({ ...apiKey("openai-compatible-openrouter"), "X-CPA-AUTH-HOST": "openrouter.ai" });
+
+/** One turn of the session on a model, answered at once as planned; resolves when the turn ends. */
+async function turn(pi: Harness, model: string, marker: string, plan: Plan) {
+	plans.set(marker, plan);
+	immediate.add(marker);
+	await pi.session.setModel(pi.model(model));
+	pi.session.setThinkingLevel("off");
+	await pi.session.prompt(`say ok #${marker}`);
+	const last = pi.session.messages.at(-1) as { role?: string; stopReason?: string; errorMessage?: string };
+	expect(last.role).toBe("assistant");
+	expect(last.stopReason, last.errorMessage).toBe("stop");
+}
+
+/** What the footer says now: the last value it was set to. */
+const footer = (pi: Harness) => pi.statuses.at(-1);
+
+describe("the footer says which route answered the session's turn", { timeout: 20_000 }, () => {
+	it("Anthropic sub, Devin sub, Anthropic api, OpenRouter api: with no other extension asking for routes", async () => {
+		const pi = await startPi({ ask: false, transport: "sse" });
+		try {
+			const seen: Array<string | undefined> = [];
+			await turn(pi, CLAUDE, "claudesub", { headers: login("claude") });
+			seen.push(footer(pi));
+			await turn(pi, GPT, "devinsub", { headers: devinLogin() });
+			seen.push(footer(pi));
+			await turn(pi, CLAUDE, "claudeapi", { headers: claudeKey() });
+			seen.push(footer(pi));
+			await turn(pi, GPT, "openrouterapi", { headers: openRouterKey() });
+			seen.push(footer(pi));
+			expect(seen).toEqual([
+				"answered: Anthropic sub",
+				"answered: Devin sub",
+				"answered: Anthropic api",
+				"answered: OpenRouter api",
+			]);
+			// Nobody asked for the routes: no event was told, the footer did not need one.
+			expect(pi.reports).toEqual([]);
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("a Codex WebSocket turn: its response.created's fields; one without them, after a named one: unknown", async () => {
+		const pi = await startPi({ ask: false, transport: "websocket" });
+		try {
+			await turn(pi, GPT, "wsnamed", { created: { cpa_auth_kind: "oauth", cpa_auth_provider: "devin" } });
+			expect(footer(pi)).toBe("answered: Devin sub");
+			await turn(pi, GPT, "wskey", {
+				created: {
+					cpa_auth_kind: "apikey",
+					cpa_auth_provider: "openai-compatible-openrouter",
+					cpa_auth_host: "openrouter.ai",
+				},
+			});
+			expect(footer(pi)).toBe("answered: OpenRouter api");
+			// The proxy named answers before: one it names nobody for is one it would not name.
+			await turn(pi, GPT, "wsnobody", { created: {} });
+			expect(footer(pi)).toBe("answered: unknown");
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("pi's cache warmer next to the turn it warms, and an extension's own request: only the turn counts", async () => {
+		const pi = await startPi({ warm: true, ask: false });
+		try {
+			// The session's callbacks, for the extension's request below (taken on another model, before the turn).
+			await pi.sessionOptions();
+			plans.set("fg", { headers: login("claude") });
+			plans.set("fg-warm", { headers: claudeKey() });
+			await pi.session.setModel(pi.model(CLAUDE));
+			pi.session.setThinkingLevel("off");
+			const running = pi.session.prompt("say ok #fg");
+			// The order where the last answer seen is the warmer's: its headers and first event come after the turn's.
+			await until("the turn", () => held.has("fg"));
+			heldRequest("fg").sendHeaders();
+			await until("the turn's headers", () => pi.headersSeen.includes("fg"));
+			await until("the warmer's refresh", () => held.has("fg-warm"));
+			heldRequest("fg-warm").sendHeaders();
+			await until("the refresh's headers", () => pi.headersSeen.includes("fg-warm"));
+			heldRequest("fg").sendFirst();
+			await until("the turn's first event", () => pi.firstEvents.includes("fg"));
+			heldRequest("fg-warm").sendBody();
+			await until("the refresh's first event", () => pi.firstEvents.includes("fg-warm"));
+			heldRequest("fg").sendBody();
+			await running;
+			expect(pi.statuses.filter((status) => status !== undefined)).toEqual(["answered: Anthropic sub"]);
+			expect(footer(pi)).toBe("answered: Anthropic sub");
+
+			// An extension's own request with the session's callbacks, answered by a key: the footer stays.
+			plans.set("side", { headers: openRouterKey() });
+			immediate.add("side");
+			await send(pi, pi.model(CLAUDE), "side");
+			expect(pi.firstEvents).toContain("side");
+			expect(footer(pi)).toBe("answered: Anthropic sub");
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("switching to a model of another provider clears it; a turn there leaves it clear", async () => {
+		const pi = await startPi({ ask: false });
+		try {
+			await turn(pi, CLAUDE, "before", { headers: login("claude") });
+			expect(footer(pi)).toBe("answered: Anthropic sub");
+			await pi.session.setModel(pi.session.modelRuntime.getModel("capture", "capture")!);
+			expect(footer(pi)).toBeUndefined();
+			const count = pi.statuses.length;
+			await pi.session.prompt("a turn on the other provider");
+			expect(pi.statuses.slice(count).every((status) => status === undefined)).toBe(true);
+			// Back on a Provimux model: the next answer is shown again.
+			await turn(pi, CLAUDE, "after", { headers: claudeKey() });
+			expect(footer(pi)).toBe("answered: Anthropic api");
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("a proxy without the headers (plain CLIProxyAPI): nothing, over Claude Messages, Codex SSE and WebSocket", async () => {
+		for (const transport of ["sse", "websocket"] as const) {
+			const pi = await startPi({ ask: false, transport });
+			try {
+				await turn(pi, CLAUDE, "plainclaude", { headers: {} });
+				// The Codex SSE body carries an inner gateway's cpa_auth_* fields: never the proxy's.
+				await turn(pi, GPT, "plaingpt", { headers: {}, created: {} });
+				expect(pi.statuses.every((status) => status === undefined)).toBe(true);
+				expect(pi.reports).toEqual([]);
+			} finally {
+				await pi.dispose();
+			}
+		}
+	});
+
+	it("an answer the proxy would not name, from a proxy that lists its credentials: unknown", async () => {
+		// An extension asked for the routes: the credential list says the proxy names answers.
+		const pi = await startPi({ transport: "sse" });
+		try {
+			await turn(pi, CLAUDE, "unnamed", { headers: {} });
+			expect(footer(pi)).toBe("answered: unknown");
+			expect(pi.reports).toEqual([report(CLAUDE, [])]);
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it('"answered": false in cliproxyapi.json turns it off; the routes are still told', async () => {
+		const pi = await startPi({ answered: false });
+		try {
+			await turn(pi, CLAUDE, "off", { headers: login("claude") });
+			expect(pi.statuses).toEqual([]);
+			expect(pi.reports).toEqual([report(CLAUDE, [CLAUDE_LOGIN])]);
 		} finally {
 			await pi.dispose();
 		}

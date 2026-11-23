@@ -57,6 +57,7 @@ export interface CliproxyConfigFile {
 	fast?: FastPreference;
 	pause?: boolean;
 	tps?: boolean;
+	answered?: boolean;
 	claudeMessages?: boolean | "auto";
 }
 
@@ -498,6 +499,18 @@ export function resolveTpsDefault(agentDir: string): boolean {
 		throw new Error(`${CONFIG_FILE_NAME} field "tps" must be a boolean`);
 	}
 	return file.tps;
+}
+
+/** Resolve whether the footer says which route answered, from cliproxyapi.json, defaulting to true. */
+export function resolveAnsweredDefault(agentDir: string): boolean {
+	const file = loadConfigFile(agentDir);
+	if (file.answered === undefined) {
+		return true;
+	}
+	if (typeof file.answered !== "boolean") {
+		throw new Error(`${CONFIG_FILE_NAME} field "answered" must be a boolean`);
+	}
+	return file.answered;
 }
 
 /** Resolve the request pause preference from cliproxyapi.json, defaulting to false. */

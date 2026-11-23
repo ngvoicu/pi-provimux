@@ -24,7 +24,8 @@
  * Requests overlap (pi's cache warmer next to the turn it warms, an extension's own call with the session's callbacks),
  * and pi's events say nothing of which request they belong to. So what a request's answer says is kept by that request
  * alone: each call of the provider's stream gets its own callbacks (`answeredOptions`), which hold its headers and its
- * one report, and mark the stream event it is told with. The session's handler only reads that mark.
+ * one report, and mark the stream event it is told with. The session's handler only reads that mark. They also keep
+ * what the answer said with the message the request ends with (`answerOf`), for the footer (answered-footer.ts).
  *
  * An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
  * (anthropic, openai-codex, openai, meta, openrouter, google) or a providers.dev provider pi has none for (devin,
@@ -266,7 +267,7 @@ export async function fetchModelAccounts(
 }
 
 /** What an answer says answered it, as given: the kind, provider and host (any may be absent or not a string). */
-interface Statement {
+export interface Statement {
 	kind: unknown;
 	provider: unknown;
 	host: unknown;
@@ -285,6 +286,41 @@ function statements(): WeakMap<object, Statement> {
 	return global[STATEMENTS_KEY];
 }
 
+const ANSWERS_KEY = Symbol.for("pi-provimux.answered-messages");
+
+/**
+ * The message each request ended with → what its answer said. Keyed by the message itself, which pi's agent loop takes
+ * from the request's stream and hands to `message_end` as it is: only the session's own turns get there, never pi's
+ * cache warmer or another extension's request. Shared by every copy of this module in the process.
+ */
+function answers(): WeakMap<object, Statement> {
+	const global = globalThis as { [ANSWERS_KEY]?: WeakMap<object, Statement> };
+	global[ANSWERS_KEY] ??= new WeakMap();
+	return global[ANSWERS_KEY];
+}
+
+/** What the answer a message came from said answered it; undefined when it is not a message of this provider's stream. */
+export function answerOf(message: unknown): Statement | undefined {
+	return isRecord(message) ? answers().get(message) : undefined;
+}
+
+/** Keeps what a request's answer said with the message its stream ends with (`answerOf`). */
+function keepWithMessage(stream: unknown, said: () => Statement | undefined): void {
+	const result = (stream as { result?: unknown } | null | undefined)?.result;
+	if (typeof result !== "function") return;
+	try {
+		Promise.resolve((result as () => unknown).call(stream)).then(
+			(message) => {
+				const statement = said();
+				if (statement && isRecord(message)) answers().set(message, statement);
+			},
+			() => {},
+		);
+	} catch {
+		// A stream without a result to wait for: nothing to keep.
+	}
+}
+
 /** The callbacks one request is sent with, as `onResponse` and `onProviderStreamEvent` take them. */
 export interface AnswerCallbacks<TModel = unknown> {
 	onResponse?: (response: { status: number; headers: Record<string, string> }, model: TModel) => unknown;
@@ -299,15 +335,23 @@ export interface AnswerCallbacks<TModel = unknown> {
  * called as they were, with the same arguments; nothing else changes.
  */
 export function answeredOptions<T extends AnswerCallbacks<never> | undefined>(options: T): T {
+	return keptOptions(options).options;
+}
+
+/** `answeredOptions`, and what the answer said, once it said it (for the message the request ends with). */
+function keptOptions<T extends AnswerCallbacks<never> | undefined>(
+	options: T,
+): { options: T; said: () => Statement | undefined } {
 	const onEvent = options?.onProviderStreamEvent;
 	// Nobody hears the stream's events: there is nobody to tell.
-	if (!options || !onEvent) return options;
+	if (!options || !onEvent) return { options, said: () => undefined };
 	const onResponse = options.onResponse;
 	let headers: Record<string, string> | undefined;
 	let told = false;
+	let said: Statement | undefined;
 	const header = (wanted: string) =>
 		headers && Object.entries(headers).find(([name]) => name.toLowerCase() === wanted)?.[1];
-	return {
+	const wrapped = {
 		...options,
 		onResponse: (response: { status: number; headers: Record<string, string> }, model: never) => {
 			// A retried request: the last response is the one whose body is read.
@@ -318,30 +362,41 @@ export function answeredOptions<T extends AnswerCallbacks<never> | undefined>(op
 			if (!told && isRecord(data)) {
 				if (headers) {
 					told = true;
-					statements().set(data, {
+					said = {
 						kind: header(AUTH_KIND_HEADER),
 						provider: header(AUTH_PROVIDER_HEADER),
 						host: header(AUTH_HOST_HEADER),
-					});
+					};
+					statements().set(data, said);
 				} else if (data.type === "response.created") {
 					told = true;
-					statements().set(data, {
+					said = {
 						kind: data[AUTH_KIND_FIELD],
 						provider: data[AUTH_PROVIDER_FIELD],
 						host: data[AUTH_HOST_FIELD],
-					});
+					};
+					statements().set(data, said);
 				}
 			}
 			return onEvent(data, model);
 		},
 	} as T;
+	return { options: wrapped, said: () => said };
 }
 
-/** A stream function whose every call keeps what its answer says to itself (`answeredOptions`). */
+/**
+ * A stream function whose every call keeps what its answer says to itself (`answeredOptions`), and with the message
+ * its stream ends with (`answerOf`).
+ */
 export function answeredStream<M, C, O extends AnswerCallbacks<never> | undefined, R>(
 	stream: (model: M, context: C, options: O) => R,
 ): (model: M, context: C, options: O) => R {
-	return (model, context, options) => stream(model, context, answeredOptions(options));
+	return (model, context, options) => {
+		const kept = keptOptions(options);
+		const result = stream(model, context, kept.options);
+		keepWithMessage(result, kept.said);
+		return result;
+	};
 }
 
 /** pi-ai's implementation of an API, as `getApiProvider` gives it. */
@@ -407,8 +462,13 @@ export function answeredClaudeMessages(
 		const originals = { stream: implementation.stream, streamSimple: implementation.streamSimple };
 		const wrap =
 			(original: ApiImplementation[Method]): ApiImplementation[Method] =>
-			(model, context, options) =>
-				original(model, context, scope.providers.has(model.provider) ? answeredOptions(options) : options);
+			(model, context, options) => {
+				if (!scope.providers.has(model.provider)) return original(model, context, options);
+				const kept = keptOptions(options);
+				const result = original(model, context, kept.options);
+				keepWithMessage(result, kept.said);
+				return result;
+			};
 		const wrappers = { stream: wrap(originals.stream), streamSimple: wrap(originals.streamSimple) };
 		implementation.stream = wrappers.stream;
 		implementation.streamSimple = wrappers.streamSimple;
@@ -529,7 +589,7 @@ export class UpstreamsAnnouncer {
 	}
 
 	/** Whether the proxy names what answered: it lists its credentials (Provimux), or it named an answer before. */
-	private namesAnswers(): boolean {
+	namesAnswers(): boolean {
 		if (this.namedBefore) return true;
 		return !!this.listed && Object.values(this.listed.accounts).some((accounts) => accounts.length > 0);
 	}

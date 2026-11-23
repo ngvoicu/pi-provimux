@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **The footer says which route answered.** After each answer on a Provimux model, the footer shows
+  `answered: Anthropic sub`, `answered: Devin sub`, `answered: Anthropic api`, `answered: OpenRouter api` …, in the
+  words of the model names. It is read from the answer's `X-CPA-AUTH-*` headers (on the Codex WebSocket, the
+  `cpa_auth_*` fields of its `response.created`) and needs no other extension. Only the session's own turns count:
+  pi's cache warmer and other extensions' requests never change it. An answer the proxy would not name shows
+  `answered: unknown`; plain CLIProxyAPI shows nothing, and so does a model of another provider. On by default;
+  `"answered": false` in `cliproxyapi.json` turns it off.
+
 ## 105.0.4
 
 - **`/cliproxyapi-refresh` is gone.** Only `/provimux-refresh` reloads the model list; pi no longer shows two

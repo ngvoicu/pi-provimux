@@ -29,6 +29,7 @@ import type {
 	StreamFunction,
 } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { registerAnsweredFooter } from "./answered-footer.ts";
 import { ProactiveCompactionController } from "./auto-compact.ts";
 import {
 	CLIPROXYAPI_CODEX_API,
@@ -53,6 +54,7 @@ import {
 	loadConfiguredDefaultSettings,
 	type MappedModels,
 	type PiProviderModel,
+	resolveAnsweredDefault,
 	resolveClaudeMessagesDefault,
 	resolveConnection,
 	resolveEndpoints,
@@ -985,6 +987,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		resolveConnection(agentDir, identity.providerId),
 	);
 	upstreams.register();
+	// The footer says which route answered each of the session's turns: on by default, `"answered": false` turns it off.
+	let answeredEnabled = true;
+	try {
+		answeredEnabled = resolveAnsweredDefault(agentDir);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		logWarn(`invalid answered configuration (${message}); using answered=true`);
+	}
+	if (answeredEnabled) registerAnsweredFooter(pi, identity.providerId, () => upstreams.namesAnswers());
 	// The Claude Messages models are sent by pi-ai's own implementation: their requests get their own callbacks there.
 	try {
 		const { getApiProvider } = await import("@earendil-works/pi-ai/compat");
