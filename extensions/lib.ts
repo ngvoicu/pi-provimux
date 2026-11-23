@@ -167,7 +167,10 @@ export interface MappedModels {
 	modelsUrl: string;
 	fastMode?: boolean;
 	claudeMessages?: ClaudeMessagesMode | boolean;
-	/** The proxy listed the credentials that serve its models (`?include=accounts`): it names what answers. */
+	/**
+	 * The proxy listed the credentials that serve its models (`?include=accounts`): it names what answers. false: its
+	 * list was read and listed none; absent: not known (the lookup failed, or a cache from before this was kept).
+	 */
 	listsCredentials?: boolean;
 }
 
@@ -1106,6 +1109,8 @@ export interface ModelSources {
 	owners: Map<string, string>;
 	/** Model id → the credentials that serve it; absent when CPA does not list them. */
 	accounts: Map<string, Account[]>;
+	/** The list was read (HTTP 200 with a list): only then does it say whether CPA lists credentials. */
+	read?: boolean;
 }
 
 /**
@@ -1127,6 +1132,7 @@ export async function fetchModelSources(
 		});
 		if (!response.ok) return sources;
 		const data = asRecord(await response.json())?.data;
+		if (!Array.isArray(data)) return sources;
 		for (const item of Array.isArray(data) ? data : []) {
 			const record = asRecord(item);
 			const id = typeof record?.id === "string" ? record.id.trim() : "";
@@ -1136,6 +1142,7 @@ export async function fetchModelSources(
 			const accounts = parseAccounts(record?.accounts);
 			if (accounts.length > 0) sources.accounts.set(id, accounts);
 		}
+		sources.read = true;
 	} catch {
 		// Without the list every model stays on the Codex format, and no name says where a model comes from.
 	}
@@ -1213,7 +1220,8 @@ export async function loadMappedModels(
 		modelsUrl: endpoints.modelsUrl,
 		...(pricingEnabled ? { fastMode: effectiveFastMode } : {}),
 		...(claudeWanted ? { claudeMessages: claudeMode } : {}),
-		...(sources.accounts.size > 0 ? { listsCredentials: true } : {}),
+		// Said only by a list that was read: a failed lookup says nothing either way.
+		...(sources.read ? { listsCredentials: sources.accounts.size > 0 } : {}),
 	};
 }
 
@@ -1350,8 +1358,14 @@ export async function resolveMappedModels(
 		Date.now(),
 		options.staleTtlMs,
 	);
+	// Only a credential lookup that answered changes what is known; a failed one keeps what the cache knew.
+	const listsCredentials = fresh.listsCredentials ?? existingCache?.listsCredentials;
+	delete merged.listsCredentials;
+	if (listsCredentials !== undefined) merged.listsCredentials = listsCredentials;
 	if (!options.signal?.aborted && (options.shouldCommit?.() ?? true)) {
-		saveModelsCache(agentDir, merged);
+		// On disk only a list that names credentials is recorded; none listed reads as not known, as before.
+		const { listsCredentials: _known, ...rest } = merged;
+		saveModelsCache(agentDir, listsCredentials ? merged : rest);
 	}
 	return { loaded: merged, fromCache: false };
 }

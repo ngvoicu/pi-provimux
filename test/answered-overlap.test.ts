@@ -9,7 +9,7 @@
  * The order forced in each case is the one where a shared slot goes wrong: the second request's headers arrive before
  * the first request's first stream event.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -30,6 +30,7 @@ import {
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ANSWERED_STATUS_KEY } from "../extensions/answered-footer.ts";
 import providerExtension from "../extensions/index.ts";
+import { MODELS_CACHE_FILE_NAME, resolveMappedModels } from "../extensions/lib.ts";
 import type { Account } from "../extensions/sources.ts";
 import { ANSWERED_EVENT, REQUEST_EVENT, UPSTREAMS_EVENT } from "../extensions/upstreams.ts";
 import { acceptWebSocket } from "./websocket-fixture.ts";
@@ -56,6 +57,8 @@ async function until(what: string, ready: () => boolean, ms = 8_000) {
 interface Plan {
 	headers?: Record<string, string>;
 	created?: Record<string, string>;
+	/** Codex WebSocket: the answer (or a replay's answer) comes without response.created, as a relayed upstream may send it. */
+	noCreated?: boolean;
 }
 
 /** A request the proxy holds: the test sends its headers, then its body, when it chooses. */
@@ -80,8 +83,21 @@ const INNER_GATEWAY = {
 
 const plans = new Map<string, Plan>();
 const held = new Map<string, Held>();
-/** How many times the proxy was asked for its credential list (`?include=accounts`). */
+/** How many times the proxy was asked for its credential list (`?include=accounts`), and answered it. */
 let listHits = 0;
+let accountsAnswered = 0;
+/** The credential list's answer: a failure status instead of the list; held until released. */
+let accountsStatus: number | undefined;
+let accountsHold: { promise: Promise<void>; resolve: () => void } | undefined;
+/** Holds the next credential lookups until the test releases them. */
+function holdAccounts() {
+	let resolve = () => {};
+	const promise = new Promise<void>((release) => {
+		resolve = release;
+	});
+	accountsHold = { promise, resolve };
+	return resolve;
+}
 /** Attempts per request marker: a retry is a second attempt with the same marker. */
 const attempts = new Map<string, number>();
 /** WebSocket requests: [marker, previous_response_id, the socket's client port]. */
@@ -194,10 +210,37 @@ function serveHttp(req: IncomingMessage, res: ServerResponse) {
 	req.on("data", (chunk: Buffer) => chunks.push(chunk));
 	req.on("end", () => {
 		const url = new URL(req.url ?? "/", "http://fixture");
+		if (req.method === "GET" && url.pathname === "/v1/models" && url.searchParams.get("include") === "accounts") {
+			// The credential lookup, as the test lets it: held, or failing with a status.
+			void (async () => {
+				listHits++;
+				await accountsHold?.promise;
+				if (accountsStatus) {
+					res.writeHead(accountsStatus, { "content-type": "application/json" });
+					res.end(JSON.stringify({ error: { message: "fixture: credential list unavailable" } }));
+					accountsAnswered++;
+					return;
+				}
+				res.writeHead(200, { "content-type": "application/json" });
+				const accounts = (list: Account[]) => (listing === "plain" ? {} : { accounts: list });
+				const { claude, codex } = listing === "plain" ? DEFAULT_LISTING : listing;
+				res.end(
+					JSON.stringify({
+						object: "list",
+						data: [
+							{ id: CLAUDE, object: "model", owned_by: "anthropic", ...accounts(claude) },
+							{ id: GPT, object: "model", owned_by: "openai", ...accounts(codex) },
+							{ id: GPT_HELPER, object: "model", owned_by: "openai", ...accounts(codex) },
+						],
+					}),
+				);
+				accountsAnswered++;
+			})();
+			return;
+		}
 		if (req.method === "GET" && url.pathname === "/v1/models") {
 			res.writeHead(200, { "content-type": "application/json" });
 			if (url.searchParams.get("include") === "accounts") {
-				listHits++;
 				// A plain CLIProxyAPI does not know the parameter: its plain list, with no credentials.
 				const accounts = (list: Account[]) => (listing === "plain" ? {} : { accounts: list });
 				const { claude, codex } = listing === "plain" ? DEFAULT_LISTING : listing;
@@ -321,13 +364,14 @@ beforeAll(async () => {
 				);
 				return;
 			}
-			const created = plans.get(id)?.created ?? {};
+			const plan = plans.get(id);
+			const frames = codexFrames(id, plan?.created ?? {});
 			hold({
 				id,
 				kind: "codex-ws",
 				sendHeaders: () => {},
 				...framer(
-					codexFrames(id, created),
+					plan?.noCreated ? frames.slice(1) : frames,
 					(frame) => send(JSON.stringify(frame)),
 					() => {},
 				),
@@ -363,6 +407,8 @@ interface Harness {
 	reload: () => Promise<void>;
 	/** Quits the session. */
 	dispose: () => Promise<void>;
+	/** The models cache on disk. */
+	cache: () => { fetchedAt: number; listsCredentials?: boolean };
 }
 
 const savedEnv = new Map<string, string | undefined>();
@@ -379,6 +425,10 @@ afterEach(() => {
 	plans.clear();
 	listing = DEFAULT_LISTING;
 	listHits = 0;
+	accountsAnswered = 0;
+	accountsStatus = undefined;
+	accountsHold?.resolve();
+	accountsHold = undefined;
 	attempts.clear();
 	wsRequests.length = 0;
 	held.clear();
@@ -401,6 +451,10 @@ interface StartOptions {
 	transport?: "sse" | "websocket" | "websocket-cached";
 	/** Another extension, loaded before this one, returns a shallow copy of each assistant message at its end. */
 	copier?: boolean;
+	/** A models cache written by this version before pi starts, from the proxy as it is listed then. */
+	seedCache?: boolean;
+	/** Called once the cache is seeded, before pi starts (and its background refresh asks for the credentials). */
+	afterSeed?: () => void;
 	/** The footer switch in cliproxyapi.json; absent: not set. */
 	answered?: boolean;
 }
@@ -455,6 +509,9 @@ async function startPi(options: StartOptions = {}): Promise<Harness> {
 		if (url.hostname !== "127.0.0.1") throw new Error(`refused: ${url.href}`);
 		return realFetch(input, init);
 	}) as typeof fetch;
+	if (options.seedCache)
+		await resolveMappedModels(agentDir, baseUrl, "sk-fixture", { fastMode: false, claudeMessages: "on" });
+	options.afterSeed?.();
 
 	const reports: unknown[] = [];
 	const statuses: Array<string | undefined> = [];
@@ -607,6 +664,7 @@ async function startPi(options: StartOptions = {}): Promise<Harness> {
 			quit ??= runtime.dispose();
 			return quit;
 		},
+		cache: () => JSON.parse(readFileSync(join(agentDir, MODELS_CACHE_FILE_NAME), "utf8")),
 	};
 }
 
@@ -1087,6 +1145,129 @@ describe("the footer only ever shows the route that produced the answer the user
 			} finally {
 				await pi.dispose();
 			}
+		});
+	});
+
+	describe("each attempt names its own route, or none", () => {
+		const devinOpens = { cpa_auth_kind: "oauth", cpa_auth_provider: "devin" };
+
+		it("a WebSocket replay without response.created, after an attempt Devin opened: unnamed, so unknown", async () => {
+			const pi = await startPi({ ask: false, transport: "websocket-cached" });
+			try {
+				await turn(pi, GPT, "previous", { created: { cpa_auth_kind: "oauth", cpa_auth_provider: "codex" } });
+				// The replay sends its output and response.completed only, as Provimux forwards such an upstream answer.
+				await turn(pi, GPT, "wsretry", { noCreated: true });
+				expect(attempts.get("wsretry")).toBe(2);
+				const [failed, replayed] = wsRequests.filter(([id]) => id === "wsretry");
+				expect(failed?.[1]).toBe("previous");
+				expect(replayed?.[1]).toBe("");
+				expect(footer(pi)).toBe("answered: unknown");
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("the same replay naming nobody on response.created: unknown; naming OpenRouter: OpenRouter", async () => {
+			const pi = await startPi({ ask: false, transport: "websocket-cached" });
+			try {
+				await turn(pi, GPT, "previous", { created: devinOpens });
+				await turn(pi, GPT, "wsretry", { created: {} });
+				expect(footer(pi)).toBe("answered: unknown");
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("a first WebSocket answer without response.created, after a successful credential lookup: unknown", async () => {
+			const pi = await startPi({ ask: false, transport: "websocket-cached" });
+			try {
+				await turn(pi, GPT, "single", { noCreated: true });
+				expect(listHits).toBe(1);
+				expect(wsRequests.map(([id]) => id)).toEqual(["single"]);
+				expect(footer(pi)).toBe("answered: unknown");
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("the same from plain CLIProxyAPI, which lists no credentials: nothing", async () => {
+			listing = "plain";
+			const pi = await startPi({ ask: false, transport: "websocket-cached" });
+			try {
+				await turn(pi, GPT, "single", { noCreated: true });
+				await turn(pi, GPT, "again", { noCreated: true });
+				expect(pi.statuses.every((status) => status === undefined)).toBe(true);
+			} finally {
+				await pi.dispose();
+			}
+		});
+	});
+
+	describe("only a credential lookup that answered changes what is known", () => {
+		/**
+		 * pi starts on a cache that lists credentials; its background refresh's credential lookup is held. `early`: an
+		 * unnamed turn while it is held. Then the lookup answers `then` (a status, or the list as `listing` is), and an
+		 * unnamed turn follows.
+		 */
+		async function refresh(then: number | "plain" | "listed", early: boolean) {
+			let release = () => {};
+			const pi = await startPi({
+				ask: false,
+				transport: "sse",
+				seedCache: true,
+				afterSeed: () => {
+					release = holdAccounts();
+				},
+			});
+			try {
+				const seeded = pi.cache();
+				await until("the background lookup", () => listHits > 0);
+				if (early) await turn(pi, CLAUDE, "early", { headers: {} });
+				const shown = [early ? footer(pi) : "no turn"];
+				if (typeof then === "number") accountsStatus = then;
+				if (then === "plain") listing = "plain";
+				release();
+				await until("the lookup's answer", () => accountsAnswered > 0);
+				await until("the refreshed cache", () => pi.cache().fetchedAt !== seeded.fetchedAt);
+				await turn(pi, CLAUDE, "later", { headers: {} });
+				shown.push(footer(pi));
+				return { seeded: seeded.listsCredentials, kept: pi.cache().listsCredentials ?? null, shown };
+			} finally {
+				release();
+				await pi.dispose();
+			}
+		}
+
+		it("a cache that lists credentials, then the lookup fails (503) before any answer: kept, unknown", async () => {
+			expect(await refresh(503, false)).toEqual({
+				seeded: true,
+				kept: true,
+				shown: ["no turn", "answered: unknown"],
+			});
+		});
+
+		it("two unnamed answers on the same proxy, a failed lookup between them: unknown both times", async () => {
+			expect(await refresh(503, true)).toEqual({
+				seeded: true,
+				kept: true,
+				shown: ["answered: unknown", "answered: unknown"],
+			});
+		});
+
+		it("the lookup answers, still listing credentials: kept, unknown both times", async () => {
+			expect(await refresh("listed", true)).toEqual({
+				seeded: true,
+				kept: true,
+				shown: ["answered: unknown", "answered: unknown"],
+			});
+		});
+
+		it("the lookup answers from a proxy that is plain now: cleared, nothing", async () => {
+			expect(await refresh("plain", true)).toEqual({
+				seeded: true,
+				kept: null,
+				shown: ["answered: unknown", undefined],
+			});
 		});
 	});
 

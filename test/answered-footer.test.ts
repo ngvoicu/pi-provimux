@@ -81,8 +81,8 @@ describe("an answer the user sees", () => {
 describe("what answered, carried by the message", () => {
 	/** One request through `answeredStream`: `events` play the provider's part; resolves with its message. */
 	type Callbacks = Required<AnswerCallbacks<unknown>>;
-	async function request(events: (options: Callbacks) => void) {
-		const message = { role: "assistant", content: [] };
+	async function request(events: (options: Callbacks) => void, responseId?: string) {
+		const message = { role: "assistant", content: [], ...(responseId ? { responseId } : {}) };
 		const stream = answeredStream((_model: unknown, _context: unknown, options: Callbacks) => {
 			events(options);
 			return { result: () => Promise.resolve(message) };
@@ -146,6 +146,48 @@ describe("what answered, carried by the message", () => {
 			provider: "openai-compatible-openrouter",
 			host: "openrouter.ai",
 		});
+	});
+});
+
+describe("each attempt names its own route, or none (Codex WebSocket)", () => {
+	type Callbacks = Required<AnswerCallbacks<unknown>>;
+	async function request(events: Array<Record<string, unknown>>, responseId?: string) {
+		const message = { role: "assistant", content: [], ...(responseId ? { responseId } : {}) };
+		const stream = answeredStream((_model: unknown, _context: unknown, options: Callbacks) => {
+			for (const event of events) options.onProviderStreamEvent(event, {});
+			return { result: () => Promise.resolve(message) };
+		});
+		await stream({}, {}, { onResponse: () => {}, onProviderStreamEvent: () => {} }).result();
+		await Promise.resolve();
+		return answerOf(message);
+	}
+	const devin = { cpa_auth_kind: "oauth", cpa_auth_provider: "devin" };
+	const unnamed = { kind: undefined, provider: undefined, host: undefined };
+	const output = { type: "response.output_text.delta", delta: "ok" };
+	const completed = (id: string) => ({ type: "response.completed", response: { id, status: "completed" } });
+
+	it("a failed attempt Devin opened, replayed without response.created: unnamed", async () => {
+		const lost = { type: "response.created", response: { id: "lost" }, ...devin };
+		const failed = { type: "response.failed", response: { id: "lost", status: "failed" } };
+		expect(await request([lost, failed, output, completed("replay")], "replay")).toEqual(unnamed);
+		// Without pi's response id on the message, the failure alone ends what Devin said.
+		expect(await request([lost, failed, output, completed("replay")])).toEqual(unnamed);
+	});
+
+	it("a response.created of another response than the message's says nothing of it", async () => {
+		const other = { type: "response.created", response: { id: "other" }, ...devin };
+		expect(await request([other, output, completed("mine")], "mine")).toEqual(unnamed);
+		const mine = { type: "response.created", response: { id: "mine" }, ...devin };
+		expect(await request([mine, output, completed("mine")], "mine")).toEqual({
+			kind: "oauth",
+			provider: "devin",
+			host: undefined,
+		});
+	});
+
+	it("an answer with no response.created at all: unnamed; nothing heard: nothing", async () => {
+		expect(await request([output, completed("single")], "single")).toEqual(unnamed);
+		expect(await request([])).toBeUndefined();
 	});
 });
 

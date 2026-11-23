@@ -303,13 +303,13 @@ export function answerOf(message: unknown): Statement | undefined {
 }
 
 /** Keeps what a request's answer said with the message its stream ends with (`answerOf`). */
-function keepWithMessage(stream: unknown, said: () => Statement | undefined): void {
+function keepWithMessage(stream: unknown, said: (message: Record<string, unknown>) => Statement | undefined): void {
 	const result = (stream as { result?: unknown } | null | undefined)?.result;
 	if (typeof result !== "function") return;
 	try {
 		Promise.resolve((result as () => unknown).call(stream)).then(
 			(message) => {
-				const statement = said();
+				const statement = isRecord(message) ? said(message) : undefined;
 				if (statement && isRecord(message)) (message as Record<symbol, unknown>)[ANSWER] = statement;
 			},
 			() => {},
@@ -336,23 +336,35 @@ export function answeredOptions<T extends AnswerCallbacks<never> | undefined>(op
 	return keptOptions(options).options;
 }
 
+/** What an attempt that named nobody said: an unnamed answer. */
+const UNNAMED: Statement = { kind: undefined, provider: undefined, host: undefined };
+
+/** Codex events that end an attempt without an answer: what it said goes with it. */
+const FAILED_ATTEMPT = new Set(["response.failed", "response.incomplete", "error"]);
+
 /**
- * `answeredOptions`, and what the answer the request ends with said (for its message): the attempt that answered, not
- * the first. pi-ai can try a request again inside one call (an HTTP 429; a Codex WebSocket continuation the proxy lost,
- * replayed on a fresh socket), and each attempt may be served by another route. Over HTTP: the last response's headers.
- * Without headers (the Codex WebSocket): the last response.created's fields.
+ * `answeredOptions`, and what the answer the request ends with said (for its message): only what the attempt that
+ * answered said itself. pi-ai can try a request again inside one call (an HTTP 429; a Codex WebSocket continuation the
+ * proxy lost, replayed on a fresh socket), each attempt may be served by another route, and an attempt starts unnamed.
+ * - Over HTTP: the last response's own headers.
+ * - Without headers (the Codex WebSocket): the response.created's fields of the response the message comes from. An
+ *   attempt that failed takes what it said with it, and a response.created of another response than the message's
+ *   (its id) says nothing of it. An answer whose attempt said nothing (no response.created) is unnamed.
+ * - Nothing heard of the request at all: undefined.
  */
 function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 	options: T,
-): { options: T; said: () => Statement | undefined } {
+): { options: T; said: (message: Record<string, unknown>) => Statement | undefined } {
 	const onEvent = options?.onProviderStreamEvent;
 	// Nobody hears the stream's events: there is nobody to tell.
 	if (!options || !onEvent) return { options, said: () => undefined };
 	const onResponse = options.onResponse;
 	let headers: Record<string, string> | undefined;
 	let told = false;
-	/** What the latest attempt said. */
+	/** What the current attempt said, and the response it said it of (WebSocket). */
 	let said: Statement | undefined;
+	let saidOf: string | undefined;
+	let heard = false;
 	const header = (wanted: string) =>
 		headers && Object.entries(headers).find(([name]) => name.toLowerCase() === wanted)?.[1];
 	const wrapped = {
@@ -369,9 +381,17 @@ function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 		},
 		onProviderStreamEvent: (data: unknown, model: never) => {
 			if (isRecord(data)) {
+				heard = true;
 				// Over HTTP the headers alone count: a body's own fields are an inner gateway's.
-				if (!headers && data.type === "response.created")
+				if (!headers && data.type === "response.created") {
 					said = { kind: data[AUTH_KIND_FIELD], provider: data[AUTH_PROVIDER_FIELD], host: data[AUTH_HOST_FIELD] };
+					const id = isRecord(data.response) ? data.response.id : undefined;
+					saidOf = typeof id === "string" ? id : undefined;
+				} else if (!headers && typeof data.type === "string" && FAILED_ATTEMPT.has(data.type)) {
+					// The attempt ended without an answer: the next one starts unnamed.
+					said = undefined;
+					saidOf = undefined;
+				}
 				// The event is told once per request, with its first statement.
 				if (!told && said && (headers || data.type === "response.created")) {
 					told = true;
@@ -381,7 +401,14 @@ function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 			return onEvent(data, model);
 		},
 	} as T;
-	return { options: wrapped, said: () => said };
+	const saidOfMessage = (message: Record<string, unknown>): Statement | undefined => {
+		if (headers) return said;
+		if (!heard) return undefined;
+		// The message is another response's than the one the held statement was said of: its attempt said nothing.
+		if (saidOf && typeof message.responseId === "string" && message.responseId !== saidOf) return UNNAMED;
+		return said ?? UNNAMED;
+	};
+	return { options: wrapped, said: saidOfMessage };
 }
 
 /**

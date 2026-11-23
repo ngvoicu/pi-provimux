@@ -955,7 +955,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	/** The last model list (fetched, or the cache it was saved to) listed credentials: the proxy names what answers. */
 	let listsCredentials = false;
 	const handleRefreshOutcome = (loaded: MappedModels): void => {
-		listsCredentials = loaded.listsCredentials === true;
+		// Only a credential lookup that answered (or the cache it was saved to) changes what is known.
+		if (typeof loaded.listsCredentials === "boolean") listsCredentials = loaded.listsCredentials;
 		const staleModels = loaded.models.filter((m) => m.stale);
 		latestStaleModelIds = staleModels.map((m) => m.id);
 
@@ -1099,7 +1100,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			});
 
 			if (fromCache) {
-				listsCredentials = loaded.listsCredentials === true;
+				// Only a credential lookup that answered (or the cache it was saved to) changes what is known.
+				if (typeof loaded.listsCredentials === "boolean") listsCredentials = loaded.listsCredentials;
 				const cachedStaleModels = loaded.models.filter((m) => m.stale);
 				if (cachedStaleModels.length > 0) {
 					latestStaleModelIds = cachedStaleModels.map((m) => m.id);
