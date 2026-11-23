@@ -1,5 +1,29 @@
 # Changelog
 
+## 105.0.5
+
+- **The provider id is `provimux`** (was `cliproxyapi`). pi's `/model` shows `[provimux]`, and the models are
+  `provimux/<id>`. One provider is registered, under that id. The old id is not registered next to it, sessions are
+  not moved, and its `auth.json` entry is not read.
+- **A setup made by an earlier `/login` keeps working from `cliproxyapi.json`.** That `/login` wrote
+  `"providerId": "cliproxyapi"` without anyone choosing it, so the value now reads as the default, `provimux`, as
+  `"providerName": "CLIProxyAPI"` already does. The file's `apiKey` and `baseUrl` are used as before, with no new
+  `/login`. Any other id in the file is kept. So is any value of `CLIPROXYAPI_PROVIDER_ID`, `cliproxyapi`
+  included.
+- **What changes for an existing setup:**
+  - the models show as `provimux/<id>`;
+  - a session recorded on `cliproxyapi/<id>` does not get its model back when resumed. pi says
+    `Could not restore model cliproxyapi/<id>. Using …` and goes on with the model it would start with. Pick
+    `provimux/<id>` with `/model`;
+  - `--model cliproxyapi/<id>` must become `provimux/<id>`. So must a `defaultProvider` or `enabledModels` entry in
+    `settings.json` naming `cliproxyapi`: pi silently starts on another model for the first, and matches nothing
+    for the second;
+  - a setup whose key is only in `auth.json` under `cliproxyapi` (no `apiKey` in `cliproxyapi.json`, no
+    `CLIPROXYAPI_API_KEY`) needs one `/login provimux`;
+  - `CLIPROXYAPI_PROVIDER_ID=cliproxyapi` keeps the old id for anyone who wants it, with its stored login.
+- **Unchanged:** the files `cliproxyapi.json` and `cliproxyapi-models.json`, the `CLIPROXYAPI_*` environment
+  variables, the internal API name `cliproxyapi-codex-responses`, and `/provimux-refresh`.
+
 ## 105.0.4
 
 - **`/cliproxyapi-refresh` is gone.** Only `/provimux-refresh` reloads the model list; pi no longer shows two

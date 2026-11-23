@@ -12,7 +12,7 @@
  * port. The owner's proxy (8317) and its neighbour (8787) are refused at the socket.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -24,10 +24,16 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const EXTENSION = join(ROOT, "extensions", "index.ts");
 const PI_CLI = join(ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
-const NEMOTRON = "cliproxyapi/nemotron-3-5-super";
-const CLAUDE = "cliproxyapi/claude-opus-5-5";
-const LITERAL = "cliproxyapi/local-assistant:high";
-const CODEX = "cliproxyapi/gpt-catalog-fixture";
+/** pi's version as major + minor / 1000 (1.6.0 is 1.006), from the CLI's own package. */
+const PI_VERSION = (() => {
+	const pkg = JSON.parse(readFileSync(join(PI_CLI, "..", "..", "package.json"), "utf8")) as { version: string };
+	const [major, minor] = pkg.version.split(".").map(Number);
+	return major + minor / 1000;
+})();
+const NEMOTRON = "provimux/nemotron-3-5-super";
+const CLAUDE = "provimux/claude-opus-5-5";
+const LITERAL = "provimux/local-assistant:high";
+const CODEX = "provimux/gpt-catalog-fixture";
 
 /** What another extension does (pi-cache-keeper's part: it asks for the routes, when the case says so), and what the test
  * needs to steer a run. */
@@ -45,6 +51,27 @@ export default function observe(pi: any) {
 		note("held", existsSync(process.env.RELEASED!));
 	} });
 	pi.events.on("model-upstreams", () => note("routes", null));
+	// What /model's picker shows: every catalog refreshed, then the available models.
+	pi.registerCommand("observe-picker", { description: "picker", handler: async (_args: string, ctx: any) => {
+		await ctx.modelRegistry.runtime.refresh({ signal: AbortSignal.timeout(20_000) });
+		note("picker", ctx.modelRegistry.getAvailable().map((m: any) => m.provider + "/" + m.id));
+	} });
+	// What /login's dialog does (pi's modelRuntime.login, "Sign in with an account"), answering its prompts.
+	pi.registerCommand("observe-login", { description: "login", handler: async (args: string, ctx: any) => {
+		const interaction = {
+			signal: AbortSignal.timeout(20_000),
+			prompt: async (prompt: any) => (/URL/.test(prompt.message) ? process.env.LOGIN_URL : process.env.LOGIN_KEY),
+			notify: () => {},
+		};
+		try {
+			const credential = await ctx.modelRegistry.runtime.login(args.trim(), "oauth", interaction);
+			note("login", credential.type);
+		} catch (error) {
+			note("login", String(error));
+		}
+		await ctx.modelRegistry.runtime.refresh({ signal: AbortSignal.timeout(20_000) });
+		note("picker", ctx.modelRegistry.getAvailable().map((m: any) => m.provider + "/" + m.id));
+	} });
 	pi.on("session_start", (event: any, ctx: any) => {
 		note("start", { reason: event.reason, model: ctx.model?.id, level: pi.getThinkingLevel() });
 		if (process.env.ASK_ROUTES) pi.events.emit("model-upstreams:request", {});
@@ -89,6 +116,8 @@ const MODELS: FixtureModel[] = [
 interface SentRequest {
 	path: string;
 	model: string;
+	/** The credential the request carried (`Authorization`, or Claude's `x-api-key`). */
+	key?: string;
 	effort?: string;
 	updates: string[];
 	status: number;
@@ -268,7 +297,9 @@ async function serve(req: IncomingMessage, res: ServerResponse) {
 		!claude &&
 		!!model?.effortUpdates &&
 		[effort, ...updates].some((value) => value !== undefined && !model.levels.includes(value));
-	requests.push({ path: url.pathname, model: body.model, effort, updates, status: unsupported ? 400 : 200 });
+	const authorization = req.headers.authorization ?? req.headers["x-api-key"];
+	const key = typeof authorization === "string" ? authorization.replace(/^Bearer\s+/i, "") : undefined;
+	requests.push({ path: url.pathname, model: body.model, key, effort, updates, status: unsupported ? 400 : 200 });
 	if (unsupported) {
 		res.writeHead(400, { "content-type": "application/json" });
 		res.end(JSON.stringify({ error: { message: "fixture rejected an unsupported reasoning effort" } }));
@@ -342,10 +373,20 @@ interface Run {
 	stderr: string;
 	requests: SentRequest[];
 	events: Observed[];
+	/** RPC responses by command id (`c0`, `c1`, …). */
+	responses: Record<string, any>;
 }
 
 /** One pi CLI run, with this extension and the observer, in the test's agent directory and home. */
-async function pi(args: string[], options: { askRoutes?: boolean } = {}): Promise<Run> {
+async function pi(
+	args: string[],
+	options: {
+		askRoutes?: boolean;
+		env?: Record<string, string>;
+		/** RPC commands, sent on stdin (`--mode rpc` among the args); pi is stopped once each has its response. */
+		rpc?: Array<Record<string, unknown>>;
+	} = {},
+): Promise<Run> {
 	const label = `run${Math.random().toString(36).slice(2, 8)}`;
 	run = { events: join(root, `${label}.events`), released: join(root, `${label}.released`) };
 	const env: NodeJS.ProcessEnv = {};
@@ -364,19 +405,40 @@ async function pi(args: string[], options: { askRoutes?: boolean } = {}): Promis
 		RELEASED: run.released,
 		// Only the lifecycle cases ask for the routes: in the others a lookup's late answer is not what is tested.
 		...(options.askRoutes ? { ASK_ROUTES: "1" } : {}),
+		...options.env,
 	});
 	const first = requests.length;
 	const child = spawn(process.execPath, [PI_CLI, "-e", EXTENSION, "-e", observer, "--no-tools", ...args], {
 		cwd: project,
 		env,
-		stdio: ["ignore", "pipe", "pipe"],
+		stdio: [options.rpc ? "pipe" : "ignore", "pipe", "pipe"],
 	});
 	let stdout = "";
 	let stderr = "";
-	child.stdout.on("data", (chunk) => {
+	const responses: Record<string, any> = {};
+	if (options.rpc) {
+		const commands = options.rpc.map((command, index) => ({ id: `c${index}`, ...command }));
+		child.stdin!.write(commands.map((command) => `${JSON.stringify(command)}\n`).join(""));
+		let pending = "";
+		child.stdout!.on("data", (chunk) => {
+			pending += chunk;
+			for (let end = pending.indexOf("\n"); end >= 0; end = pending.indexOf("\n")) {
+				const line = pending.slice(0, end);
+				pending = pending.slice(end + 1);
+				try {
+					const message = JSON.parse(line);
+					if (message?.type === "response" && typeof message.id === "string") responses[message.id] = message;
+				} catch {
+					// Not a JSON line.
+				}
+			}
+			if (commands.every((command) => responses[command.id])) child.kill("SIGTERM");
+		});
+	}
+	child.stdout!.on("data", (chunk) => {
 		stdout += chunk;
 	});
-	child.stderr.on("data", (chunk) => {
+	child.stderr!.on("data", (chunk) => {
 		stderr += chunk;
 	});
 	const code = await new Promise<number | null>((resolve, reject) => {
@@ -387,7 +449,7 @@ async function pi(args: string[], options: { askRoutes?: boolean } = {}): Promis
 			resolve(exitCode);
 		});
 	});
-	return { code, stdout, stderr, requests: requests.slice(first), events: observed(run.events) };
+	return { code, stdout, stderr, requests: requests.slice(first), events: observed(run.events), responses };
 }
 
 const STALE = "is stale after session replacement or reload";
@@ -473,4 +535,230 @@ describe("pi's CLI with this extension, against a fixture proxy", { timeout: 120
 		expect(third.code, said(third)).toBe(0);
 		expect(third.requests[0]).toMatchObject({ effort: "medium", updates: ["high"], status: 200 });
 	});
+});
+
+/**
+ * The provider id `provimux` (105.0.5), with pi's own CLI: one provider, under the id the extension resolves. The
+ * owner's setup holds `providerId: "cliproxyapi"` (written by the old /login), its key and its URL in
+ * cliproxyapi.json, and nothing in auth.json.
+ */
+describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
+	const OPUS = "claude-opus-5-5";
+	const GPT = "gpt-catalog-fixture";
+	const FILE_KEY = "fixture-file-key";
+	const LOGIN_KEY = "fixture-login-key";
+	const CONFIG = () => join(agentDir, "cliproxyapi.json");
+	const AUTH = () => join(agentDir, "auth.json");
+	const all = (provider: string) => MODELS.map((m) => `${provider}/${m.slug}`).sort();
+	const listed = (result: Run, command = "c0") =>
+		((result.responses[command]?.data?.models ?? []) as Array<{ provider: string; id: string }>).map(
+			(model) => `${model.provider}/${model.id}`,
+		);
+	const listRows = (result: Run) =>
+		result.stdout.split("\n").filter((line) => MODELS.some((m) => line.split(/\s+/)[1] === m.slug));
+	const picker = (result: Run) =>
+		result.events.filter((e) => e.event === "picker").map((e) => [...(e.payload as string[])].sort());
+
+	function ownerShaped() {
+		writeFileSync(
+			CONFIG(),
+			`${JSON.stringify({ baseUrl: origin, apiKey: FILE_KEY, providerId: "cliproxyapi", claudeMessages: "auto" }, null, 2)}\n`,
+		);
+	}
+
+	/** The three views of the model list: the picker's, `--list-models`, rpc `get_available_models` (cold, then warm). */
+	async function expectOnly(provider: string, env: Record<string, string> = {}) {
+		const shown = await pi(["--no-session", "-p", "/observe-picker"], { env });
+		expect(shown.code, said(shown)).toBe(0);
+		expect(picker(shown), said(shown)).toEqual([all(provider)]);
+
+		const list = await pi(["--list-models"], { env });
+		expect(list.code, said(list)).toBe(0);
+		const rows = listRows(list);
+		expect(rows, said(list)).toHaveLength(MODELS.length);
+		expect(rows.map((row) => row.split(/\s+/).slice(0, 2).join("/")).sort()).toEqual(all(provider));
+		const other = provider === "provimux" ? "cliproxyapi" : "provimux";
+		expect(list.stdout).not.toMatch(new RegExp(`^${other}\\s`, "m"));
+
+		for (const start of ["cold", "warm"]) {
+			const rpc = await pi(["--mode", "rpc", "--no-session"], { env, rpc: [{ type: "get_available_models" }] });
+			expect(listed(rpc).sort(), `${start}\n${said(rpc)}`).toEqual(all(provider));
+		}
+		return { shown, list };
+	}
+
+	it("the owner's setup (providerId cliproxyapi in the file, no auth.json): only provimux, each model once; a prompt reaches the proxy with the file's key", async () => {
+		ownerShaped();
+		const before = readFileSync(CONFIG());
+		const { shown, list } = await expectOnly("provimux");
+		captures.push({ name: "owner: picker rows", text: JSON.stringify(picker(shown)[0], null, 1) });
+		captures.push({ name: "owner: --list-models", text: list.stdout });
+
+		for (const [id, path] of [
+			[GPT, "/backend-api/codex/responses"],
+			[OPUS, "/v1/messages"],
+		]) {
+			const sent = await pi(["--no-session", "--model", `provimux/${id}`, "-p", "say hi"]);
+			expect(sent.code, said(sent)).toBe(0);
+			expect(sent.stdout).toContain("fixture-ok");
+			expect(sent.requests.map((r) => [r.path, r.model, r.key])).toEqual([[path, id, FILE_KEY]]);
+		}
+		// No --model: pi picks a model, and the only one it can pick from is provimux.
+		const picked = await pi(["--no-session", "-p", "say hi"]);
+		expect(picked.code, said(picked)).toBe(0);
+		expect(picked.requests.map((r) => r.key)).toEqual([FILE_KEY]);
+
+		// The old name is gone: refused, nothing sent.
+		const old = await pi(["--no-session", "--model", `cliproxyapi/${GPT}`, "-p", "say hi"]);
+		expect(old.code, said(old)).not.toBe(0);
+		expect(old.stderr).toContain("not found");
+		expect(old.requests).toEqual([]);
+		captures.push({ name: "owner: --model cliproxyapi/<id>", text: said(old) });
+
+		// Nothing was rewritten, and no login appeared.
+		expect(readFileSync(CONFIG()).equals(before)).toBe(true);
+		// pi creates an empty auth.json itself; nothing is stored in it.
+		expect(existsSync(AUTH()) ? Object.keys(JSON.parse(readFileSync(AUTH(), "utf8"))) : []).toEqual([]);
+	});
+
+	it("CLIPROXYAPI_PROVIDER_ID=cliproxyapi keeps the old id: only cliproxyapi, and cliproxyapi/<id> answers", async () => {
+		ownerShaped();
+		const env = { CLIPROXYAPI_PROVIDER_ID: "cliproxyapi" };
+		const { list } = await expectOnly("cliproxyapi", env);
+		captures.push({ name: "CLIPROXYAPI_PROVIDER_ID=cliproxyapi: --list-models", text: list.stdout });
+		const sent = await pi(["--no-session", "--model", `cliproxyapi/${GPT}`, "-p", "say hi"], { env });
+		expect(sent.code, said(sent)).toBe(0);
+		expect(sent.requests.map((r) => [r.model, r.key])).toEqual([[GPT, FILE_KEY]]);
+	});
+
+	it("a fresh /login with no cliproxyapi.json: saved under provimux, and only provimux is shown", async () => {
+		rmSync(CONFIG());
+		const empty = await pi(["--mode", "rpc", "--no-session"], { rpc: [{ type: "get_available_models" }] });
+		expect(listed(empty), said(empty)).toEqual([]);
+
+		const login = await pi(["--no-session", "-p", "/observe-login provimux"], {
+			env: { LOGIN_URL: origin, LOGIN_KEY },
+		});
+		expect(login.code, said(login)).toBe(0);
+		expect(login.events.filter((e) => e.event === "login").map((e) => e.payload)).toEqual(["oauth"]);
+		expect(picker(login), said(login)).toEqual([all("provimux")]);
+
+		const config = JSON.parse(readFileSync(CONFIG(), "utf8"));
+		expect(config).toMatchObject({
+			baseUrl: origin,
+			apiKey: LOGIN_KEY,
+			providerId: "provimux",
+			providerName: "Provimux",
+		});
+		expect(Object.keys(JSON.parse(readFileSync(AUTH(), "utf8")))).toEqual(["provimux"]);
+		captures.push({
+			name: "fresh /login: cliproxyapi.json",
+			text: JSON.stringify({ ...config, baseUrl: "<fixture>" }, null, 2),
+		});
+
+		await expectOnly("provimux");
+		const sent = await pi(["--no-session", "--model", `provimux/${OPUS}`, "-p", "say hi"]);
+		expect(sent.code, said(sent)).toBe(0);
+		expect(sent.requests.map((r) => [r.model, r.key])).toEqual([[OPUS, LOGIN_KEY]]);
+	});
+
+	it("a session recorded on cliproxyapi/<id>: resumed, pi says it could not restore the model", async () => {
+		ownerShaped();
+		const file = join(root, "old-session.jsonl");
+		const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 };
+		const entries = [
+			{
+				type: "session",
+				version: 3,
+				id: "11111111-1111-4111-8111-111111111111",
+				timestamp: "2026-11-01T10:00:00.000Z",
+				cwd: realpathSync(project),
+			},
+			{
+				type: "model_change",
+				id: "a0000001",
+				parentId: null,
+				timestamp: "2026-11-01T10:00:00.500Z",
+				provider: "cliproxyapi",
+				modelId: OPUS,
+			},
+			{
+				type: "message",
+				id: "a0000002",
+				parentId: "a0000001",
+				timestamp: "2026-11-01T10:00:01.000Z",
+				message: { role: "user", content: "Hello", timestamp: 1793527201000 },
+			},
+			{
+				type: "message",
+				id: "a0000003",
+				parentId: "a0000002",
+				timestamp: "2026-11-01T10:00:02.000Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "Hi!" }],
+					api: "anthropic-messages",
+					provider: "cliproxyapi",
+					model: OPUS,
+					usage: { ...usage, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+					stopReason: "stop",
+					timestamp: 1793527202000,
+				},
+			},
+		];
+		writeFileSync(file, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+		// pi does not find cliproxyapi/<id> and goes on with the model it would start with (here the only provider's
+		// first); since pi 1.6.0 every mode says so on stderr, before that only the TUI did.
+		const resumed = await pi(["--session", file, "-p", "say hi"]);
+		expect(resumed.code, said(resumed)).toBe(0);
+		captures.push({ name: "old session resumed with -p: stderr", text: resumed.stderr });
+		expect(resumed.requests.map((r) => r.key)).toEqual([FILE_KEY]);
+		const restored = /Could not restore model cliproxyapi\/claude-opus-5-5\. Using (\S+)/.exec(resumed.stderr);
+		if (PI_VERSION >= 1.006) expect(restored?.[1], said(resumed)).toMatch(/^provimux\//);
+		const answer = readFileSync(file, "utf8")
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line))
+			.filter((e) => e.type === "message" && e.message.role === "assistant")
+			.at(-1);
+		expect(answer?.message.provider).toBe("provimux");
+	});
+
+	it("a key stored only in auth.json under cliproxyapi is not used: no models until one /login provimux", async () => {
+		rmSync(CONFIG());
+		writeFileSync(
+			AUTH(),
+			JSON.stringify({
+				cliproxyapi: {
+					type: "oauth",
+					access: "fixture-old-login",
+					refresh: JSON.stringify({ baseUrl: origin }),
+					expires: Date.now() + 60_000_000,
+				},
+			}),
+		);
+		const before = await pi(["--mode", "rpc", "--no-session"], { rpc: [{ type: "get_available_models" }] });
+		expect(listed(before), said(before)).toEqual([]);
+		const login = await pi(["--no-session", "-p", "/observe-login provimux"], {
+			env: { LOGIN_URL: origin, LOGIN_KEY },
+		});
+		expect(picker(login), said(login)).toEqual([all("provimux")]);
+		const sent = await pi(["--no-session", "--model", `provimux/${GPT}`, "-p", "say hi"]);
+		expect(
+			sent.requests.map((r) => [r.model, r.key]),
+			said(sent),
+		).toEqual([[GPT, LOGIN_KEY]]);
+	});
+});
+
+/** What the provider-id cases saw, for the review: written when CAPTURE_DIR is set. */
+const captures: Array<{ name: string; text: string }> = [];
+afterAll(() => {
+	const dir = process.env.CAPTURE_DIR;
+	if (!dir || captures.length === 0) return;
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(
+		join(dir, `cli-captures-${process.env.CAPTURE_LABEL ?? "run"}.txt`),
+		captures.map((c) => `### ${c.name}\n${c.text.replaceAll(origin, "<fixture>")}\n`).join("\n"),
+	);
 });

@@ -20,6 +20,7 @@ import {
 	firstNonEmpty,
 	isModelReferencedAsDefault,
 	isUnauthorizedModelsError,
+	LEGACY_DEFAULT_PROVIDER_ID,
 	LEGACY_DEFAULT_PROVIDER_NAME,
 	loadAuthConnection,
 	loadConfigFile,
@@ -27,6 +28,7 @@ import {
 	ModelsHttpError,
 	matchModelCost,
 	parseBooleanSetting,
+	resolveConnection,
 	resolveEndpoints,
 	resolveFastDefault,
 	resolveIdentity,
@@ -592,6 +594,144 @@ describe("config and auth file helpers", () => {
 				process.env.CLIPROXYAPI_PROVIDER_NAME = previous;
 			}
 		}
+	});
+
+	describe("the provider id", () => {
+		const ENV_VALUES: Array<string | undefined> = [
+			undefined,
+			"",
+			"   ",
+			"cliproxyapi",
+			" cliproxyapi ",
+			"provimux",
+			"acme",
+			" acme ",
+		];
+		/** `absent`: no cliproxyapi.json; `broken`: not JSON; `none`: a file without providerId; anything else: the value. */
+		const FILE_VALUES: unknown[] = [
+			"absent",
+			"broken",
+			"none",
+			"",
+			"  ",
+			"cliproxyapi",
+			" cliproxyapi ",
+			"CLIProxyAPI",
+			"provimux",
+			"acme",
+			123,
+			null,
+		];
+		const AUTH_ENTRIES = [undefined, "cliproxyapi", "provimux", "acme"];
+
+		/** The rule: a non-blank CLIPROXYAPI_PROVIDER_ID; else a file value, unless it is the old default; else provimux. */
+		function expected(env: string | undefined, file: unknown): string {
+			if (env?.trim()) return env.trim();
+			if (!["absent", "broken", "none"].includes(file as string) && typeof file === "string" && file.trim()) {
+				if (file.trim() !== "cliproxyapi") return file.trim();
+			}
+			return "provimux";
+		}
+
+		function withEnv<T>(name: string, value: string | undefined, run: () => T): T {
+			const previous = process.env[name];
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+			try {
+				return run();
+			} finally {
+				if (previous === undefined) delete process.env[name];
+				else process.env[name] = previous;
+			}
+		}
+
+		it("is provimux by default; the old default is cliproxyapi", () => {
+			expect(DEFAULT_PROVIDER_ID).toBe("provimux");
+			expect(LEGACY_DEFAULT_PROVIDER_ID).toBe("cliproxyapi");
+		});
+
+		it("every combination of CLIPROXYAPI_PROVIDER_ID, the file's providerId and a stored login", () => {
+			let cases = 0;
+			for (const env of ENV_VALUES) {
+				for (const file of FILE_VALUES) {
+					for (const authEntry of AUTH_ENTRIES) {
+						const agentDir = tempAgentDir();
+						const configPath = join(agentDir, CONFIG_FILE_NAME);
+						if (file === "broken") writeFileSync(configPath, "{not-json\n", "utf8");
+						else if (file === "none") writeFileSync(configPath, '{ "apiKey": "k" }\n', "utf8");
+						else if (file !== "absent")
+							writeFileSync(configPath, JSON.stringify({ providerId: file, apiKey: "k" }), "utf8");
+						if (authEntry) {
+							writeFileSync(
+								join(agentDir, AUTH_FILE_NAME),
+								JSON.stringify({ [authEntry]: { type: "api_key", key: "stored" } }),
+								"utf8",
+							);
+						}
+						const identity = withEnv("CLIPROXYAPI_PROVIDER_ID", env, () => resolveIdentity(agentDir));
+						expect(identity.providerId, JSON.stringify({ env, file, authEntry })).toBe(expected(env, file));
+						cases++;
+					}
+				}
+			}
+			expect(cases).toBe(ENV_VALUES.length * FILE_VALUES.length * AUTH_ENTRIES.length);
+		});
+
+		it("the owner's setup: providerId cliproxyapi, apiKey and baseUrl in the file, no login: provimux, from the file", () => {
+			const unset = <T>(run: () => T) =>
+				withEnv("CLIPROXYAPI_BASE_URL", undefined, () => withEnv("CLIPROXYAPI_API_KEY", undefined, run));
+			unset(() =>
+				withEnv("CLIPROXYAPI_PROVIDER_ID", undefined, () => {
+					const agentDir = tempAgentDir();
+					writeFileSync(
+						join(agentDir, CONFIG_FILE_NAME),
+						JSON.stringify({ baseUrl: "http://127.0.0.1:9", apiKey: "file-key", providerId: "cliproxyapi" }),
+						"utf8",
+					);
+					const { providerId } = resolveIdentity(agentDir);
+					expect(providerId).toBe("provimux");
+					expect(resolveConnection(agentDir, providerId)).toMatchObject({
+						baseUrlInput: "http://127.0.0.1:9",
+						apiKey: "file-key",
+					});
+				}),
+			);
+		});
+
+		it("a login stored only under cliproxyapi is not read for provimux; CLIPROXYAPI_PROVIDER_ID=cliproxyapi reads it", () => {
+			const agentDir = tempAgentDir();
+			writeFileSync(
+				join(agentDir, AUTH_FILE_NAME),
+				JSON.stringify({
+					cliproxyapi: { type: "oauth", access: "old-key", refresh: encodeRefreshMeta("http://127.0.0.1:9") },
+				}),
+				"utf8",
+			);
+			withEnv("CLIPROXYAPI_API_KEY", undefined, () => {
+				withEnv("CLIPROXYAPI_PROVIDER_ID", undefined, () => {
+					const { providerId } = resolveIdentity(agentDir);
+					expect(providerId).toBe("provimux");
+					expect(resolveConnection(agentDir, providerId)).toBeNull();
+				});
+				withEnv("CLIPROXYAPI_PROVIDER_ID", "cliproxyapi", () => {
+					const { providerId } = resolveIdentity(agentDir);
+					expect(providerId).toBe("cliproxyapi");
+					expect(resolveConnection(agentDir, providerId)).toMatchObject({ apiKey: "old-key" });
+				});
+			});
+		});
+
+		it("/login's file write keeps the old default meaning the default; another id stays a choice", () => {
+			withEnv("CLIPROXYAPI_PROVIDER_ID", undefined, () => {
+				const agentDir = tempAgentDir();
+				saveConfigFile(agentDir, { providerId: "provimux", providerName: "Provimux" });
+				expect(resolveIdentity(agentDir)).toEqual({ providerId: "provimux", providerName: "Provimux" });
+				saveConfigFile(agentDir, { providerId: "cliproxyapi", providerName: "CLIProxyAPI" });
+				expect(resolveIdentity(agentDir)).toEqual({ providerId: "provimux", providerName: "Provimux" });
+				saveConfigFile(agentDir, { providerId: "acme" });
+				expect(resolveIdentity(agentDir).providerId).toBe("acme");
+			});
+		});
 	});
 
 	it("loads configured default settings from settings.json", () => {

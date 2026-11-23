@@ -32,7 +32,7 @@ import providerExtension from "../extensions/index.ts";
 import { ANSWERED_EVENT, REQUEST_EVENT, UPSTREAMS_EVENT } from "../extensions/upstreams.ts";
 import { acceptWebSocket } from "./websocket-fixture.ts";
 
-const PROVIDER = "cliproxyapi";
+const PROVIDER = "provimux";
 const CLAUDE = "claude-opus-5-5";
 const GPT = "gpt-6.1-sol";
 const GPT_HELPER = "gpt-6.1-sol-mini";

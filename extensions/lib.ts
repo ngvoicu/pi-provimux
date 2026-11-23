@@ -24,8 +24,14 @@ export interface PiProviderModelCompat {
 /** pi API id used for Claude models when the Claude Messages format is enabled. */
 export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
 
-export const DEFAULT_PROVIDER_ID = "cliproxyapi";
+export const DEFAULT_PROVIDER_ID = "provimux";
 export const DEFAULT_PROVIDER_NAME = "Provimux";
+/**
+ * The provider id before 105.0.5. `/login` writes the id into `cliproxyapi.json`, so a setup made then holds it
+ * without anyone having chosen it: read from the file, it means the default. Set by `CLIPROXYAPI_PROVIDER_ID`, it
+ * is a choice and is kept. Nothing registers it, moves sessions from it, or reads its `auth.json` entry.
+ */
+export const LEGACY_DEFAULT_PROVIDER_ID = "cliproxyapi";
 /**
  * The display name before 105.0.3. `/login` writes the name into `cliproxyapi.json`, so a setup made then holds it
  * without anyone having chosen it: read from the file, it means the default. Set by `CLIPROXYAPI_PROVIDER_NAME`, it
@@ -418,7 +424,13 @@ export function resolveIdentity(agentDir: string): ResolvedIdentity {
 	}
 
 	return {
-		providerId: firstNonEmpty(process.env.CLIPROXYAPI_PROVIDER_ID, file.providerId, DEFAULT_PROVIDER_ID)!,
+		providerId: firstNonEmpty(
+			process.env.CLIPROXYAPI_PROVIDER_ID,
+			typeof file.providerId === "string" && file.providerId.trim() === LEGACY_DEFAULT_PROVIDER_ID
+				? undefined
+				: file.providerId,
+			DEFAULT_PROVIDER_ID,
+		)!,
 		providerName: firstNonEmpty(
 			process.env.CLIPROXYAPI_PROVIDER_NAME,
 			typeof file.providerName === "string" && file.providerName.trim() === LEGACY_DEFAULT_PROVIDER_NAME

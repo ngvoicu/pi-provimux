@@ -3,7 +3,7 @@
 **Provimux's extension for [pi](https://pi.dev).** It adds [Provimux](https://github.com/ngvoicu/provimux) as a
 provider in pi, and works the same with plain [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
-Every model your Provimux or CLIProxyAPI serves appears in pi's `/model`, under the provider `cliproxyapi`. With
+Every model your Provimux or CLIProxyAPI serves appears in pi's `/model`, under the provider `provimux`. With
 Provimux, each model's name also says which accounts serve it (a subscription login or an API key, and whose), and
 other pi extensions learn which one answered. With CLIProxyAPI, those parts stay quiet and everything else works.
 
@@ -79,18 +79,19 @@ It needs pi 0.99.0 or newer: the Codex WebSocket reports which kind of account a
 
 ### Coming from pi-cliproxyapi-provider
 
-pi-provimux keeps everything your setup names: the provider id `cliproxyapi` (so `cliproxyapi/<model>` in your
-settings still works), the `CLIPROXYAPI_*` environment variables, and the files `cliproxyapi.json` and
-`cliproxyapi-models.json`. Two names changed:
+pi-provimux keeps the `CLIPROXYAPI_*` environment variables and the files `cliproxyapi.json` and
+`cliproxyapi-models.json`. Three names changed:
 
 | Was | Now | The old one |
 | --- | --- | --- |
+| The provider id `cliproxyapi` | `provimux` (since 105.0.5) | Not registered any more. See [The provider id `provimux`](#the-provider-id-provimux-since-10505). |
 | `/cliproxyapi-refresh` | `/provimux-refresh` | Gone since 105.0.4: use `/provimux-refresh`. |
-| The login shown as **CLIProxyAPI** | **Provimux** | `/login CLIProxyAPI` still works: pi matches it, ignoring case, to the id `cliproxyapi`. |
+| The login shown as **CLIProxyAPI** | **Provimux** | `/login provimux` or `/login Provimux`. |
 
-A `cliproxyapi.json` written by an earlier `/login` holds `"providerName": "CLIProxyAPI"`; it is read as the
-default, so the login shows as Provimux there too. A name you set yourself, or through `CLIPROXYAPI_PROVIDER_NAME`,
-is kept.
+A `cliproxyapi.json` written by an earlier `/login` holds `"providerName": "CLIProxyAPI"` and
+`"providerId": "cliproxyapi"`. Nobody chose those values, so both are read as the defaults: the login shows as
+Provimux, and the models are listed under `provimux`. A name or an id you set yourself, in the file or through
+`CLIPROXYAPI_PROVIDER_NAME` / `CLIPROXYAPI_PROVIDER_ID`, is kept.
 
 Remove the old package first, so that only one of them registers the provider:
 
@@ -98,6 +99,35 @@ Remove the old package first, so that only one of them registers the provider:
 pi remove npm:@router-for-me/pi-cliproxyapi-provider   # or the source you installed it from
 pi install npm:pi-provimux
 ```
+
+### The provider id `provimux` (since 105.0.5)
+
+pi shows a model as `<provider id>/<model id>`. Up to 105.0.4 that was `cliproxyapi/<model>`; from 105.0.5 it is
+`provimux/<model>`. Only the id changes: the files, the environment variables and your saved settings stay. Nothing
+migrates, and the old id is not kept as a second provider. What that means for a setup made before 105.0.5:
+
+- **The models now show as `provimux/<id>`** in `/model`, `--list-models` and pi's RPC model list.
+- **Your connection keeps working when it is in `cliproxyapi.json`.** An earlier `/login` wrote
+  `"providerId": "cliproxyapi"`, `apiKey` and `baseUrl` there. That id is read as the default, `provimux`, and the
+  key and address are used as before. You do not need a new `/login`.
+- **A key that is only in pi's `auth.json`, under `cliproxyapi`, is not read.** No `apiKey` in `cliproxyapi.json`
+  and no `CLIPROXYAPI_API_KEY`: run `/login provimux` once. pi then stores the login under `provimux`. You can
+  delete the old `cliproxyapi` entry from `auth.json`.
+- **A session recorded on `cliproxyapi/<id>` does not get its model back** when you resume it. pi says
+  `Could not restore model cliproxyapi/<id>. Using <provider>/<model>` and goes on with the model it would start
+  with. That can be another Provimux model, or another provider's model if you have logged in to one. Pick
+  `provimux/<id>` with `/model` before you send anything. pi 1.6.0 and newer also print that warning in `-p`,
+  JSON and RPC mode; older pi shows it only in the TUI.
+- **`--model cliproxyapi/<id>` is not found.** Write `--model provimux/<id>` (or `--provider provimux`).
+- **Settings that name the old id match nothing.** pi starts on another model, with no warning, when
+  `defaultProvider` is `cliproxyapi`. It prints `No models match pattern "cliproxyapi/<id>"` for an
+  `enabledModels` entry. Change them to `provimux` and `provimux/<id>` in `~/.pi/agent/settings.json`, or pick the
+  model again with `/model`.
+- **To keep the old id**, set `CLIPROXYAPI_PROVIDER_ID=cliproxyapi` in the environment pi runs in. The models are
+  then listed under `cliproxyapi` as before, and the login stored under `cliproxyapi` in `auth.json` is used again.
+  Set in the environment, it is your choice and is kept. In `cliproxyapi.json`, `"providerId": "cliproxyapi"` means
+  the default, because that is what the old `/login` wrote; any other id there is kept. So keep the variable set:
+  `/login` writes the id it used into `cliproxyapi.json`, and there `cliproxyapi` reads as `provimux`.
 
 ## Login-style setup (recommended)
 
@@ -112,10 +142,10 @@ This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only s
 or, by the provider id:
 
 ```text
-/login cliproxyapi
+/login provimux
 ```
 
-(`/login CLIProxyAPI` is the same id, as pi ignores case.) These shortcuts jump straight into the multi-field baseUrl + API key prompts. The provider is registered as OAuth-only, so pi does not ask you to choose between API key and account first.
+(pi ignores case, so both name the same provider.) These shortcuts jump straight into the multi-field baseUrl + API key prompts. The provider is registered as OAuth-only, so pi does not ask you to choose between API key and account first.
 
 ### Menu path
 
@@ -168,7 +198,7 @@ Optional fields:
 | ------- | --------- | ------------- |
 | `baseUrl` | `http://127.0.0.1:8317` | Provimux or CLIProxyAPI address |
 | `apiKey` | _(required unless set via /login or env)_ | Bearer token / CPA API key |
-| `providerId` | `cliproxyapi` | Provider id shown in `/model` |
+| `providerId` | `provimux` | Provider id shown in `/model` (`cliproxyapi`, the default before 105.0.5, written here by `/login`, reads as the default) |
 | `providerName` | `Provimux` | Display name in `/login` and UI (`CLIProxyAPI`, the default before 105.0.3, written here by `/login`, reads as the default) |
 | `fast` | `false` | Persisted speed preference: `false` (off), `true` (Fast), or `"ultrafast"` (Ultra Fast) |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
@@ -265,7 +295,7 @@ Use `/provimux-refresh` to force an immediate remote refresh of the model catalo
 ### Refresh commands
 
 - `/provimux-refresh` — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi.
-- `/login Provimux` / `/login cliproxyapi` — re-entering credentials always forces a fresh models query and rewrites the cache.
+- `/login Provimux` / `/login provimux` — re-entering credentials always forces a fresh models query and rewrites the cache.
 
 Delete `~/.pi/agent/cliproxyapi-models.json` to clear the cache manually.
 
@@ -283,7 +313,7 @@ From CPA catalog entry → pi model:
 | `supports_reasoning_effort_updates` | `compat.supportsMidConvoEffort` |
 | `visibility: "hide"` | skipped |
 
-Unsupported pi thinking levels are set to `null` so they are hidden in the UI. A level the model lacks asked on the command line of a one-shot run (`pi -p --thinking low`, `--model cliproxyapi/<model>:low`, or `--models cliproxyapi/<model>:low` when that pattern selects the model; also `--mode json`) is refused: nothing is sent, the error names the levels the model has, and pi exits with 1. The flags are read as pi reads them: a suffix that is part of a model's id (`--model cliproxyapi/local-assistant:high`, for a model listed as `local-assistant:high`) asks for no level. Elsewhere (the level picker, a saved default level, `--thinking` in an interactive or RPC session) pi moves the level to the nearest one the model has, and the request names that level, never the missing one. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller prices are not selected arbitrarily and fall back to zero. These are catalog/list prices, not a guarantee of CPA's own markup or billing.
+Unsupported pi thinking levels are set to `null` so they are hidden in the UI. A level the model lacks asked on the command line of a one-shot run (`pi -p --thinking low`, `--model provimux/<model>:low`, or `--models provimux/<model>:low` when that pattern selects the model; also `--mode json`) is refused: nothing is sent, the error names the levels the model has, and pi exits with 1. The flags are read as pi reads them: a suffix that is part of a model's id (`--model provimux/local-assistant:high`, for a model listed as `local-assistant:high`) asks for no level. Elsewhere (the level picker, a saved default level, `--thinking` in an interactive or RPC session) pi moves the level to the nearest one the model has, and the request names that level, never the missing one. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller prices are not selected arbitrarily and fall back to zero. These are catalog/list prices, not a guarantee of CPA's own markup or billing.
 
 ## GPT Responses prompt caching
 
@@ -436,8 +466,8 @@ How the routes are made:
 
 If you previously maintained a static provider such as `cpa-responses` in `~/.pi/agent/models.json`:
 
-1. Install this package and run `/login Provimux` or `/login cliproxyapi` (or set `cliproxyapi.json`).
-2. Point `defaultProvider` / `enabledModels` at `cliproxyapi/<model-id>` (or set `providerId` to `cpa-responses` for a drop-in id).
+1. Install this package and run `/login Provimux` or `/login provimux` (or set `cliproxyapi.json`).
+2. Point `defaultProvider` / `enabledModels` at `provimux/<model-id>` (or set `providerId` to `cpa-responses` for a drop-in id).
 3. Remove the hand-maintained models array once the dynamic list looks correct.
 
 ## Elapsed time and TPS (TUI)

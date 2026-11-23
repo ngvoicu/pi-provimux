@@ -764,7 +764,7 @@ describe("provider startup cache behavior", () => {
 			writeConfig(agentDir, { baseUrl: "http://127.0.0.1:8317", apiKey: "key" });
 			writeFileSync(
 				join(agentDir, "settings.json"),
-				JSON.stringify({ defaultModel: "cliproxyapi/gemini-3.8-flash-high" }),
+				JSON.stringify({ defaultModel: "provimux/gemini-3.8-flash-high" }),
 				"utf8",
 			);
 			const cached = createMappedModels({
@@ -784,7 +784,7 @@ describe("provider startup cache behavior", () => {
 			});
 			const { pi, emit } = createPiMock();
 			const notify = vi.fn();
-			const ctx = { ui: { notify }, model: { id: "gemini-3.8-flash-high", provider: "cliproxyapi" } };
+			const ctx = { ui: { notify }, model: { id: "gemini-3.8-flash-high", provider: "provimux" } };
 
 			try {
 				await providerExtension(pi);
@@ -822,7 +822,7 @@ describe("provider startup cache behavior", () => {
 			writeConfig(agentDir, { baseUrl: "http://127.0.0.1:8317", apiKey: "key" });
 			writeFileSync(
 				join(agentDir, "settings.json"),
-				JSON.stringify({ defaultModel: "cliproxyapi/gemini-3.8-flash-high" }),
+				JSON.stringify({ defaultModel: "provimux/gemini-3.8-flash-high" }),
 				"utf8",
 			);
 			const cached = createMappedModels({
@@ -839,7 +839,7 @@ describe("provider startup cache behavior", () => {
 			});
 			const { pi, emit } = createPiMock();
 			const notify = vi.fn();
-			const ctx = { ui: { notify }, model: { id: "gemini-3.8-flash-high", provider: "cliproxyapi" } };
+			const ctx = { ui: { notify }, model: { id: "gemini-3.8-flash-high", provider: "provimux" } };
 
 			try {
 				await providerExtension(pi);
@@ -866,7 +866,7 @@ describe("provider startup cache behavior", () => {
 			// settings.json does not configure custom-model
 			writeFileSync(
 				join(agentDir, "settings.json"),
-				JSON.stringify({ defaultModel: "cliproxyapi/other-model" }),
+				JSON.stringify({ defaultModel: "provimux/other-model" }),
 				"utf8",
 			);
 			const cached = createMappedModels({
@@ -882,7 +882,7 @@ describe("provider startup cache behavior", () => {
 			});
 			const { pi, emit } = createPiMock();
 			const notify = vi.fn();
-			const ctx = { ui: { notify }, model: { id: "custom-model", provider: "cliproxyapi" } };
+			const ctx = { ui: { notify }, model: { id: "custom-model", provider: "provimux" } };
 
 			try {
 				await providerExtension(pi);
@@ -902,7 +902,7 @@ describe("provider startup cache behavior", () => {
 			writeConfig(agentDir, { baseUrl: "http://127.0.0.1:8317", apiKey: "key" });
 			writeFileSync(
 				join(agentDir, "settings.json"),
-				JSON.stringify({ defaultModel: "cliproxyapi/stale-default-model" }),
+				JSON.stringify({ defaultModel: "provimux/stale-default-model" }),
 				"utf8",
 			);
 			const cached = createMappedModels({
@@ -920,7 +920,7 @@ describe("provider startup cache behavior", () => {
 			const { pi, emit } = createPiMock();
 			const notify = vi.fn();
 			// Active model is active-model (not the stale one)
-			const ctx = { ui: { notify }, model: { id: "active-model", provider: "cliproxyapi" } };
+			const ctx = { ui: { notify }, model: { id: "active-model", provider: "provimux" } };
 
 			try {
 				await providerExtension(pi);
@@ -953,7 +953,7 @@ describe("provider startup cache behavior", () => {
 			const warnMock = vi.spyOn(console, "warn").mockImplementation(() => {});
 			const { pi, emit } = createPiMock();
 			const notify = vi.fn();
-			const ctx = { ui: { notify }, model: { id: "active-model", provider: "cliproxyapi" } };
+			const ctx = { ui: { notify }, model: { id: "active-model", provider: "provimux" } };
 
 			try {
 				await providerExtension(pi);
@@ -1093,7 +1093,7 @@ describe("provider startup cache behavior", () => {
 				ui: { notify: vi.fn() },
 				get model() {
 					if (isStale) throw new Error(staleErrorMsg);
-					return { id: "gpt-4o", provider: "cliproxyapi" };
+					return { id: "gpt-4o", provider: "provimux" };
 				},
 			};
 
@@ -1183,7 +1183,7 @@ describe("provider startup cache behavior", () => {
 			writeConfig(agentDir, { baseUrl: "http://127.0.0.1:8317", apiKey: "key" });
 			writeFileSync(
 				join(agentDir, "settings.json"),
-				JSON.stringify({ defaultModel: "cliproxyapi/gemini-3.8-flash-high" }),
+				JSON.stringify({ defaultModel: "provimux/gemini-3.8-flash-high" }),
 				"utf8",
 			);
 			process.env.CLIPROXYAPI_FAST = "true";
@@ -1215,7 +1215,7 @@ describe("provider startup cache behavior", () => {
 			});
 			const { pi, emit } = createPiMock();
 			const notify = vi.fn();
-			const ctx = { ui: { notify }, model: { id: "gemini-3.8-flash-high", provider: "cliproxyapi" } };
+			const ctx = { ui: { notify }, model: { id: "gemini-3.8-flash-high", provider: "provimux" } };
 
 			try {
 				await providerExtension(pi);
@@ -1265,7 +1265,7 @@ describe("/provimux-refresh command", () => {
 
 			await commands.get("provimux-refresh")!.handler("", ctx);
 			expect(notify).toHaveBeenCalledWith(
-				"Provimux is not configured. Use /login Provimux or /login cliproxyapi.",
+				"Provimux is not configured. Use /login Provimux or /login provimux.",
 				"error",
 			);
 		});
@@ -1320,7 +1320,7 @@ describe("/provimux-refresh command", () => {
 				await providerExtension(pi);
 				const refresh = commands.get("provimux-refresh")!;
 				const notify = vi.fn();
-				const model = { id: "refreshed", provider: "cliproxyapi" } as Model<Api>;
+				const model = { id: "refreshed", provider: "provimux" } as Model<Api>;
 				const ctx = { model, ui: { notify } } as unknown as ExtensionCommandContext;
 
 				await refresh.handler("", ctx);
@@ -1354,7 +1354,7 @@ describe("/provimux-refresh command", () => {
 				await providerExtension(pi);
 				const refresh = commands.get("provimux-refresh")!;
 				const notify = vi.fn();
-				const model = { id: "any", provider: "cliproxyapi" } as Model<Api>;
+				const model = { id: "any", provider: "provimux" } as Model<Api>;
 				const ctx = { model, ui: { notify } } as unknown as ExtensionCommandContext;
 
 				await refresh.handler("", ctx);
@@ -1399,7 +1399,7 @@ describe("/provimux-refresh command", () => {
 			try {
 				await providerExtension(pi);
 				const registerCalls = (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls;
-				const registerCall = registerCalls.find(([name, config]) => name === "cliproxyapi" && config.oauth?.login);
+				const registerCall = registerCalls.find(([name, config]) => name === "provimux" && config.oauth?.login);
 				expect(registerCall).toBeDefined();
 				const oauth = registerCall![1].oauth;
 
@@ -1469,7 +1469,7 @@ describe("/provimux-refresh command", () => {
 				expect(fetchCount).toBe(1);
 
 				const registerCalls = (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls;
-				const registerCall = registerCalls.find(([name, config]) => name === "cliproxyapi" && config.oauth?.login);
+				const registerCall = registerCalls.find(([name, config]) => name === "provimux" && config.oauth?.login);
 				expect(registerCall).toBeDefined();
 				const oauth = registerCall![1].oauth;
 
@@ -1520,7 +1520,7 @@ describe("/provimux-refresh command", () => {
 			const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network down"));
 			const { pi, emit } = createPiMock();
 			const notify = vi.fn();
-			const ctx = { ui: { notify }, model: { id: "gemini-3.8-flash-high", provider: "cliproxyapi" } };
+			const ctx = { ui: { notify }, model: { id: "gemini-3.8-flash-high", provider: "provimux" } };
 
 			try {
 				await providerExtension(pi);
@@ -1585,7 +1585,7 @@ describe("/provimux-refresh command", () => {
 				expect(fetchCount).toBe(2);
 
 				const registerCalls = (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls;
-				const registerCall = registerCalls.find(([name, config]) => name === "cliproxyapi" && config.oauth?.login);
+				const registerCall = registerCalls.find(([name, config]) => name === "provimux" && config.oauth?.login);
 				expect(registerCall).toBeDefined();
 				const oauth = registerCall![1].oauth;
 
@@ -1709,7 +1709,7 @@ describe("/provimux-refresh command", () => {
 				await emit("session_start", { reason: "startup" }, { ui: { notify: vi.fn() } });
 
 				const registerCalls = (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls;
-				const registerCall = registerCalls.find(([name, config]) => name === "cliproxyapi" && config.oauth?.login);
+				const registerCall = registerCalls.find(([name, config]) => name === "provimux" && config.oauth?.login);
 				expect(registerCall).toBeDefined();
 				const oauth = registerCall![1].oauth;
 
@@ -1791,7 +1791,7 @@ describe("/provimux-refresh command", () => {
 				expect(fetchCount).toBe(1);
 
 				const registerCalls = (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls;
-				const registerCall = registerCalls.find(([name, config]) => name === "cliproxyapi" && config.oauth?.login);
+				const registerCall = registerCalls.find(([name, config]) => name === "provimux" && config.oauth?.login);
 				expect(registerCall).toBeDefined();
 				const oauth = registerCall![1].oauth;
 
