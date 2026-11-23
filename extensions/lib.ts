@@ -399,6 +399,12 @@ export function saveModelsCache(agentDir: string, loaded: MappedModels, fetchedA
 	writeFileSync(cachePath, `${JSON.stringify({ ...loaded, fetchedAt }, null, 2)}\n`, "utf8");
 }
 
+/** The type of the login stored for the provider in pi's `auth.json` (`oauth`, `api_key`), if any. */
+export function loadAuthType(agentDir: string, providerId: string): string | undefined {
+	const type = readStoredCredential(providerId, join(agentDir, AUTH_FILE_NAME))?.type;
+	return typeof type === "string" ? type : undefined;
+}
+
 export function loadAuthConnection(agentDir: string, providerId: string): { baseUrl?: string; apiKey?: string } | null {
 	const entry = readStoredCredential(providerId, join(agentDir, AUTH_FILE_NAME));
 	if (entry?.type === "oauth" && typeof entry.access === "string" && entry.access.trim()) {

@@ -12,15 +12,25 @@
   included.
 - **What changes for an existing setup:**
   - the models show as `provimux/<id>`;
+  - in `settings.json`, `"defaultProvider": "cliproxyapi"` silently starts pi on another model: set
+    `"defaultProvider": "provimux"` with `"defaultModel": "<id>"`, or highlight the model in `/model` and press
+    Ctrl+S (Enter only switches the live model). An `enabledModels` entry `"cliproxyapi/<id>"` matches nothing:
+    change it to `"provimux/<id>"` by hand;
   - a session recorded on `cliproxyapi/<id>` does not get its model back when resumed. pi says
     `Could not restore model cliproxyapi/<id>. Using …` and goes on with the model it would start with. Pick
     `provimux/<id>` with `/model`;
-  - `--model cliproxyapi/<id>` must become `provimux/<id>`. So must a `defaultProvider` or `enabledModels` entry in
-    `settings.json` naming `cliproxyapi`: pi silently starts on another model for the first, and matches nothing
-    for the second;
+  - `--model cliproxyapi/<id>` must become `--model provimux/<id>` or `--provider provimux --model <id>`;
+  - a `providers.cliproxyapi` block in `models.json` (headers, `modelOverrides` such as thinking levels, windows,
+    prices) applies to nothing: rename it to `providers.provimux`. pi-cache-keeper moves its own values there by
+    itself at its next start and leaves only fields you set by hand under the old id;
   - a setup whose key is only in `auth.json` under `cliproxyapi` (no `apiKey` in `cliproxyapi.json`, no
     `CLIPROXYAPI_API_KEY`) needs one `/login provimux`;
   - `CLIPROXYAPI_PROVIDER_ID=cliproxyapi` keeps the old id for anyone who wants it, with its stored login.
+- **A login with "Sign in with an API key" keeps working after a restart.** pi offers that method when
+  `cliproxyapi.json` or `CLIPROXYAPI_API_KEY` holds a key and no account login is stored. Until now the next start
+  registered the provider without the API-key method, so pi said `Provider is not configured`, and a saved default
+  or a resumed session went to another provider (105.0.4 does the same under `cliproxyapi`). The API-key method is
+  now registered whenever the stored login is an API key.
 - **Unchanged:** the files `cliproxyapi.json` and `cliproxyapi-models.json`, the `CLIPROXYAPI_*` environment
   variables, the internal API name `cliproxyapi-codex-responses`, and `/provimux-refresh`.
 

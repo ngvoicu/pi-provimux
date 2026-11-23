@@ -113,16 +113,30 @@ migrates, and the old id is not kept as a second provider. What that means for a
 - **A key that is only in pi's `auth.json`, under `cliproxyapi`, is not read.** No `apiKey` in `cliproxyapi.json`
   and no `CLIPROXYAPI_API_KEY`: run `/login provimux` once. pi then stores the login under `provimux`. You can
   delete the old `cliproxyapi` entry from `auth.json`.
+- **Settings that name the old id match nothing.** In `~/.pi/agent/settings.json`:
+  - `"defaultProvider": "cliproxyapi"`: pi starts on another model, with no warning. Set `"defaultProvider":
+    "provimux"` and keep `"defaultModel": "<id>"` (the id alone, not `provimux/<id>`). Or, in `/model`, highlight
+    the model and press **Ctrl+S**: that saves it as the default. **Enter** only switches the model you are using
+    now, and the next start goes back to the saved default.
+  - an `enabledModels` entry `"cliproxyapi/<id>"`: pi prints `No models match pattern "cliproxyapi/<id>"`. Change
+    it to `"provimux/<id>"` by hand; Ctrl+S does not touch this list.
 - **A session recorded on `cliproxyapi/<id>` does not get its model back** when you resume it. pi says
   `Could not restore model cliproxyapi/<id>. Using <provider>/<model>` and goes on with the model it would start
   with. That can be another Provimux model, or another provider's model if you have logged in to one. Pick
-  `provimux/<id>` with `/model` before you send anything. pi 1.6.0 and newer also print that warning in `-p`,
-  JSON and RPC mode; older pi shows it only in the TUI.
-- **`--model cliproxyapi/<id>` is not found.** Write `--model provimux/<id>` (or `--provider provimux`).
-- **Settings that name the old id match nothing.** pi starts on another model, with no warning, when
-  `defaultProvider` is `cliproxyapi`. It prints `No models match pattern "cliproxyapi/<id>"` for an
-  `enabledModels` entry. Change them to `provimux` and `provimux/<id>` in `~/.pi/agent/settings.json`, or pick the
-  model again with `/model`.
+  `provimux/<id>` with `/model` (Enter) before you send anything. pi 1.6.0 and newer also print that warning in
+  `-p`, JSON and RPC mode; older pi shows it only in the TUI.
+- **`--model cliproxyapi/<id>` is not found.** Write `--model provimux/<id>`, or `--provider provimux --model <id>`
+  (`--provider` alone is refused: pi needs `--model` with it).
+- **`models.json` settings under `providers.cliproxyapi` apply to nothing.** pi keys them by provider id. Rename
+  the block in `~/.pi/agent/models.json` to `providers.provimux`. Left under the old id, everything in it is lost
+  for the `provimux` models: extra `headers` (a request that needs one then fails, for example with HTTP 401),
+  `modelOverrides` such as a `thinkingLevelMap` that adds a level (pi then offers and sends only the catalog's
+  levels), a `contextWindow`, `maxTokens` or prices.
+  - **pi-cache-keeper's values move by themselves.** pi-cache-keeper writes its `modelOverrides` (input window,
+    output limit, cache lifetimes, prices) under the provider id of each model pi lists. At its first start next to
+    105.0.5 it writes them under `providers.provimux`, and it takes its own values out of `providers.cliproxyapi`
+    (the models are gone). A field you set yourself is never touched, so it stays under `cliproxyapi`: move it by
+    hand. A block that ends up empty is removed.
 - **To keep the old id**, set `CLIPROXYAPI_PROVIDER_ID=cliproxyapi` in the environment pi runs in. The models are
   then listed under `cliproxyapi` as before, and the login stored under `cliproxyapi` in `auth.json` is used again.
   Set in the environment, it is your choice and is kept. In `cliproxyapi.json`, `"providerId": "cliproxyapi"` means
@@ -131,7 +145,9 @@ migrates, and the old id is not kept as a second provider. What that means for a
 
 ## Login-style setup (recommended)
 
-This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so Provimux appears under **Sign in with an account** (not API key).
+This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so Provimux appears under **Sign in with an account**.
+
+When `cliproxyapi.json` or `CLIPROXYAPI_API_KEY` already holds a key and no account login is stored, pi offers a second method too, **Sign in with an API key**. It asks only for the key and stores it in `auth.json`; the address stays the one in the file or the environment, and the file is not rewritten. Either method keeps working after a restart.
 
 ### Preferred: /login shortcuts
 
@@ -145,7 +161,7 @@ or, by the provider id:
 /login provimux
 ```
 
-(pi ignores case, so both name the same provider.) These shortcuts jump straight into the multi-field baseUrl + API key prompts. The provider is registered as OAuth-only, so pi does not ask you to choose between API key and account first.
+(pi ignores case, so both name the same provider.) These shortcuts jump straight into the multi-field baseUrl + API key prompts, unless pi also offers the API-key method (above): then it asks which one first.
 
 ### Menu path
 
@@ -173,7 +189,7 @@ On success:
 - `baseUrl` / `apiKey` are written to `~/.pi/agent/cliproxyapi.json`
 - pi also stores the returned credential in `~/.pi/agent/auth.json`
 
-Re-run `/login Provimux` or `/login cliproxyapi` anytime to reconfigure. The built-in `/logout` command only removes credentials saved in `auth.json`; it does not erase `cliproxyapi.json`. Remove or update that file if you also need to clear the provider configuration.
+Re-run `/login Provimux` or `/login provimux` anytime to reconfigure. The built-in `/logout` command only removes credentials saved in `auth.json`; it does not erase `cliproxyapi.json`. Remove or update that file if you also need to clear the provider configuration.
 
 ## Non-interactive configuration
 
@@ -467,7 +483,7 @@ How the routes are made:
 If you previously maintained a static provider such as `cpa-responses` in `~/.pi/agent/models.json`:
 
 1. Install this package and run `/login Provimux` or `/login provimux` (or set `cliproxyapi.json`).
-2. Point `defaultProvider` / `enabledModels` at `provimux/<model-id>` (or set `providerId` to `cpa-responses` for a drop-in id).
+2. Set `defaultProvider` to `provimux` with `defaultModel` `<model-id>`, and write `enabledModels` entries as `provimux/<model-id>` (or set `providerId` to `cpa-responses` for a drop-in id).
 3. Remove the hand-maintained models array once the dynamic list looks correct.
 
 ## Elapsed time and TPS (TUI)

@@ -56,15 +56,17 @@ export default function observe(pi: any) {
 		await ctx.modelRegistry.runtime.refresh({ signal: AbortSignal.timeout(20_000) });
 		note("picker", ctx.modelRegistry.getAvailable().map((m: any) => m.provider + "/" + m.id));
 	} });
-	// What /login's dialog does (pi's modelRuntime.login, "Sign in with an account"), answering its prompts.
+	// What /login's dialog does (pi's modelRuntime.login), answering its prompts: \`<provider> [oauth|api_key]\`, the
+	// method being "Sign in with an account" or "Sign in with an API key".
 	pi.registerCommand("observe-login", { description: "login", handler: async (args: string, ctx: any) => {
+		const [provider, method = "oauth"] = args.trim().split(" ");
 		const interaction = {
 			signal: AbortSignal.timeout(20_000),
 			prompt: async (prompt: any) => (/URL/.test(prompt.message) ? process.env.LOGIN_URL : process.env.LOGIN_KEY),
 			notify: () => {},
 		};
 		try {
-			const credential = await ctx.modelRegistry.runtime.login(args.trim(), "oauth", interaction);
+			const credential = await ctx.modelRegistry.runtime.login(provider, method, interaction);
 			note("login", credential.type);
 		} catch (error) {
 			note("login", String(error));
@@ -77,6 +79,16 @@ export default function observe(pi: any) {
 		if (process.env.ASK_ROUTES) pi.events.emit("model-upstreams:request", {});
 	});
 	pi.on("session_shutdown", (event: any) => note("shutdown", event.reason));
+	// Another provider with a key, when the case asks for one: what pi falls back to if Provimux is not configured.
+	if (process.env.OTHER_URL) {
+		pi.registerProvider("other-fixture", {
+			baseUrl: process.env.OTHER_URL,
+			apiKey: "other-key",
+			api: "openai-completions",
+			models: [{ id: "other-model", name: "other-model", reasoning: false, input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+		});
+	}
 }
 `;
 
@@ -118,6 +130,8 @@ interface SentRequest {
 	model: string;
 	/** The credential the request carried (`Authorization`, or Claude's `x-api-key`). */
 	key?: string;
+	/** The `X-Fixture-Tenant` header, which only a models.json override sends. */
+	tenant?: string;
 	effort?: string;
 	updates: string[];
 	status: number;
@@ -275,6 +289,13 @@ async function serve(req: IncomingMessage, res: ServerResponse) {
 		return;
 	}
 	const claude = url.pathname.endsWith("/messages");
+	if (url.pathname.startsWith("/other/")) {
+		// The other provider's endpoint: recorded, never answered.
+		requests.push({ path: url.pathname, model: "", updates: [], status: 500 });
+		res.writeHead(500, { "content-type": "application/json" });
+		res.end(JSON.stringify({ error: { message: "the other provider's fixture" } }));
+		return;
+	}
 	if (!claude && !url.pathname.endsWith("/responses")) {
 		res.writeHead(404);
 		res.end("{}");
@@ -299,7 +320,16 @@ async function serve(req: IncomingMessage, res: ServerResponse) {
 		[effort, ...updates].some((value) => value !== undefined && !model.levels.includes(value));
 	const authorization = req.headers.authorization ?? req.headers["x-api-key"];
 	const key = typeof authorization === "string" ? authorization.replace(/^Bearer\s+/i, "") : undefined;
-	requests.push({ path: url.pathname, model: body.model, key, effort, updates, status: unsupported ? 400 : 200 });
+	const tenant = typeof req.headers["x-fixture-tenant"] === "string" ? req.headers["x-fixture-tenant"] : undefined;
+	requests.push({
+		path: url.pathname,
+		model: body.model,
+		key,
+		tenant,
+		effort,
+		updates,
+		status: unsupported ? 400 : 200,
+	});
 	if (unsupported) {
 		res.writeHead(400, { "content-type": "application/json" });
 		res.end(JSON.stringify({ error: { message: "fixture rejected an unsupported reasoning effort" } }));
@@ -722,6 +752,88 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 			.filter((e) => e.type === "message" && e.message.role === "assistant")
 			.at(-1);
 		expect(answer?.message.provider).toBe("provimux");
+	});
+
+	for (const method of ["oauth", "api_key"]) {
+		it(`/login provimux, ${method === "oauth" ? "an account" : "an API key"}: works after a restart, and a saved default and a session stay on Provimux with another provider logged in`, async () => {
+			// The file holds a key and no login is stored: pi's /login provimux offers both methods.
+			writeFileSync(CONFIG(), JSON.stringify({ baseUrl: origin, apiKey: FILE_KEY }));
+			const env = { OTHER_URL: `${origin}/other/v1` };
+			const login = await pi(
+				["--no-session", "--model", `provimux/${GPT}`, "-p", `/observe-login provimux ${method}`],
+				{
+					env: { ...env, LOGIN_URL: origin, LOGIN_KEY },
+				},
+			);
+			expect(
+				login.events.filter((e) => e.event === "login").map((e) => e.payload),
+				said(login),
+			).toEqual([method]);
+			expect(JSON.parse(readFileSync(AUTH(), "utf8")).provimux?.type).toBe(method);
+
+			// A restart, with the model named.
+			const named = await pi(["--no-session", "--model", `provimux/${GPT}`, "-p", "say hi"], { env });
+			expect(named.code, said(named)).toBe(0);
+			expect(named.requests.map((r) => [r.path, r.key])).toEqual([["/backend-api/codex/responses", LOGIN_KEY]]);
+
+			// A saved default, with no --model.
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ defaultProvider: "provimux", defaultModel: GPT }),
+			);
+			const saved = await pi(["--no-session", "-p", "say hi"], { env });
+			expect(saved.code, said(saved)).toBe(0);
+			expect(saved.requests.map((r) => [r.path, r.model, r.key])).toEqual([
+				["/backend-api/codex/responses", GPT, LOGIN_KEY],
+			]);
+
+			// A session on provimux/<id>, resumed.
+			const sessions = ["--session-dir", join(root, `sessions-${method}`)];
+			const first = await pi([...sessions, "--model", `provimux/${OPUS}`, "-p", "first"], { env });
+			expect(
+				first.requests.map((r) => [r.model, r.key]),
+				said(first),
+			).toEqual([[OPUS, LOGIN_KEY]]);
+			const resumed = await pi([...sessions, "-c", "-p", "second"], { env });
+			expect(resumed.code, said(resumed)).toBe(0);
+			expect(resumed.stderr).not.toContain("Could not restore");
+			expect(resumed.requests.map((r) => [r.model, r.key])).toEqual([[OPUS, LOGIN_KEY]]);
+		});
+	}
+
+	it("the README's steps for an existing setup: settings, --provider, models.json under provimux", async () => {
+		ownerShaped();
+		const env = { OTHER_URL: `${origin}/other/v1` };
+		// settings.json moved to the new id: a default (provider and model apart), and a scope.
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ defaultProvider: "provimux", defaultModel: GPT, enabledModels: [`provimux/${GPT}`] }),
+		);
+		// models.json: the block under the old id applies to nothing; renamed to provimux, it applies.
+		const overrides = { modelOverrides: { [GPT]: { headers: { "X-Fixture-Tenant": "t1" }, contextWindow: 99000 } } };
+		writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: { cliproxyapi: overrides } }));
+		const old = await pi(["--no-session", "-p", "say hi"], { env });
+		expect(old.code, said(old)).toBe(0);
+		expect(old.stderr).not.toContain("No models match pattern");
+		expect(old.requests.map((r) => [r.model, r.key, r.tenant])).toEqual([[GPT, FILE_KEY, undefined]]);
+
+		writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: { provimux: overrides } }));
+		const moved = await pi(["--no-session", "-p", "say hi"], { env });
+		expect(moved.code, said(moved)).toBe(0);
+		expect(moved.requests.map((r) => [r.model, r.key, r.tenant])).toEqual([[GPT, FILE_KEY, "t1"]]);
+		const list = await pi(["--list-models"]);
+		expect(
+			listRows(list).find((row) => row.includes(GPT)),
+			said(list),
+		).toMatch(/\b99K\b/);
+
+		// --provider needs --model; with it, the id alone names the model.
+		const alone = await pi(["--no-session", "--provider", "provimux", "-p", "say hi"], { env });
+		expect(alone.code).not.toBe(0);
+		expect(alone.stderr).toContain("--provider requires --model");
+		const both = await pi(["--no-session", "--provider", "provimux", "--model", OPUS, "-p", "say hi"], { env });
+		expect(both.code, said(both)).toBe(0);
+		expect(both.requests.map((r) => r.model)).toEqual([OPUS]);
 	});
 
 	it("a key stored only in auth.json under cliproxyapi is not used: no models until one /login provimux", async () => {
