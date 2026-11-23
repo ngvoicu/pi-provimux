@@ -952,7 +952,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}, DEFAULT_AUTO_RECOVERY_DELAY_MS);
 	};
 
+	/** The last model list (fetched, or the cache it was saved to) listed credentials: the proxy names what answers. */
+	let listsCredentials = false;
 	const handleRefreshOutcome = (loaded: MappedModels): void => {
+		listsCredentials = loaded.listsCredentials === true;
 		const staleModels = loaded.models.filter((m) => m.stale);
 		latestStaleModelIds = staleModels.map((m) => m.id);
 
@@ -995,7 +998,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const message = error instanceof Error ? error.message : String(error);
 		logWarn(`invalid answered configuration (${message}); using answered=true`);
 	}
-	if (answeredEnabled) registerAnsweredFooter(pi, identity.providerId, () => upstreams.namesAnswers());
+	if (answeredEnabled)
+		registerAnsweredFooter(pi, identity.providerId, () => listsCredentials || upstreams.namesAnswers());
 	// The Claude Messages models are sent by pi-ai's own implementation: their requests get their own callbacks there.
 	try {
 		const { getApiProvider } = await import("@earendil-works/pi-ai/compat");
@@ -1095,6 +1099,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			});
 
 			if (fromCache) {
+				listsCredentials = loaded.listsCredentials === true;
 				const cachedStaleModels = loaded.models.filter((m) => m.stale);
 				if (cachedStaleModels.length > 0) {
 					latestStaleModelIds = cachedStaleModels.map((m) => m.id);

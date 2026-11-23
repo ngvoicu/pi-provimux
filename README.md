@@ -366,16 +366,22 @@ answered: Anthropic api
 answered: OpenRouter api
 ```
 
+It only ever shows the route that produced the answer you see.
+
 - It is read from the answer itself: the `X-CPA-AUTH-*` response headers, or on the Codex WebSocket the `cpa_auth_*`
   fields of the turn's `response.created`. No other extension is needed.
+- When pi tries a request again (an HTTP 429, or a Codex WebSocket continuation replayed on a fresh socket), the
+  attempt that answered counts, not the first.
+- Only an answer changes it: a turn that completed (or calls tools) with something in it. A failed, aborted or empty
+  turn leaves it as it was.
 - Whatever routes an install has and however it orders them, the footer names the one that answered: the credential
   list and its priorities play no part, and a route that is not in the list is named all the same.
 - Only the session's own turns count: pi's cache warmer and other extensions' requests, which can run at the same
   time, never change it.
-- `answered: unknown`: the proxy names answers, but not this one (Provimux leaves an answer unnamed when plugin code
-  took part in it; an older Provimux names only the kind).
+- `answered: unknown`: the proxy names answers (its model list lists credentials, as Provimux's does), but not this
+  one (Provimux leaves an answer unnamed when plugin code took part in it; an older Provimux names only the kind).
 - Nothing from a proxy that names no answer (plain CLIProxyAPI), and nothing while a model of another provider is
-  selected or answers.
+  selected or answers, even for a Provimux answer that ends after the switch.
 
 Set `"answered": false` in `~/.pi/agent/cliproxyapi.json` to turn it off (takes effect on the next start or
 `/reload`).

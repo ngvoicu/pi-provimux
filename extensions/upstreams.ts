@@ -286,22 +286,20 @@ function statements(): WeakMap<object, Statement> {
 	return global[STATEMENTS_KEY];
 }
 
-const ANSWERS_KEY = Symbol.for("pi-provimux.answered-messages");
-
 /**
- * The message each request ended with → what its answer said. Keyed by the message itself, which pi's agent loop takes
- * from the request's stream and hands to `message_end` as it is: only the session's own turns get there, never pi's
- * cache warmer or another extension's request. Shared by every copy of this module in the process.
+ * Where a message carries what its answer said: an own property under a symbol shared by every copy of this module,
+ * set on the message pi's agent loop takes from the request's stream and hands to `message_end`. Only the session's
+ * own turns get there, never pi's cache warmer or another extension's request. An own enumerable property: a shallow
+ * copy (`{ ...message }`, as another extension's `message_end` handler may return) keeps it; JSON (the session file)
+ * drops it.
  */
-function answers(): WeakMap<object, Statement> {
-	const global = globalThis as { [ANSWERS_KEY]?: WeakMap<object, Statement> };
-	global[ANSWERS_KEY] ??= new WeakMap();
-	return global[ANSWERS_KEY];
-}
+const ANSWER = Symbol.for("pi-provimux.answer");
 
 /** What the answer a message came from said answered it; undefined when it is not a message of this provider's stream. */
 export function answerOf(message: unknown): Statement | undefined {
-	return isRecord(message) ? answers().get(message) : undefined;
+	if (!isRecord(message)) return undefined;
+	const said = (message as Record<symbol, unknown>)[ANSWER];
+	return isRecord(said) ? (said as unknown as Statement) : undefined;
 }
 
 /** Keeps what a request's answer said with the message its stream ends with (`answerOf`). */
@@ -312,7 +310,7 @@ function keepWithMessage(stream: unknown, said: () => Statement | undefined): vo
 		Promise.resolve((result as () => unknown).call(stream)).then(
 			(message) => {
 				const statement = said();
-				if (statement && isRecord(message)) answers().set(message, statement);
+				if (statement && isRecord(message)) (message as Record<symbol, unknown>)[ANSWER] = statement;
 			},
 			() => {},
 		);
@@ -338,7 +336,12 @@ export function answeredOptions<T extends AnswerCallbacks<never> | undefined>(op
 	return keptOptions(options).options;
 }
 
-/** `answeredOptions`, and what the answer said, once it said it (for the message the request ends with). */
+/**
+ * `answeredOptions`, and what the answer the request ends with said (for its message): the attempt that answered, not
+ * the first. pi-ai can try a request again inside one call (an HTTP 429; a Codex WebSocket continuation the proxy lost,
+ * replayed on a fresh socket), and each attempt may be served by another route. Over HTTP: the last response's headers.
+ * Without headers (the Codex WebSocket): the last response.created's fields.
+ */
 function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 	options: T,
 ): { options: T; said: () => Statement | undefined } {
@@ -348,6 +351,7 @@ function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 	const onResponse = options.onResponse;
 	let headers: Record<string, string> | undefined;
 	let told = false;
+	/** What the latest attempt said. */
 	let said: Statement | undefined;
 	const header = (wanted: string) =>
 		headers && Object.entries(headers).find(([name]) => name.toLowerCase() === wanted)?.[1];
@@ -356,25 +360,21 @@ function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 		onResponse: (response: { status: number; headers: Record<string, string> }, model: never) => {
 			// A retried request: the last response is the one whose body is read.
 			headers = response.headers ?? {};
+			said = {
+				kind: header(AUTH_KIND_HEADER),
+				provider: header(AUTH_PROVIDER_HEADER),
+				host: header(AUTH_HOST_HEADER),
+			};
 			return onResponse?.(response, model);
 		},
 		onProviderStreamEvent: (data: unknown, model: never) => {
-			if (!told && isRecord(data)) {
-				if (headers) {
+			if (isRecord(data)) {
+				// Over HTTP the headers alone count: a body's own fields are an inner gateway's.
+				if (!headers && data.type === "response.created")
+					said = { kind: data[AUTH_KIND_FIELD], provider: data[AUTH_PROVIDER_FIELD], host: data[AUTH_HOST_FIELD] };
+				// The event is told once per request, with its first statement.
+				if (!told && said && (headers || data.type === "response.created")) {
 					told = true;
-					said = {
-						kind: header(AUTH_KIND_HEADER),
-						provider: header(AUTH_PROVIDER_HEADER),
-						host: header(AUTH_HOST_HEADER),
-					};
-					statements().set(data, said);
-				} else if (data.type === "response.created") {
-					told = true;
-					said = {
-						kind: data[AUTH_KIND_FIELD],
-						provider: data[AUTH_PROVIDER_FIELD],
-						host: data[AUTH_HOST_FIELD],
-					};
 					statements().set(data, said);
 				}
 			}

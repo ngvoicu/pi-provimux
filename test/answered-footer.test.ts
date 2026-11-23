@@ -6,9 +6,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { answeredStatus } from "../extensions/answered-footer.ts";
+import { answeredStatus, isAnswer } from "../extensions/answered-footer.ts";
 import { resolveAnsweredDefault } from "../extensions/lib.ts";
 import { answerLabel, sourceLabel } from "../extensions/sources.ts";
+import { type AnswerCallbacks, answeredStream, answerOf } from "../extensions/upstreams.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -56,6 +57,95 @@ describe("the footer's words for what answered", () => {
 	it("only the kind (an older Provimux): unknown", () => {
 		expect(answeredStatus({ kind: "oauth", provider: undefined, host: undefined }, false)).toBe("answered: unknown");
 		expect(answeredStatus({ kind: "apikey", provider: 42, host: undefined }, false)).toBe("answered: unknown");
+	});
+});
+
+describe("an answer the user sees", () => {
+	const text = (value: string) => ({ type: "text", text: value });
+	it("completed or calling tools, with something in it", () => {
+		expect(isAnswer({ stopReason: "stop", content: [text("ok")] })).toBe(true);
+		expect(
+			isAnswer({ stopReason: "toolUse", content: [{ type: "toolCall", id: "1", name: "x", arguments: {} }] }),
+		).toBe(true);
+		expect(isAnswer({ stopReason: "stop", content: [{ type: "thinking", thinking: "hm" }] })).toBe(true);
+	});
+	it("not: failed, aborted, cut short, or empty", () => {
+		for (const stopReason of ["error", "aborted", "length", undefined])
+			expect(isAnswer({ stopReason, content: [text("ok")] })).toBe(false);
+		expect(isAnswer({ stopReason: "stop", content: [] })).toBe(false);
+		expect(isAnswer({ stopReason: "stop", content: [text("  "), { type: "thinking", thinking: "" }] })).toBe(false);
+		expect(isAnswer({ stopReason: "stop" })).toBe(false);
+	});
+});
+
+describe("what answered, carried by the message", () => {
+	/** One request through `answeredStream`: `events` play the provider's part; resolves with its message. */
+	type Callbacks = Required<AnswerCallbacks<unknown>>;
+	async function request(events: (options: Callbacks) => void) {
+		const message = { role: "assistant", content: [] };
+		const stream = answeredStream((_model: unknown, _context: unknown, options: Callbacks) => {
+			events(options);
+			return { result: () => Promise.resolve(message) };
+		});
+		await stream({}, {}, { onResponse: () => {}, onProviderStreamEvent: () => {} }).result();
+		await Promise.resolve();
+		return message;
+	}
+
+	it("a shallow copy of the message still says it; the session file does not", async () => {
+		const message = await request((options) => {
+			options.onResponse(
+				{ status: 200, headers: { "X-CPA-AUTH-KIND": "oauth", "X-CPA-AUTH-PROVIDER": "devin" } },
+				{},
+			);
+			options.onProviderStreamEvent({ type: "message_start" }, {});
+		});
+		const said = { kind: "oauth", provider: "devin", host: undefined };
+		expect(answerOf(message)).toEqual(said);
+		expect(answerOf({ ...message })).toEqual(said);
+		expect(answerOf(JSON.parse(JSON.stringify(message)))).toBeUndefined();
+		expect(answerOf({ role: "assistant" })).toBeUndefined();
+	});
+
+	it("a retried request: the last response's headers", async () => {
+		const message = await request((options) => {
+			options.onResponse(
+				{ status: 429, headers: { "X-CPA-AUTH-KIND": "oauth", "X-CPA-AUTH-PROVIDER": "devin" } },
+				{},
+			);
+			const named = {
+				"x-cpa-auth-kind": "apikey",
+				"x-cpa-auth-provider": "claude",
+				"x-cpa-auth-host": "api.anthropic.com",
+			};
+			options.onResponse({ status: 200, headers: named }, {});
+			options.onProviderStreamEvent({ type: "message_start" }, {});
+		});
+		expect(answerOf(message)).toEqual({ kind: "apikey", provider: "claude", host: "api.anthropic.com" });
+	});
+
+	it("a WebSocket replay: the last response.created's fields", async () => {
+		const message = await request((options) => {
+			options.onProviderStreamEvent(
+				{ type: "response.created", cpa_auth_kind: "oauth", cpa_auth_provider: "devin" },
+				{},
+			);
+			options.onProviderStreamEvent({ type: "response.failed" }, {});
+			options.onProviderStreamEvent(
+				{
+					type: "response.created",
+					cpa_auth_kind: "apikey",
+					cpa_auth_provider: "openai-compatible-openrouter",
+					cpa_auth_host: "openrouter.ai",
+				},
+				{},
+			);
+		});
+		expect(answerOf(message)).toEqual({
+			kind: "apikey",
+			provider: "openai-compatible-openrouter",
+			host: "openrouter.ai",
+		});
 	});
 });
 

@@ -4,15 +4,19 @@
  *
  * Through Provimux one model name can be served by several routes (subscription logins, API keys, OpenRouter …), and
  * each answer names the credential that served it (`X-CPA-AUTH-*` headers, or the `cpa_auth_*` fields of a Codex
- * WebSocket turn's response.created). Each request keeps what its answer said with the message it ends with
- * (`answerOf`); pi hands only the session's own turns to `message_end`, so pi's cache warmer and other extensions'
- * requests, which overlap the turns, never change what the footer says.
+ * WebSocket turn's response.created). Each request keeps what the attempt that answered said with the message it ends
+ * with (`answerOf`); pi hands only the session's own turns to `message_end`, so pi's cache warmer and other
+ * extensions' requests, which overlap the turns, never change what the footer says.
  *
+ * The footer only ever shows the route that produced the answer the user sees:
+ * - Only an answer: a turn that completed (`stop`, or `toolUse`) with something in it. A failed, aborted or empty turn
+ *   leaves the footer as it was, whatever its attempt said.
  * - The answer names a credential: `answered: <service> <sub|api>`, in the words of the model names (`sourceLabel`).
- * - It names nobody, from a proxy that names answers (it lists its credentials, or named an answer before in this
- *   session), or gives only the kind: `answered: unknown`.
+ * - It names nobody, from a proxy that names answers (its model list lists credentials, or it named an answer before
+ *   in this session), or gives only the kind: `answered: unknown`.
  * - It names nobody, from a proxy that names no answer (plain CLIProxyAPI): nothing.
- * - Another provider's model (selected, or answering a turn): nothing.
+ * - Another provider's model (selected, or answering a turn): nothing; a turn of this provider that ends after another
+ *   provider's model was selected leaves it so.
  *
  * Works on its own: no other extension has to ask for the routes (`model-upstreams:request`).
  */
@@ -42,6 +46,22 @@ interface AnsweredMessage {
 	role?: unknown;
 	provider?: unknown;
 	stopReason?: unknown;
+	content?: unknown;
+}
+
+/** A block the user sees: text or thinking with something in it, a tool call, anything else pi shows. */
+function shown(block: unknown): boolean {
+	if (!block || typeof block !== "object") return false;
+	const { type, text: said, thinking } = block as { type?: unknown; text?: unknown; thinking?: unknown };
+	if (type === "text") return !!text(said);
+	if (type === "thinking") return !!text(thinking);
+	return typeof type === "string";
+}
+
+/** An answer the user sees: completed, or calling tools, with something in it. */
+export function isAnswer(message: AnsweredMessage): boolean {
+	if (message.stopReason !== "stop" && message.stopReason !== "toolUse") return false;
+	return Array.isArray(message.content) && message.content.some(shown);
 }
 
 /**
@@ -67,17 +87,27 @@ export function registerAnsweredFooter(
 		}
 	};
 
+	/** Whether the session's model is now one of this provider's: an answer that ends later shows on no other. */
+	const ownModel = (ctx: ExtensionContext) => {
+		try {
+			return isOwn(ctx.model?.provider);
+		} catch {
+			return false;
+		}
+	};
+
 	pi.on("message_end", (event, ctx) => {
 		const message = event.message as AnsweredMessage;
 		if (message.role !== "assistant") return;
-		if (typeof message.provider !== "string" || !isOwn(message.provider)) {
+		// No answer the user sees (failed, aborted, empty): what answered last still stands.
+		if (!isAnswer(message)) return;
+		if (typeof message.provider !== "string" || !isOwn(message.provider) || !ownModel(ctx)) {
 			show(ctx, undefined);
 			return;
 		}
 		const said = answerOf(message);
+		// An answer nothing was heard about: nothing to say.
 		if (!said) {
-			// No answer came (a refused or failed request, a compaction): what answered last still stands.
-			if (message.stopReason === "error" || message.stopReason === "aborted") return;
 			show(ctx, undefined);
 			return;
 		}

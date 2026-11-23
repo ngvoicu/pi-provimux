@@ -167,6 +167,8 @@ export interface MappedModels {
 	modelsUrl: string;
 	fastMode?: boolean;
 	claudeMessages?: ClaudeMessagesMode | boolean;
+	/** The proxy listed the credentials that serve its models (`?include=accounts`): it names what answers. */
+	listsCredentials?: boolean;
 }
 
 export interface ModelsCacheFile extends MappedModels {
@@ -1211,6 +1213,7 @@ export async function loadMappedModels(
 		modelsUrl: endpoints.modelsUrl,
 		...(pricingEnabled ? { fastMode: effectiveFastMode } : {}),
 		...(claudeWanted ? { claudeMessages: claudeMode } : {}),
+		...(sources.accounts.size > 0 ? { listsCredentials: true } : {}),
 	};
 }
 
