@@ -107,6 +107,17 @@ function sourcesOf(accounts: Account[]): Source[] {
 }
 
 /**
+ * What answered a request, in the words of `sourceLabel`: "Anthropic sub", "Devin sub", "OpenRouter api". From the
+ * credential the answer names: its provider (any letter case), its kind and, for an API key with a base URL, its host.
+ */
+export function answerLabel(credential: { provider: string; kind: string; host?: string }): string {
+	const kind = credential.kind.trim().toLowerCase();
+	const host = credential.host?.trim().toLowerCase();
+	const [source] = sourcesOf([{ provider: credential.provider, kind, priority: 0, ...(host ? { host } : {}) }]);
+	return `${source!.service} ${source!.kind}`;
+}
+
+/**
  * Where a model comes from, for its name: "Anthropic sub, fallback api". First what CLIProxyAPI may answer with (the
  * credentials at the highest priority, joined by "or" when they differ), then what it falls back to, highest priority
  * first. "sub" is a subscription login, "api" an API key; a service is named again only when it changes. Undefined

@@ -28,6 +28,7 @@ import type {
 	StreamFunction,
 } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { registerAnsweredFooter } from "./answered-footer.ts";
 import { ProactiveCompactionController } from "./auto-compact.ts";
 import {
 	CLIPROXYAPI_CODEX_API,
@@ -52,6 +53,7 @@ import {
 	loadConfiguredDefaultSettings,
 	type MappedModels,
 	type PiProviderModel,
+	resolveAnsweredDefault,
 	resolveClaudeMessagesDefault,
 	resolveConnection,
 	resolveEndpoints,
@@ -950,7 +952,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}, DEFAULT_AUTO_RECOVERY_DELAY_MS);
 	};
 
+	/** The last model list (fetched, or the cache it was saved to) listed credentials: the proxy names what answers. */
+	let listsCredentials = false;
 	const handleRefreshOutcome = (loaded: MappedModels): void => {
+		// Only a credential lookup that answered (or the cache it was saved to) changes what is known.
+		if (typeof loaded.listsCredentials === "boolean") listsCredentials = loaded.listsCredentials;
 		const staleModels = loaded.models.filter((m) => m.stale);
 		latestStaleModelIds = staleModels.map((m) => m.id);
 
@@ -985,6 +991,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		resolveConnection(agentDir, identity.providerId),
 	);
 	upstreams.register();
+	// The footer says which route answered each of the session's turns: on by default, `"answered": false` turns it off.
+	let answeredEnabled = true;
+	try {
+		answeredEnabled = resolveAnsweredDefault(agentDir);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		logWarn(`invalid answered configuration (${message}); using answered=true`);
+	}
+	if (answeredEnabled)
+		registerAnsweredFooter(pi, identity.providerId, () => listsCredentials || upstreams.namesAnswers());
 	// The Claude Messages models are sent by pi-ai's own implementation: their requests get their own callbacks there.
 	try {
 		const { getApiProvider } = await import("@earendil-works/pi-ai/compat");
@@ -1084,6 +1100,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			});
 
 			if (fromCache) {
+				// Only a credential lookup that answered (or the cache it was saved to) changes what is known.
+				if (typeof loaded.listsCredentials === "boolean") listsCredentials = loaded.listsCredentials;
 				const cachedStaleModels = loaded.models.filter((m) => m.stale);
 				if (cachedStaleModels.length > 0) {
 					latestStaleModelIds = cachedStaleModels.map((m) => m.id);

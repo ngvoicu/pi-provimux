@@ -221,6 +221,7 @@ Optional fields:
 | `fast` | `false` | Persisted speed preference: `false` (off), `true` (Fast), or `"ultrafast"` (Ultra Fast) |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
 | `tps` | `true` | Show the elapsed time footer and TPS summary in the TUI; see [Elapsed time and TPS](#elapsed-time-and-tps-tui) |
+| `answered` | `true` | Show in the footer which route answered the last turn; see [Which route answered, in the footer](#which-route-answered-in-the-footer) |
 | `claudeMessages` | `"auto"` | When Claude models use Claude's own format: `"auto"`, `true` (always) or `false` (never); see [Claude Messages format](#claude-messages-format) |
 
 ### Environment overrides
@@ -400,6 +401,38 @@ anthropic/claude-opus-5.5 · OpenRouter api
 pi shows a model's name in `/model` beside its id and searches it, and its model patterns (`--model`, scoped models)
 also match names: `openrouter` now matches every model that comes from OpenRouter, not only ids that contain the
 word.
+
+## Which route answered, in the footer
+
+Provimux can serve one model name through several routes (subscription logins, API keys, OpenRouter …). After each
+answer on a Provimux model, the footer says which one answered it, in the words of the model names:
+
+```
+answered: Anthropic sub
+answered: Devin sub
+answered: Anthropic api
+answered: OpenRouter api
+```
+
+It only ever shows the route that produced the answer you see.
+
+- It is read from the answer itself: the `X-CPA-AUTH-*` response headers, or on the Codex WebSocket the `cpa_auth_*`
+  fields of the turn's `response.created`. No other extension is needed.
+- When pi tries a request again (an HTTP 429, or a Codex WebSocket continuation replayed on a fresh socket), only
+  what the attempt that answered said counts: an attempt that names nobody is unnamed, whatever an earlier one said.
+- Only an answer changes it: a turn that completed (or calls tools) with something in it. A failed, aborted or empty
+  turn leaves it as it was.
+- Whatever routes an install has and however it orders them, the footer names the one that answered: the credential
+  list and its priorities play no part, and a route that is not in the list is named all the same.
+- Only the session's own turns count: pi's cache warmer and other extensions' requests, which can run at the same
+  time, never change it.
+- `answered: unknown`: the proxy names answers (its model list lists credentials, as Provimux's does; a lookup of the
+  list that fails changes nothing), but not this one (Provimux leaves an answer unnamed when plugin code took part in it; an older Provimux names only the kind).
+- Nothing from a proxy that names no answer (plain CLIProxyAPI), and nothing while a model of another provider is
+  selected or answers, even for a Provimux answer that ends after the switch.
+
+Set `"answered": false` in `~/.pi/agent/cliproxyapi.json` to turn it off (takes effect on the next start or
+`/reload`).
 
 ## Where each model comes from (for other extensions)
 

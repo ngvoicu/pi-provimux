@@ -9,7 +9,7 @@
  * The order forced in each case is the one where a shared slot goes wrong: the second request's headers arrive before
  * the first request's first stream event.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -28,7 +28,10 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { ANSWERED_STATUS_KEY } from "../extensions/answered-footer.ts";
 import providerExtension from "../extensions/index.ts";
+import { MODELS_CACHE_FILE_NAME, resolveMappedModels } from "../extensions/lib.ts";
+import type { Account } from "../extensions/sources.ts";
 import { ANSWERED_EVENT, REQUEST_EVENT, UPSTREAMS_EVENT } from "../extensions/upstreams.ts";
 import { acceptWebSocket } from "./websocket-fixture.ts";
 
@@ -54,6 +57,8 @@ async function until(what: string, ready: () => boolean, ms = 8_000) {
 interface Plan {
 	headers?: Record<string, string>;
 	created?: Record<string, string>;
+	/** Codex WebSocket: the answer (or a replay's answer) comes without response.created, as a relayed upstream may send it. */
+	noCreated?: boolean;
 }
 
 /** A request the proxy holds: the test sends its headers, then its body, when it chooses. */
@@ -78,8 +83,46 @@ const INNER_GATEWAY = {
 
 const plans = new Map<string, Plan>();
 const held = new Map<string, Held>();
+/** How many times the proxy was asked for its credential list (`?include=accounts`), and answered it. */
+let listHits = 0;
+let accountsAnswered = 0;
+/** The credential list's answer: a failure status instead of the list; held until released. */
+let accountsStatus: number | undefined;
+let accountsHold: { promise: Promise<void>; resolve: () => void } | undefined;
+/** Holds the next credential lookups until the test releases them. */
+function holdAccounts() {
+	let resolve = () => {};
+	const promise = new Promise<void>((release) => {
+		resolve = release;
+	});
+	accountsHold = { promise, resolve };
+	return resolve;
+}
+/** Attempts per request marker: a retry is a second attempt with the same marker. */
+const attempts = new Map<string, number>();
+/** WebSocket requests: [marker, previous_response_id, the socket's client port]. */
+const wsRequests: Array<[string, string, number]> = [];
+const attempt = (id: string) => {
+	const count = (attempts.get(id) ?? 0) + 1;
+	attempts.set(id, count);
+	return count;
+};
 /** Requests the proxy answers at once, headers and body. */
 const immediate = new Set<string>();
+
+/** The credentials the proxy lists for its models, as an install configured them; "plain": it lists none. */
+type Listing = { claude: Account[]; codex: Account[] } | "plain";
+const DEFAULT_LISTING = {
+	claude: [
+		{ provider: "claude", kind: "oauth", priority: 0 },
+		{ provider: "claude", kind: "apikey", priority: 0 },
+	],
+	codex: [
+		{ provider: "codex", kind: "oauth", priority: 0 },
+		{ provider: "codex", kind: "apikey", priority: 0 },
+	],
+};
+let listing: Listing = DEFAULT_LISTING;
 
 function claudeFrames(id: string) {
 	return [
@@ -134,7 +177,8 @@ function codexFrames(id: string, created: Record<string, unknown>) {
 
 /** Which request a body is: the marker `#<id>` in its prompt; a one-token replay is the cache warmer's. */
 function idOf(body: string): string {
-	const marker = /#([a-z]+)/.exec(body)?.[1] ?? "unknown";
+	// The last marker: a session's later turns carry the earlier ones in their history.
+	const marker = [...body.matchAll(/#([a-z]+)/g)].at(-1)?.[1] ?? "unknown";
 	return /"max_tokens":1[,}]/.test(body) ? `${marker}-warm` : marker;
 }
 
@@ -166,24 +210,47 @@ function serveHttp(req: IncomingMessage, res: ServerResponse) {
 	req.on("data", (chunk: Buffer) => chunks.push(chunk));
 	req.on("end", () => {
 		const url = new URL(req.url ?? "/", "http://fixture");
-		if (req.method === "GET" && url.pathname === "/v1/models") {
-			res.writeHead(200, { "content-type": "application/json" });
-			if (url.searchParams.get("include") === "accounts") {
-				const claude = [
-					{ provider: "claude", kind: "oauth", priority: 0 },
-					{ provider: "claude", kind: "apikey", priority: 0 },
-				];
-				const codex = [
-					{ provider: "codex", kind: "oauth", priority: 0 },
-					{ provider: "codex", kind: "apikey", priority: 0 },
-				];
+		if (req.method === "GET" && url.pathname === "/v1/models" && url.searchParams.get("include") === "accounts") {
+			// The credential lookup, as the test lets it: held, or failing with a status.
+			void (async () => {
+				listHits++;
+				await accountsHold?.promise;
+				if (accountsStatus) {
+					res.writeHead(accountsStatus, { "content-type": "application/json" });
+					res.end(JSON.stringify({ error: { message: "fixture: credential list unavailable" } }));
+					accountsAnswered++;
+					return;
+				}
+				res.writeHead(200, { "content-type": "application/json" });
+				const accounts = (list: Account[]) => (listing === "plain" ? {} : { accounts: list });
+				const { claude, codex } = listing === "plain" ? DEFAULT_LISTING : listing;
 				res.end(
 					JSON.stringify({
 						object: "list",
 						data: [
-							{ id: CLAUDE, object: "model", owned_by: "anthropic", accounts: claude },
-							{ id: GPT, object: "model", owned_by: "openai", accounts: codex },
-							{ id: GPT_HELPER, object: "model", owned_by: "openai", accounts: codex },
+							{ id: CLAUDE, object: "model", owned_by: "anthropic", ...accounts(claude) },
+							{ id: GPT, object: "model", owned_by: "openai", ...accounts(codex) },
+							{ id: GPT_HELPER, object: "model", owned_by: "openai", ...accounts(codex) },
+						],
+					}),
+				);
+				accountsAnswered++;
+			})();
+			return;
+		}
+		if (req.method === "GET" && url.pathname === "/v1/models") {
+			res.writeHead(200, { "content-type": "application/json" });
+			if (url.searchParams.get("include") === "accounts") {
+				// A plain CLIProxyAPI does not know the parameter: its plain list, with no credentials.
+				const accounts = (list: Account[]) => (listing === "plain" ? {} : { accounts: list });
+				const { claude, codex } = listing === "plain" ? DEFAULT_LISTING : listing;
+				res.end(
+					JSON.stringify({
+						object: "list",
+						data: [
+							{ id: CLAUDE, object: "model", owned_by: "anthropic", ...accounts(claude) },
+							{ id: GPT, object: "model", owned_by: "openai", ...accounts(codex) },
+							{ id: GPT_HELPER, object: "model", owned_by: "openai", ...accounts(codex) },
 						],
 					}),
 				);
@@ -212,7 +279,33 @@ function serveHttp(req: IncomingMessage, res: ServerResponse) {
 			res.end();
 			return;
 		}
-		const frames = claude ? claudeFrames(id) : codexFrames(id, INNER_GATEWAY);
+		const count = attempt(id);
+		// Refused before any stream: an HTTP error that still names a credential.
+		if (id === "refused" || (id === "httpretry" && count === 1)) {
+			res.writeHead(id === "refused" ? 400 : 429, {
+				"content-type": "application/json",
+				...(id === "refused" ? {} : { "retry-after-ms": "1" }),
+				...login("devin"),
+			});
+			res.end(JSON.stringify({ error: { message: `fixture: ${id}` } }));
+			return;
+		}
+		const frames =
+			id === "failedstream"
+				? // Opened, named, then failed without a word of answer.
+					[
+						codexFrames(id, {})[0],
+						{
+							type: "response.failed",
+							response: { status: "failed", error: { code: "invalid_request", message: "fixture: failed" } },
+						},
+					]
+				: id === "empty"
+					? // Completed, named, with nothing in it.
+						[claudeFrames(id)[0], claudeFrames(id).at(-2), claudeFrames(id).at(-1)]
+					: claude
+						? claudeFrames(id)
+						: codexFrames(id, INNER_GATEWAY);
 		hold({
 			id,
 			kind: claude ? "claude" : "codex-sse",
@@ -245,13 +338,40 @@ beforeAll(async () => {
 		socket.on("close", () => upgraded.delete(socket));
 		acceptWebSocket(req, socket, (send, text) => {
 			const id = idOf(text);
-			const created = plans.get(id)?.created ?? {};
+			const count = attempt(id);
+			wsRequests.push([id, String(JSON.parse(text).previous_response_id ?? ""), socket.remotePort ?? 0]);
+			// The first attempt opens, named by Devin, then fails: the proxy lost the previous response. pi replays the
+			// conversation on a fresh socket, and that attempt answers.
+			if (id === "wsretry" && count === 1) {
+				const response = { id: "lost", status: "in_progress" };
+				send(
+					JSON.stringify({
+						type: "response.created",
+						response,
+						cpa_auth_kind: "oauth",
+						cpa_auth_provider: "devin",
+					}),
+				);
+				send(
+					JSON.stringify({
+						type: "response.failed",
+						response: {
+							...response,
+							status: "failed",
+							error: { code: "previous_response_not_found", message: "fixture: previous response not found" },
+						},
+					}),
+				);
+				return;
+			}
+			const plan = plans.get(id);
+			const frames = codexFrames(id, plan?.created ?? {});
 			hold({
 				id,
 				kind: "codex-ws",
 				sendHeaders: () => {},
 				...framer(
-					codexFrames(id, created),
+					plan?.noCreated ? frames.slice(1) : frames,
 					(frame) => send(JSON.stringify(frame)),
 					() => {},
 				),
@@ -274,6 +394,8 @@ interface Harness {
 	session: AgentSession;
 	/** The reports, as other extensions hear them. */
 	reports: unknown[];
+	/** Every value the footer's "answered" status was set to, in order (undefined: cleared). */
+	statuses: Array<string | undefined>;
 	/** Requests whose headers pi passed to extensions, by the fixture's request id. */
 	headersSeen: string[];
 	/** Requests whose first stream event pi passed to extensions. */
@@ -285,6 +407,8 @@ interface Harness {
 	reload: () => Promise<void>;
 	/** Quits the session. */
 	dispose: () => Promise<void>;
+	/** The models cache on disk. */
+	cache: () => { fetchedAt: number; listsCredentials?: boolean };
 }
 
 const savedEnv = new Map<string, string | undefined>();
@@ -299,6 +423,14 @@ afterEach(() => {
 	}
 	savedEnv.clear();
 	plans.clear();
+	listing = DEFAULT_LISTING;
+	listHits = 0;
+	accountsAnswered = 0;
+	accountsStatus = undefined;
+	accountsHold?.resolve();
+	accountsHold = undefined;
+	attempts.clear();
+	wsRequests.length = 0;
 	held.clear();
 	immediate.clear();
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -310,7 +442,38 @@ function setEnv(name: string, value: string | undefined) {
 	else process.env[name] = value;
 }
 
-async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
+interface StartOptions {
+	/** pi's cache warmer refreshes the Claude model while a turn is out. */
+	warm?: boolean;
+	/** An extension asks for the routes, as pi-cache-keeper does (default); false: nobody asks. */
+	ask?: boolean;
+	/** The session's transport setting ("websocket-cached": continues on the socket with previous_response_id). */
+	transport?: "sse" | "websocket" | "websocket-cached";
+	/** Another extension, loaded before this one, returns a shallow copy of each assistant message at its end. */
+	copier?: boolean;
+	/** A models cache written by this version before pi starts, from the proxy as it is listed then. */
+	seedCache?: boolean;
+	/** Called once the cache is seeded, before pi starts (and its background refresh asks for the credentials). */
+	afterSeed?: () => void;
+	/** The footer switch in cliproxyapi.json; absent: not set. */
+	answered?: boolean;
+}
+
+/** A UI for the session: the footer's "answered" status is recorded, everything else does nothing. */
+function recordingUi(statuses: Array<string | undefined>) {
+	const ui: Record<string | symbol, unknown> = {
+		setStatus: (key: string, text: string | undefined) => {
+			if (key === ANSWERED_STATUS_KEY) statuses.push(text);
+		},
+		theme: { fg: (_color: string, text: string) => text },
+	};
+	return new Proxy(ui, {
+		get: (target, name) => (name in target ? target[name] : () => undefined),
+	}) as never;
+}
+
+async function startPi(options: StartOptions = {}): Promise<Harness> {
+	const ask = options.ask ?? true;
 	const root = mkdtempSync(join(tmpdir(), "pi-provimux-overlap-"));
 	tempDirs.push(root);
 	const agentDir = join(root, "agent");
@@ -323,7 +486,12 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 		setEnv(name, undefined);
 	writeFileSync(
 		join(agentDir, "cliproxyapi.json"),
-		JSON.stringify({ baseUrl, apiKey: "sk-fixture", claudeMessages: true }),
+		JSON.stringify({
+			baseUrl,
+			apiKey: "sk-fixture",
+			claudeMessages: true,
+			...(options.answered === undefined ? {} : { answered: options.answered }),
+		}),
 	);
 	// A cache lifetime of 11 s: pi's warmer refreshes after 1 s, while the turn it warms is still out.
 	if (options.warm)
@@ -341,18 +509,25 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 		if (url.hostname !== "127.0.0.1") throw new Error(`refused: ${url.href}`);
 		return realFetch(input, init);
 	}) as typeof fetch;
+	if (options.seedCache)
+		await resolveMappedModels(agentDir, baseUrl, "sk-fixture", { fastMode: false, claudeMessages: "on" });
+	options.afterSeed?.();
 
 	const reports: unknown[] = [];
+	const statuses: Array<string | undefined> = [];
 	const headersSeen: string[] = [];
 	const firstEvents: string[] = [];
 	let routesTold = false;
 	let captured: SimpleStreamOptions | undefined;
-	const settingsManager = SettingsManager.inMemory();
+	// One provider retry (an HTTP 429 is tried again); no agent-level retry: a failed turn stays failed.
+	const settingsManager = SettingsManager.inMemory({ retry: { provider: { maxRetries: 1 } } });
+	settingsManager.setRetryEnabled(false);
 	settingsManager.setCacheWarmingMode(options.warm ? "streaming" : "off");
+	if (options.transport) settingsManager.setTransport(options.transport);
 	const testExtension = (pi: ExtensionAPI) => {
 		// pi-cache-keeper's part: it asks for the routes and hears what answered.
 		pi.on("session_start", () => {
-			pi.events.emit(REQUEST_EVENT, {});
+			if (ask) pi.events.emit(REQUEST_EVENT, {});
 		});
 		pi.events.on(UPSTREAMS_EVENT, () => {
 			routesTold = true;
@@ -428,7 +603,19 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 			noPromptTemplates: true,
 			noThemes: true,
 			noContextFiles: true,
-			extensionFactories: [providerExtension, testExtension],
+			extensionFactories: [
+				...(options.copier
+					? [
+							(other: ExtensionAPI) => {
+								other.on("message_end", ({ message }) =>
+									message.role === "assistant" ? { message: { ...message } } : undefined,
+								);
+							},
+						]
+					: []),
+				providerExtension,
+				testExtension,
+			],
 		},
 	});
 	// pi's session runtime, as the CLI runs one: quitting it tells extensions `session_shutdown` ("quit").
@@ -440,8 +627,13 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 		{ cwd, agentDir, sessionManager: SessionManager.inMemory(cwd) },
 	);
 	const session = runtime.session;
-	await session.bindExtensions({ mode: "print", onError: (error) => console.error(error) });
-	await until("the routes", () => routesTold);
+	await session.bindExtensions({
+		mode: "print",
+		uiContext: recordingUi(statuses),
+		onError: (error) => console.error(error),
+	});
+	if (ask) await until("the routes", () => routesTold);
+	else await until("the models", () => !!session.modelRuntime.getModel(PROVIDER, CLAUDE));
 	const model = (id: string) => {
 		const found = session.modelRuntime.getModel(PROVIDER, id);
 		if (!found) throw new Error(`no model ${id}`);
@@ -451,6 +643,7 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 	return {
 		session,
 		reports,
+		statuses,
 		headersSeen,
 		firstEvents,
 		model,
@@ -471,6 +664,7 @@ async function startPi(options: { warm?: boolean } = {}): Promise<Harness> {
 			quit ??= runtime.dispose();
 			return quit;
 		},
+		cache: () => JSON.parse(readFileSync(join(agentDir, MODELS_CACHE_FILE_NAME), "utf8")),
 	};
 }
 
@@ -594,6 +788,610 @@ describe("what answered, when requests overlap", { timeout: 20_000 }, () => {
 		} finally {
 			await pi.dispose();
 		}
+	});
+});
+
+const CLAUDE_HOST = "api.anthropic.com";
+const devinLogin = () => login("devin");
+const claudeKey = () => ({ ...apiKey("claude"), "X-CPA-AUTH-HOST": CLAUDE_HOST });
+const openRouterKey = () => ({ ...apiKey("openai-compatible-openrouter"), "X-CPA-AUTH-HOST": "openrouter.ai" });
+
+/** One turn of the session on a model, answered at once as planned; resolves when the turn ends. */
+async function turn(pi: Harness, model: string, marker: string, plan: Plan) {
+	plans.set(marker, plan);
+	immediate.add(marker);
+	await pi.session.setModel(pi.model(model));
+	pi.session.setThinkingLevel("off");
+	await pi.session.prompt(`say ok #${marker}`);
+	const last = pi.session.messages.at(-1) as { role?: string; stopReason?: string; errorMessage?: string };
+	expect(last.role).toBe("assistant");
+	expect(last.stopReason, last.errorMessage).toBe("stop");
+}
+
+/** What the footer says now: the last value it was set to. */
+const footer = (pi: Harness) => pi.statuses.at(-1);
+
+describe("the footer says which route answered the session's turn", { timeout: 20_000 }, () => {
+	it("Anthropic sub, Devin sub, Anthropic api, OpenRouter api: with no other extension asking for routes", async () => {
+		const pi = await startPi({ ask: false, transport: "sse" });
+		try {
+			const seen: Array<string | undefined> = [];
+			await turn(pi, CLAUDE, "claudesub", { headers: login("claude") });
+			seen.push(footer(pi));
+			await turn(pi, GPT, "devinsub", { headers: devinLogin() });
+			seen.push(footer(pi));
+			await turn(pi, CLAUDE, "claudeapi", { headers: claudeKey() });
+			seen.push(footer(pi));
+			await turn(pi, GPT, "openrouterapi", { headers: openRouterKey() });
+			seen.push(footer(pi));
+			expect(seen).toEqual([
+				"answered: Anthropic sub",
+				"answered: Devin sub",
+				"answered: Anthropic api",
+				"answered: OpenRouter api",
+			]);
+			// Nobody asked for the routes: no event was told, the footer did not need one.
+			expect(pi.reports).toEqual([]);
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("a Codex WebSocket turn: its response.created's fields; one without them, after a named one: unknown", async () => {
+		const pi = await startPi({ ask: false, transport: "websocket" });
+		try {
+			await turn(pi, GPT, "wsnamed", { created: { cpa_auth_kind: "oauth", cpa_auth_provider: "devin" } });
+			expect(footer(pi)).toBe("answered: Devin sub");
+			await turn(pi, GPT, "wskey", {
+				created: {
+					cpa_auth_kind: "apikey",
+					cpa_auth_provider: "openai-compatible-openrouter",
+					cpa_auth_host: "openrouter.ai",
+				},
+			});
+			expect(footer(pi)).toBe("answered: OpenRouter api");
+			// The proxy named answers before: one it names nobody for is one it would not name.
+			await turn(pi, GPT, "wsnobody", { created: {} });
+			expect(footer(pi)).toBe("answered: unknown");
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("pi's cache warmer next to the turn it warms, and an extension's own request: only the turn counts", async () => {
+		const pi = await startPi({ warm: true, ask: false });
+		try {
+			// The session's callbacks, for the extension's request below (taken on another model, before the turn).
+			await pi.sessionOptions();
+			plans.set("fg", { headers: login("claude") });
+			plans.set("fg-warm", { headers: claudeKey() });
+			await pi.session.setModel(pi.model(CLAUDE));
+			pi.session.setThinkingLevel("off");
+			const running = pi.session.prompt("say ok #fg");
+			// The order where the last answer seen is the warmer's: its headers and first event come after the turn's.
+			await until("the turn", () => held.has("fg"));
+			heldRequest("fg").sendHeaders();
+			await until("the turn's headers", () => pi.headersSeen.includes("fg"));
+			await until("the warmer's refresh", () => held.has("fg-warm"));
+			heldRequest("fg-warm").sendHeaders();
+			await until("the refresh's headers", () => pi.headersSeen.includes("fg-warm"));
+			heldRequest("fg").sendFirst();
+			await until("the turn's first event", () => pi.firstEvents.includes("fg"));
+			heldRequest("fg-warm").sendBody();
+			await until("the refresh's first event", () => pi.firstEvents.includes("fg-warm"));
+			heldRequest("fg").sendBody();
+			await running;
+			expect(pi.statuses.filter((status) => status !== undefined)).toEqual(["answered: Anthropic sub"]);
+			expect(footer(pi)).toBe("answered: Anthropic sub");
+
+			// An extension's own request with the session's callbacks, answered by a key: the footer stays.
+			plans.set("side", { headers: openRouterKey() });
+			immediate.add("side");
+			await send(pi, pi.model(CLAUDE), "side");
+			expect(pi.firstEvents).toContain("side");
+			expect(footer(pi)).toBe("answered: Anthropic sub");
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("switching to a model of another provider clears it; a turn there leaves it clear", async () => {
+		const pi = await startPi({ ask: false });
+		try {
+			await turn(pi, CLAUDE, "before", { headers: login("claude") });
+			expect(footer(pi)).toBe("answered: Anthropic sub");
+			await pi.session.setModel(pi.session.modelRuntime.getModel("capture", "capture")!);
+			expect(footer(pi)).toBeUndefined();
+			const count = pi.statuses.length;
+			await pi.session.prompt("a turn on the other provider");
+			expect(pi.statuses.slice(count).every((status) => status === undefined)).toBe(true);
+			// Back on a Provimux model: the next answer is shown again.
+			await turn(pi, CLAUDE, "after", { headers: claudeKey() });
+			expect(footer(pi)).toBe("answered: Anthropic api");
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("a proxy without the headers (plain CLIProxyAPI): nothing, over Claude Messages, Codex SSE and WebSocket", async () => {
+		// Plain CLIProxyAPI lists no credentials either.
+		listing = "plain";
+		for (const transport of ["sse", "websocket"] as const) {
+			const pi = await startPi({ ask: false, transport });
+			try {
+				await turn(pi, CLAUDE, "plainclaude", { headers: {} });
+				// The Codex SSE body carries an inner gateway's cpa_auth_* fields: never the proxy's.
+				await turn(pi, GPT, "plaingpt", { headers: {}, created: {} });
+				expect(pi.statuses.every((status) => status === undefined)).toBe(true);
+				expect(pi.reports).toEqual([]);
+			} finally {
+				await pi.dispose();
+			}
+		}
+	});
+
+	it("an answer the proxy would not name, from a proxy that lists its credentials: unknown", async () => {
+		// An extension asked for the routes: the credential list says the proxy names answers.
+		const pi = await startPi({ transport: "sse" });
+		try {
+			await turn(pi, CLAUDE, "unnamed", { headers: {} });
+			expect(footer(pi)).toBe("answered: unknown");
+			expect(pi.reports).toEqual([report(CLAUDE, [])]);
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	describe("any install: whatever routes it has, in whatever order, the footer says what answered", () => {
+		const oauth = (provider: string) => ({ "X-CPA-AUTH-KIND": "oauth", "X-CPA-AUTH-PROVIDER": provider });
+		const key = (provider: string, host?: string) => ({
+			"X-CPA-AUTH-KIND": "apikey",
+			"X-CPA-AUTH-PROVIDER": provider,
+			...(host ? { "X-CPA-AUTH-HOST": host } : {}),
+		});
+		/** Answers a proxy can give, and what the footer must say for each. */
+		const ANSWERS: Array<[Record<string, string>, string]> = [
+			[oauth("claude"), "Anthropic sub"],
+			[key("claude", "api.anthropic.com"), "Anthropic api"],
+			[key("claude"), "Anthropic api"],
+			[oauth("devin"), "Devin sub"],
+			[key("openai-compatible-openrouter", "openrouter.ai"), "OpenRouter api"],
+			// An entry named anything, sent to openrouter.ai: OpenRouter.
+			[key("openai-compatible-myrouter", "openrouter.ai"), "OpenRouter api"],
+			[oauth("antigravity"), "Antigravity sub"],
+			[oauth("codex"), "OpenAI sub"],
+			[oauth("kimi"), "Kimi sub"],
+			[key("gemini", "generativelanguage.googleapis.com"), "Google api"],
+			// Services nobody here knows: named as the proxy names them.
+			[key("openai-compatible-acme", "api.acme.test"), "api.acme.test api"],
+			[oauth("MysteryLab"), "MysteryLab sub"],
+		];
+		const account = (provider: string, kind: string, priority: number, host?: string): Account => ({
+			provider,
+			kind,
+			priority,
+			...(host ? { host } : {}),
+		});
+		/** Installs as owners set them up: different routes, different priorities. */
+		const INSTALLS: Array<[string, Listing]> = [
+			[
+				"subscription first, then the Claude key, OpenRouter, Devin",
+				{
+					claude: [
+						account("claude", "oauth", 10),
+						account("claude", "apikey", 5, "api.anthropic.com"),
+						account("openai-compatible-openrouter", "apikey", 1, "openrouter.ai"),
+						account("devin", "oauth", 0),
+					],
+					codex: [account("codex", "oauth", 10), account("codex", "apikey", 0, "api.openai.com")],
+				},
+			],
+			[
+				"the reverse: OpenRouter first, the subscription last",
+				{
+					claude: [
+						account("openai-compatible-openrouter", "apikey", 10, "openrouter.ai"),
+						account("devin", "oauth", 5),
+						account("claude", "apikey", 1, "api.anthropic.com"),
+						account("claude", "oauth", 0),
+					],
+					codex: [account("codex", "apikey", 10, "api.openai.com"), account("codex", "oauth", 0)],
+				},
+			],
+			[
+				"no Anthropic at all: OpenRouter and Antigravity, same priority",
+				{
+					claude: [
+						account("openai-compatible-openrouter", "apikey", 0, "openrouter.ai"),
+						account("antigravity", "oauth", 0),
+					],
+					codex: [account("openai-compatible-openrouter", "apikey", 0, "openrouter.ai")],
+				},
+			],
+			[
+				"services nobody here knows, mixed with known ones",
+				{
+					claude: [
+						account("openai-compatible-acme", "apikey", 3, "api.acme.test"),
+						account("MysteryLab", "oauth", 2),
+						account("kimi", "oauth", 1),
+						account("claude", "oauth", 0),
+					],
+					codex: [account("gemini", "apikey", 0, "generativelanguage.googleapis.com")],
+				},
+			],
+		];
+		/** A deterministic order of every answer, different for each install. */
+		const orderFor = (seed: number) =>
+			ANSWERS.map((answer, index) => ({ answer, rank: (index * (2 * seed + 5) + seed * 7) % 13 }))
+				.sort((a, b) => a.rank - b.rank)
+				.map(({ answer }) => answer);
+		const letters = (n: number) => String.fromCharCode(97 + Math.floor(n / 26), 97 + (n % 26));
+
+		for (const [index, [name, installed]] of INSTALLS.entries()) {
+			for (const ask of [true, false]) {
+				it(`${name}${ask ? ", with the routes asked for" : ""}`, async () => {
+					listing = installed;
+					const pi = await startPi({ ask, transport: "sse" });
+					try {
+						const order = orderFor(index);
+						// Every answer, once: some are in the install's list, at any priority; some are not in it at all.
+						expect(new Set(order)).toEqual(new Set(ANSWERS));
+						const shown: Array<string | undefined> = [];
+						for (const [turnIndex, [headers]] of order.entries()) {
+							// Turns alternate between the Claude Messages model and the Codex SSE model.
+							await turn(pi, turnIndex % 2 ? GPT : CLAUDE, `i${letters(index)}t${letters(turnIndex)}`, {
+								headers,
+							});
+							shown.push(footer(pi));
+						}
+						expect(shown).toEqual(order.map(([, said]) => `answered: ${said}`));
+					} finally {
+						await pi.dispose();
+					}
+				});
+			}
+		}
+
+		it("plain CLIProxyAPI, which lists no credentials and names no answer: nothing, asked or not", async () => {
+			listing = "plain";
+			for (const ask of [true, false]) {
+				const pi = await startPi({ ask, transport: "sse" });
+				try {
+					for (const [turnIndex, model] of [CLAUDE, GPT, CLAUDE, GPT].entries())
+						await turn(pi, model, `plain${letters(turnIndex)}`, { headers: {} });
+					expect(pi.statuses.every((status) => status === undefined)).toBe(true);
+					expect(pi.reports).toEqual([]);
+				} finally {
+					await pi.dispose();
+				}
+			}
+		});
+	});
+
+	it('"answered": false in cliproxyapi.json turns it off; the routes are still told', async () => {
+		const pi = await startPi({ answered: false });
+		try {
+			await turn(pi, CLAUDE, "off", { headers: login("claude") });
+			expect(pi.statuses).toEqual([]);
+			expect(pi.reports).toEqual([report(CLAUDE, [CLAUDE_LOGIN])]);
+		} finally {
+			await pi.dispose();
+		}
+	});
+});
+
+/** The session's last message: what the user sees. */
+const lastMessage = (pi: Harness) =>
+	pi.session.messages.at(-1) as { role?: string; stopReason?: string; content?: unknown[] };
+
+describe("the footer only ever shows the route that produced the answer the user sees", { timeout: 25_000 }, () => {
+	describe("retries: the attempt that answered", () => {
+		it("a WebSocket continuation the proxy lost, replayed on a fresh socket by another route", async () => {
+			const pi = await startPi({ transport: "websocket-cached" });
+			try {
+				await turn(pi, GPT, "previous", { created: { cpa_auth_kind: "oauth", cpa_auth_provider: "codex" } });
+				await turn(pi, GPT, "wsretry", {
+					created: {
+						cpa_auth_kind: "apikey",
+						cpa_auth_provider: "openai-compatible-openrouter",
+						cpa_auth_host: "openrouter.ai",
+					},
+				});
+				// The first attempt continued the previous response and was named by Devin; the replay had no previous id.
+				expect(attempts.get("wsretry")).toBe(2);
+				const [failed, replayed] = wsRequests.filter(([id]) => id === "wsretry");
+				expect(failed?.[1]).toBe("previous");
+				expect(replayed?.[1]).toBe("");
+				expect(footer(pi)).toBe("answered: OpenRouter api");
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("three answers on one WebSocket, three routes", async () => {
+			const pi = await startPi({ transport: "websocket-cached" });
+			try {
+				const shown: Array<string | undefined> = [];
+				const turns: Array<[string, Record<string, string>]> = [
+					["one", { cpa_auth_kind: "oauth", cpa_auth_provider: "devin" }],
+					[
+						"two",
+						{
+							cpa_auth_kind: "apikey",
+							cpa_auth_provider: "openai-compatible-openrouter",
+							cpa_auth_host: "openrouter.ai",
+						},
+					],
+					["three", {}],
+				];
+				for (const [id, created] of turns) {
+					await turn(pi, GPT, id, { created });
+					shown.push(footer(pi));
+				}
+				expect(new Set(wsRequests.map(([, , port]) => port)).size).toBe(1);
+				expect(shown).toEqual(["answered: Devin sub", "answered: OpenRouter api", "answered: unknown"]);
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("an HTTP 429 named by Devin, retried, answered by OpenRouter", async () => {
+			const pi = await startPi({ transport: "sse" });
+			try {
+				await turn(pi, GPT, "httpretry", { headers: openRouterKey() });
+				expect(attempts.get("httpretry")).toBe(2);
+				expect(footer(pi)).toBe("answered: OpenRouter api");
+			} finally {
+				await pi.dispose();
+			}
+		});
+	});
+
+	describe("each attempt names its own route, or none", () => {
+		const devinOpens = { cpa_auth_kind: "oauth", cpa_auth_provider: "devin" };
+
+		it("a WebSocket replay without response.created, after an attempt Devin opened: unnamed, so unknown", async () => {
+			const pi = await startPi({ ask: false, transport: "websocket-cached" });
+			try {
+				await turn(pi, GPT, "previous", { created: { cpa_auth_kind: "oauth", cpa_auth_provider: "codex" } });
+				// The replay sends its output and response.completed only, as Provimux forwards such an upstream answer.
+				await turn(pi, GPT, "wsretry", { noCreated: true });
+				expect(attempts.get("wsretry")).toBe(2);
+				const [failed, replayed] = wsRequests.filter(([id]) => id === "wsretry");
+				expect(failed?.[1]).toBe("previous");
+				expect(replayed?.[1]).toBe("");
+				expect(footer(pi)).toBe("answered: unknown");
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("the same replay naming nobody on response.created: unknown; naming OpenRouter: OpenRouter", async () => {
+			const pi = await startPi({ ask: false, transport: "websocket-cached" });
+			try {
+				await turn(pi, GPT, "previous", { created: devinOpens });
+				await turn(pi, GPT, "wsretry", { created: {} });
+				expect(footer(pi)).toBe("answered: unknown");
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("a first WebSocket answer without response.created, after a successful credential lookup: unknown", async () => {
+			const pi = await startPi({ ask: false, transport: "websocket-cached" });
+			try {
+				await turn(pi, GPT, "single", { noCreated: true });
+				expect(listHits).toBe(1);
+				expect(wsRequests.map(([id]) => id)).toEqual(["single"]);
+				expect(footer(pi)).toBe("answered: unknown");
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("the same from plain CLIProxyAPI, which lists no credentials: nothing", async () => {
+			listing = "plain";
+			const pi = await startPi({ ask: false, transport: "websocket-cached" });
+			try {
+				await turn(pi, GPT, "single", { noCreated: true });
+				await turn(pi, GPT, "again", { noCreated: true });
+				expect(pi.statuses.every((status) => status === undefined)).toBe(true);
+			} finally {
+				await pi.dispose();
+			}
+		});
+	});
+
+	describe("only a credential lookup that answered changes what is known", () => {
+		/**
+		 * pi starts on a cache that lists credentials; its background refresh's credential lookup is held. `early`: an
+		 * unnamed turn while it is held. Then the lookup answers `then` (a status, or the list as `listing` is), and an
+		 * unnamed turn follows.
+		 */
+		async function refresh(then: number | "plain" | "listed", early: boolean) {
+			let release = () => {};
+			const pi = await startPi({
+				ask: false,
+				transport: "sse",
+				seedCache: true,
+				afterSeed: () => {
+					release = holdAccounts();
+				},
+			});
+			try {
+				const seeded = pi.cache();
+				await until("the background lookup", () => listHits > 0);
+				if (early) await turn(pi, CLAUDE, "early", { headers: {} });
+				const shown = [early ? footer(pi) : "no turn"];
+				if (typeof then === "number") accountsStatus = then;
+				if (then === "plain") listing = "plain";
+				release();
+				await until("the lookup's answer", () => accountsAnswered > 0);
+				await until("the refreshed cache", () => pi.cache().fetchedAt !== seeded.fetchedAt);
+				await turn(pi, CLAUDE, "later", { headers: {} });
+				shown.push(footer(pi));
+				return { seeded: seeded.listsCredentials, kept: pi.cache().listsCredentials ?? null, shown };
+			} finally {
+				release();
+				await pi.dispose();
+			}
+		}
+
+		it("a cache that lists credentials, then the lookup fails (503) before any answer: kept, unknown", async () => {
+			expect(await refresh(503, false)).toEqual({
+				seeded: true,
+				kept: true,
+				shown: ["no turn", "answered: unknown"],
+			});
+		});
+
+		it("two unnamed answers on the same proxy, a failed lookup between them: unknown both times", async () => {
+			expect(await refresh(503, true)).toEqual({
+				seeded: true,
+				kept: true,
+				shown: ["answered: unknown", "answered: unknown"],
+			});
+		});
+
+		it("the lookup answers, still listing credentials: kept, unknown both times", async () => {
+			expect(await refresh("listed", true)).toEqual({
+				seeded: true,
+				kept: true,
+				shown: ["answered: unknown", "answered: unknown"],
+			});
+		});
+
+		it("the lookup answers from a proxy that is plain now: cleared, nothing", async () => {
+			expect(await refresh("plain", true)).toEqual({
+				seeded: true,
+				kept: null,
+				shown: ["answered: unknown", undefined],
+			});
+		});
+	});
+
+	describe("a failed, aborted or empty turn leaves the footer as it was", () => {
+		it("aborted after Devin's opening frame", async () => {
+			const pi = await startPi({ ask: false, transport: "sse" });
+			try {
+				await turn(pi, CLAUDE, "before", { headers: login("claude") });
+				plans.set("aborted", { headers: devinLogin() });
+				const running = pi.session.prompt("say ok #aborted");
+				await until("the request", () => held.has("aborted"));
+				heldRequest("aborted").sendHeaders();
+				heldRequest("aborted").sendFirst();
+				await until("the opening frame", () => pi.firstEvents.includes("aborted"));
+				await pi.session.abort();
+				await running;
+				expect(lastMessage(pi).stopReason).toBe("aborted");
+				expect(footer(pi)).toBe("answered: Anthropic sub");
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("refused before any stream (HTTP 400 named by Devin), then opened by Devin and failed", async () => {
+			const pi = await startPi({ ask: false, transport: "sse" });
+			try {
+				await turn(pi, GPT, "before", { headers: login("claude") });
+				await pi.session.prompt("say ok #refused");
+				expect(lastMessage(pi)).toMatchObject({ stopReason: "error", content: [] });
+				expect(footer(pi)).toBe("answered: Anthropic sub");
+				plans.set("failedstream", { headers: devinLogin() });
+				immediate.add("failedstream");
+				await pi.session.prompt("say ok #failedstream");
+				expect(lastMessage(pi)).toMatchObject({ stopReason: "error", content: [] });
+				expect(footer(pi)).toBe("answered: Anthropic sub");
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("completed by Devin with nothing in it", async () => {
+			const pi = await startPi({ ask: false, transport: "sse" });
+			try {
+				await turn(pi, CLAUDE, "before", { headers: login("claude") });
+				plans.set("empty", { headers: devinLogin() });
+				immediate.add("empty");
+				await pi.session.prompt("say ok #empty");
+				expect(lastMessage(pi)).toMatchObject({ stopReason: "stop", content: [] });
+				expect(footer(pi)).toBe("answered: Anthropic sub");
+			} finally {
+				await pi.dispose();
+			}
+		});
+	});
+
+	it("an answer that ends after another provider was selected does not bring the footer back", async () => {
+		const pi = await startPi({ ask: false, transport: "sse" });
+		try {
+			await turn(pi, CLAUDE, "before", { headers: login("claude") });
+			plans.set("late", { headers: devinLogin() });
+			const running = pi.session.prompt("say ok #late");
+			await until("the request", () => held.has("late"));
+			heldRequest("late").sendHeaders();
+			heldRequest("late").sendFirst();
+			await until("the opening frame", () => pi.firstEvents.includes("late"));
+			await pi.session.setModel(pi.session.modelRuntime.getModel("capture", "capture")!);
+			expect(footer(pi)).toBeUndefined();
+			heldRequest("late").sendBody();
+			await running;
+			expect(lastMessage(pi)).toMatchObject({ role: "assistant", stopReason: "stop" });
+			expect(footer(pi)).toBeUndefined();
+			// Back on Provimux: the next answer shows.
+			await turn(pi, CLAUDE, "after", { headers: openRouterKey() });
+			expect(footer(pi)).toBe("answered: OpenRouter api");
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("another extension returns a shallow copy of the message at its end: still named", async () => {
+		const pi = await startPi({ copier: true, transport: "sse" });
+		try {
+			await turn(pi, CLAUDE, "copied", { headers: devinLogin() });
+			expect(pi.reports).toEqual([report(CLAUDE, [{ provider: "devin", subscription: true }])]);
+			expect(footer(pi)).toBe("answered: Devin sub");
+			await turn(pi, GPT, "copiedgpt", { headers: openRouterKey() });
+			expect(footer(pi)).toBe("answered: OpenRouter api");
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	describe("the startup model list says whether the proxy names answers", () => {
+		it("credentials listed: the very first unnamed answer is unknown, with no other extension", async () => {
+			const pi = await startPi({ ask: false, transport: "sse" });
+			try {
+				const shown: Array<string | undefined> = [];
+				await turn(pi, CLAUDE, "first", { headers: {} });
+				shown.push(footer(pi));
+				await turn(pi, CLAUDE, "second", { headers: devinLogin() });
+				shown.push(footer(pi));
+				await turn(pi, CLAUDE, "third", { headers: {} });
+				shown.push(footer(pi));
+				// Only the startup list was asked for: nobody asked for the routes.
+				expect(listHits).toBe(1);
+				expect(pi.reports).toEqual([]);
+				expect(shown).toEqual(["answered: unknown", "answered: Devin sub", "answered: unknown"]);
+			} finally {
+				await pi.dispose();
+			}
+		});
+
+		it("no credentials listed (plain CLIProxyAPI): nothing, from the first answer on", async () => {
+			listing = "plain";
+			const pi = await startPi({ ask: false, transport: "sse" });
+			try {
+				await turn(pi, CLAUDE, "first", { headers: {} });
+				await turn(pi, GPT, "second", { headers: {} });
+				expect(listHits).toBe(1);
+				expect(pi.statuses.every((status) => status === undefined)).toBe(true);
+			} finally {
+				await pi.dispose();
+			}
+		});
 	});
 });
 

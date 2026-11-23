@@ -24,7 +24,8 @@
  * Requests overlap (pi's cache warmer next to the turn it warms, an extension's own call with the session's callbacks),
  * and pi's events say nothing of which request they belong to. So what a request's answer says is kept by that request
  * alone: each call of the provider's stream gets its own callbacks (`answeredOptions`), which hold its headers and its
- * one report, and mark the stream event it is told with. The session's handler only reads that mark.
+ * one report, and mark the stream event it is told with. The session's handler only reads that mark. They also keep
+ * what the answer said with the message the request ends with (`answerOf`), for the footer (answered-footer.ts).
  *
  * An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
  * (anthropic, openai-codex, openai, meta, openrouter, google) or a providers.dev provider pi has none for (devin,
@@ -266,7 +267,7 @@ export async function fetchModelAccounts(
 }
 
 /** What an answer says answered it, as given: the kind, provider and host (any may be absent or not a string). */
-interface Statement {
+export interface Statement {
 	kind: unknown;
 	provider: unknown;
 	host: unknown;
@@ -285,6 +286,39 @@ function statements(): WeakMap<object, Statement> {
 	return global[STATEMENTS_KEY];
 }
 
+/**
+ * Where a message carries what its answer said: an own property under a symbol shared by every copy of this module,
+ * set on the message pi's agent loop takes from the request's stream and hands to `message_end`. Only the session's
+ * own turns get there, never pi's cache warmer or another extension's request. An own enumerable property: a shallow
+ * copy (`{ ...message }`, as another extension's `message_end` handler may return) keeps it; JSON (the session file)
+ * drops it.
+ */
+const ANSWER = Symbol.for("pi-provimux.answer");
+
+/** What the answer a message came from said answered it; undefined when it is not a message of this provider's stream. */
+export function answerOf(message: unknown): Statement | undefined {
+	if (!isRecord(message)) return undefined;
+	const said = (message as Record<symbol, unknown>)[ANSWER];
+	return isRecord(said) ? (said as unknown as Statement) : undefined;
+}
+
+/** Keeps what a request's answer said with the message its stream ends with (`answerOf`). */
+function keepWithMessage(stream: unknown, said: (message: Record<string, unknown>) => Statement | undefined): void {
+	const result = (stream as { result?: unknown } | null | undefined)?.result;
+	if (typeof result !== "function") return;
+	try {
+		Promise.resolve((result as () => unknown).call(stream)).then(
+			(message) => {
+				const statement = isRecord(message) ? said(message) : undefined;
+				if (statement && isRecord(message)) (message as Record<symbol, unknown>)[ANSWER] = statement;
+			},
+			() => {},
+		);
+	} catch {
+		// A stream without a result to wait for: nothing to keep.
+	}
+}
+
 /** The callbacks one request is sent with, as `onResponse` and `onProviderStreamEvent` take them. */
 export interface AnswerCallbacks<TModel = unknown> {
 	onResponse?: (response: { status: number; headers: Record<string, string> }, model: TModel) => unknown;
@@ -299,49 +333,97 @@ export interface AnswerCallbacks<TModel = unknown> {
  * called as they were, with the same arguments; nothing else changes.
  */
 export function answeredOptions<T extends AnswerCallbacks<never> | undefined>(options: T): T {
+	return keptOptions(options).options;
+}
+
+/** What an attempt that named nobody said: an unnamed answer. */
+const UNNAMED: Statement = { kind: undefined, provider: undefined, host: undefined };
+
+/** Codex events that end an attempt without an answer: what it said goes with it. */
+const FAILED_ATTEMPT = new Set(["response.failed", "response.incomplete", "error"]);
+
+/**
+ * `answeredOptions`, and what the answer the request ends with said (for its message): only what the attempt that
+ * answered said itself. pi-ai can try a request again inside one call (an HTTP 429; a Codex WebSocket continuation the
+ * proxy lost, replayed on a fresh socket), each attempt may be served by another route, and an attempt starts unnamed.
+ * - Over HTTP: the last response's own headers.
+ * - Without headers (the Codex WebSocket): the response.created's fields of the response the message comes from. An
+ *   attempt that failed takes what it said with it, and a response.created of another response than the message's
+ *   (its id) says nothing of it. An answer whose attempt said nothing (no response.created) is unnamed.
+ * - Nothing heard of the request at all: undefined.
+ */
+function keptOptions<T extends AnswerCallbacks<never> | undefined>(
+	options: T,
+): { options: T; said: (message: Record<string, unknown>) => Statement | undefined } {
 	const onEvent = options?.onProviderStreamEvent;
 	// Nobody hears the stream's events: there is nobody to tell.
-	if (!options || !onEvent) return options;
+	if (!options || !onEvent) return { options, said: () => undefined };
 	const onResponse = options.onResponse;
 	let headers: Record<string, string> | undefined;
 	let told = false;
+	/** What the current attempt said, and the response it said it of (WebSocket). */
+	let said: Statement | undefined;
+	let saidOf: string | undefined;
+	let heard = false;
 	const header = (wanted: string) =>
 		headers && Object.entries(headers).find(([name]) => name.toLowerCase() === wanted)?.[1];
-	return {
+	const wrapped = {
 		...options,
 		onResponse: (response: { status: number; headers: Record<string, string> }, model: never) => {
 			// A retried request: the last response is the one whose body is read.
 			headers = response.headers ?? {};
+			said = {
+				kind: header(AUTH_KIND_HEADER),
+				provider: header(AUTH_PROVIDER_HEADER),
+				host: header(AUTH_HOST_HEADER),
+			};
 			return onResponse?.(response, model);
 		},
 		onProviderStreamEvent: (data: unknown, model: never) => {
-			if (!told && isRecord(data)) {
-				if (headers) {
+			if (isRecord(data)) {
+				heard = true;
+				// Over HTTP the headers alone count: a body's own fields are an inner gateway's.
+				if (!headers && data.type === "response.created") {
+					said = { kind: data[AUTH_KIND_FIELD], provider: data[AUTH_PROVIDER_FIELD], host: data[AUTH_HOST_FIELD] };
+					const id = isRecord(data.response) ? data.response.id : undefined;
+					saidOf = typeof id === "string" ? id : undefined;
+				} else if (!headers && typeof data.type === "string" && FAILED_ATTEMPT.has(data.type)) {
+					// The attempt ended without an answer: the next one starts unnamed.
+					said = undefined;
+					saidOf = undefined;
+				}
+				// The event is told once per request, with its first statement.
+				if (!told && said && (headers || data.type === "response.created")) {
 					told = true;
-					statements().set(data, {
-						kind: header(AUTH_KIND_HEADER),
-						provider: header(AUTH_PROVIDER_HEADER),
-						host: header(AUTH_HOST_HEADER),
-					});
-				} else if (data.type === "response.created") {
-					told = true;
-					statements().set(data, {
-						kind: data[AUTH_KIND_FIELD],
-						provider: data[AUTH_PROVIDER_FIELD],
-						host: data[AUTH_HOST_FIELD],
-					});
+					statements().set(data, said);
 				}
 			}
 			return onEvent(data, model);
 		},
 	} as T;
+	const saidOfMessage = (message: Record<string, unknown>): Statement | undefined => {
+		if (headers) return said;
+		if (!heard) return undefined;
+		// The message is another response's than the one the held statement was said of: its attempt said nothing.
+		if (saidOf && typeof message.responseId === "string" && message.responseId !== saidOf) return UNNAMED;
+		return said ?? UNNAMED;
+	};
+	return { options: wrapped, said: saidOfMessage };
 }
 
-/** A stream function whose every call keeps what its answer says to itself (`answeredOptions`). */
+/**
+ * A stream function whose every call keeps what its answer says to itself (`answeredOptions`), and with the message
+ * its stream ends with (`answerOf`).
+ */
 export function answeredStream<M, C, O extends AnswerCallbacks<never> | undefined, R>(
 	stream: (model: M, context: C, options: O) => R,
 ): (model: M, context: C, options: O) => R {
-	return (model, context, options) => stream(model, context, answeredOptions(options));
+	return (model, context, options) => {
+		const kept = keptOptions(options);
+		const result = stream(model, context, kept.options);
+		keepWithMessage(result, kept.said);
+		return result;
+	};
 }
 
 /** pi-ai's implementation of an API, as `getApiProvider` gives it. */
@@ -407,8 +489,13 @@ export function answeredClaudeMessages(
 		const originals = { stream: implementation.stream, streamSimple: implementation.streamSimple };
 		const wrap =
 			(original: ApiImplementation[Method]): ApiImplementation[Method] =>
-			(model, context, options) =>
-				original(model, context, scope.providers.has(model.provider) ? answeredOptions(options) : options);
+			(model, context, options) => {
+				if (!scope.providers.has(model.provider)) return original(model, context, options);
+				const kept = keptOptions(options);
+				const result = original(model, context, kept.options);
+				keepWithMessage(result, kept.said);
+				return result;
+			};
 		const wrappers = { stream: wrap(originals.stream), streamSimple: wrap(originals.streamSimple) };
 		implementation.stream = wrappers.stream;
 		implementation.streamSimple = wrappers.streamSimple;
@@ -529,7 +616,7 @@ export class UpstreamsAnnouncer {
 	}
 
 	/** Whether the proxy names what answered: it lists its credentials (Provimux), or it named an answer before. */
-	private namesAnswers(): boolean {
+	namesAnswers(): boolean {
 		if (this.namedBefore) return true;
 		return !!this.listed && Object.values(this.listed.accounts).some((accounts) => accounts.length > 0);
 	}

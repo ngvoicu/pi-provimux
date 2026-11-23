@@ -2,6 +2,8 @@
 
 ## 105.0.5
 
+Two changes: Provimux's models now go by the provider id `provimux`, and the footer names the route that answered.
+
 - **The provider id is `provimux`** (was `cliproxyapi`). pi's `/model` shows `[provimux]`, and the models are
   `provimux/<id>`. One provider is registered, under that id. The old id is not registered next to it, sessions are
   not moved, and its `auth.json` entry is not read.
@@ -10,27 +12,37 @@
   `"providerName": "CLIProxyAPI"` already does. The file's `apiKey` and `baseUrl` are used as before, with no new
   `/login`. Any other id in the file is kept. So is any value of `CLIPROXYAPI_PROVIDER_ID`, `cliproxyapi`
   included.
-- **What changes for an existing setup:**
-  - the models show as `provimux/<id>`;
-  - in `settings.json`, `"defaultProvider": "cliproxyapi"` silently starts pi on another model: set
-    `"defaultProvider": "provimux"` with `"defaultModel": "<id>"`, or highlight the model in `/model` and press
-    Ctrl+S (Enter only switches the live model). An `enabledModels` entry `"cliproxyapi/<id>"` matches nothing:
-    change it to `"provimux/<id>"` by hand;
-  - a session recorded on `cliproxyapi/<id>` does not get its model back when resumed. pi says
+- **What an existing setup must do:**
+  - pick the models again as `provimux/<id>`. In `settings.json`, `"defaultProvider": "cliproxyapi"` silently starts
+    pi on another model: set `"defaultProvider": "provimux"` with `"defaultModel": "<id>"`, or highlight the model in
+    `/model` and press Ctrl+S (Enter only switches the live model). An `enabledModels` entry `"cliproxyapi/<id>"`
+    matches nothing: change it to `"provimux/<id>"` by hand. `--model cliproxyapi/<id>` must become
+    `--model provimux/<id>` or `--provider provimux --model <id>`;
+  - rename a `providers.cliproxyapi` block in `models.json` (headers, `modelOverrides` such as thinking levels,
+    windows, prices) to `providers.provimux`; under the old name it applies to nothing. pi-cache-keeper moves its
+    own values there by itself at its next start and leaves only fields you set by hand under the old id;
+  - log in with the account login, not the API-key login (see below). A setup whose key is only in `auth.json`
+    under `cliproxyapi` (no `apiKey` in `cliproxyapi.json`, no `CLIPROXYAPI_API_KEY`) needs one `/login provimux`;
+  - an old session recorded on `cliproxyapi/<id>` does not get its model back when resumed. pi warns
     `Could not restore model cliproxyapi/<id>. Using …` and goes on with the model it would start with. Pick
     `provimux/<id>` with `/model`;
-  - `--model cliproxyapi/<id>` must become `--model provimux/<id>` or `--provider provimux --model <id>`;
-  - a `providers.cliproxyapi` block in `models.json` (headers, `modelOverrides` such as thinking levels, windows,
-    prices) applies to nothing: rename it to `providers.provimux`. pi-cache-keeper moves its own values there by
-    itself at its next start and leaves only fields you set by hand under the old id;
-  - a setup whose key is only in `auth.json` under `cliproxyapi` (no `apiKey` in `cliproxyapi.json`, no
-    `CLIPROXYAPI_API_KEY`) needs one `/login provimux`;
   - `CLIPROXYAPI_PROVIDER_ID=cliproxyapi` keeps the old id for anyone who wants it, with its stored login.
 - **Logins work as in 105.0.4.** Use `/login provimux` with **Sign in with an account**, or `apiKey` and
   `baseUrl` in `cliproxyapi.json`. pi's **Sign in with an API key**, offered when the file or
   `CLIPROXYAPI_API_KEY` already holds a key, still does not survive a restart (`Provider is not configured`), as in
   105.0.4. A key in `cliproxyapi.json` (or `CLIPROXYAPI_API_KEY`) wins over a key saved by a later `/login` that
   does not rewrite the file; the account login rewrites it.
+- **The footer says which route answered.** After each answer on a Provimux model, the footer shows `answered:
+  Anthropic sub`, `answered: Devin sub`, `answered: Anthropic api`, `answered: OpenRouter api` …, in the words of the
+  model names. It only ever shows the route that produced the answer you see: it is read from the answer's
+  `X-CPA-AUTH-*` headers (on the Codex WebSocket, the `cpa_auth_*` fields of its `response.created`), from the attempt
+  that answered when pi tried again (an attempt that names nobody is unnamed), and only a turn that completed with
+  something in it changes it (a failed, aborted or empty one leaves it as it was). It needs no other extension; the
+  credential list and its priorities play no part, so any install's routes, in any order, are named as they answer.
+  Only the session's own turns count: pi's cache warmer and other extensions' requests never change it. An answer a
+  proxy that lists its credentials would not name shows `answered: unknown`, from the first turn on (a failed lookup
+  of that list changes nothing); plain CLIProxyAPI shows nothing, and so does a model of another provider. On by
+  default; `"answered": false` in `cliproxyapi.json` turns it off.
 - **Unchanged:** the files `cliproxyapi.json` and `cliproxyapi-models.json`, the `CLIPROXYAPI_*` environment
   variables, the internal API name `cliproxyapi-codex-responses`, and `/provimux-refresh`.
 
