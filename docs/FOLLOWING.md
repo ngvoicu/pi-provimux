@@ -910,7 +910,8 @@ automation is built and reviewed on a branch but **not merged**; nobody is worki
    pi list
    ```
    `pi list` must show `npm:pi-provimux` once and the old source not at all. Then, at once, the owner's
-   project (below): its setups stop working at the `pi remove`.
+   project (below): its setups stop working at the `pi remove`. Done: the owner's pi installs `npm:pi-provimux`
+   (checked 2026-11-23).
 
 **The owner's project (the owner's step).** Twelve files under its `v1/` load this extension by the path of pi's
 git checkout, `pi -e ~/.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/extensions/index.ts` (15 lines),
@@ -931,6 +932,7 @@ and one README there shows the same line.
   grep -rn 'pi-cliproxyapi-provider' v1    # nothing left
   git diff --stat                           # 13 files, 16 lines
   ```
+  Not done as of 2026-11-23: the project's `v1/` setups still name the git checkout's path.
 - **Or he does not switch.** Step 9 is his to do when he likes, or never: the git install keeps following `main`,
   which has every release the npm package has. Then the project stays as it is.
 
@@ -946,6 +948,9 @@ and one README there shows the same line.
 >
 > Keep only one. pi counts the old git address, the new one and the npm package as three different packages, and
 > each would register the provider `cliproxyapi`.
+
+The README does not carry this block: its "Coming from pi-cliproxyapi-provider" shows the move from the original's
+npm package, and since 105.0.5 the provider id is `provimux`.
 
 (pi identifies a git package by its repository address and an npm package by its name, so nothing replaces the old
 entry by itself.)

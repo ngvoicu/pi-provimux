@@ -483,8 +483,8 @@ from providers.dev.
     own response headers and its one report, so an answer is never reported with another request's credential or
     model.
 
-  [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) reads `upstreams: []` as "route not known" from its
-  next release, 0.7.0, on; older versions ignore an empty `upstreams` and keep what they had.
+  [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) reads `upstreams: []` as "route not known" from
+  0.7.0 on; older versions ignore an empty `upstreams` and keep what they had.
 
 An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
 (`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider pi has none for
