@@ -650,7 +650,7 @@ describe("provider startup cache behavior", () => {
 			try {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
 				expect(fetchMock).toHaveBeenCalledTimes(3);
-				expect(commands.has("cliproxyapi-refresh")).toBe(true);
+				expect(commands.has("provimux-refresh")).toBe(true);
 
 				const initialCallsWithModels = (
 					(pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls as Array<
@@ -704,7 +704,7 @@ describe("provider startup cache behavior", () => {
 
 			try {
 				await providerExtension(pi);
-				const refresh = commands.get("cliproxyapi-refresh")!;
+				const refresh = commands.get("provimux-refresh")!;
 				const notify = vi.fn();
 				await refresh.handler("", { ui: { notify } } as unknown as ExtensionCommandContext);
 
@@ -1242,14 +1242,35 @@ describe("provider startup cache behavior", () => {
 	});
 });
 
-describe("/cliproxyapi-refresh command", () => {
+describe("/provimux-refresh command", () => {
 	it("is registered by the provider extension", async () => {
 		await withTempAgentDir(async () => {
 			const { pi, commands } = createPiMock();
 			await expect(providerExtension(pi)).resolves.toBeUndefined();
-			const refresh = commands.get("cliproxyapi-refresh");
+			const refresh = commands.get("provimux-refresh");
 			expect(refresh).toBeDefined();
 			expect(refresh?.description).toContain("refresh");
+			expect(refresh?.description).toContain("Provimux");
+		});
+	});
+
+	it("keeps /cliproxyapi-refresh, the original extension's name, as an alias that says so", async () => {
+		await withTempAgentDir(async () => {
+			const { pi, commands } = createPiMock();
+			await providerExtension(pi);
+			const alias = commands.get("cliproxyapi-refresh")!;
+			expect(alias).toBeDefined();
+			expect(alias.description).toContain("Old name of /provimux-refresh");
+			const notify = vi.fn();
+			const ctx = { ui: { notify } } as unknown as ExtensionCommandContext;
+
+			await alias.handler("now", ctx);
+			expect(notify).toHaveBeenCalledWith("Usage: /cliproxyapi-refresh", "error");
+			await alias.handler("", ctx);
+			expect(notify).toHaveBeenCalledWith(
+				"Provimux is not configured. Use /login Provimux or /login cliproxyapi.",
+				"error",
+			);
 		});
 	});
 
@@ -1257,12 +1278,12 @@ describe("/cliproxyapi-refresh command", () => {
 		await withTempAgentDir(async () => {
 			const { pi, commands } = createPiMock();
 			await providerExtension(pi);
-			const refresh = commands.get("cliproxyapi-refresh")!;
+			const refresh = commands.get("provimux-refresh")!;
 			const notify = vi.fn();
 			const ctx = { ui: { notify } } as unknown as ExtensionCommandContext;
 
 			await refresh.handler("now", ctx);
-			expect(notify).toHaveBeenCalledWith("Usage: /cliproxyapi-refresh", "error");
+			expect(notify).toHaveBeenCalledWith("Usage: /provimux-refresh", "error");
 		});
 	});
 
@@ -1270,7 +1291,7 @@ describe("/cliproxyapi-refresh command", () => {
 		await withTempAgentDir(async () => {
 			const { pi, commands } = createPiMock();
 			await providerExtension(pi);
-			const refresh = commands.get("cliproxyapi-refresh")!;
+			const refresh = commands.get("provimux-refresh")!;
 			const notify = vi.fn();
 			const ctx = { ui: { notify } } as unknown as ExtensionCommandContext;
 
@@ -1300,7 +1321,7 @@ describe("/cliproxyapi-refresh command", () => {
 
 			try {
 				await providerExtension(pi);
-				const refresh = commands.get("cliproxyapi-refresh")!;
+				const refresh = commands.get("provimux-refresh")!;
 				const notify = vi.fn();
 				const model = { id: "refreshed", provider: "cliproxyapi" } as Model<Api>;
 				const ctx = { model, ui: { notify } } as unknown as ExtensionCommandContext;
@@ -1308,7 +1329,7 @@ describe("/cliproxyapi-refresh command", () => {
 				await refresh.handler("", ctx);
 
 				expect(fetchMock).toHaveBeenCalledTimes(6);
-				expect(notify).toHaveBeenCalledWith(expect.stringContaining("Refreshed 1 CLIProxyAPI models"), "info");
+				expect(notify).toHaveBeenCalledWith(expect.stringContaining("Refreshed 1 Provimux models"), "info");
 
 				const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
 				expect(diskCache?.models.map((model) => model.id)).toEqual(["refreshed"]);
@@ -1334,17 +1355,14 @@ describe("/cliproxyapi-refresh command", () => {
 
 			try {
 				await providerExtension(pi);
-				const refresh = commands.get("cliproxyapi-refresh")!;
+				const refresh = commands.get("provimux-refresh")!;
 				const notify = vi.fn();
 				const model = { id: "any", provider: "cliproxyapi" } as Model<Api>;
 				const ctx = { model, ui: { notify } } as unknown as ExtensionCommandContext;
 
 				await refresh.handler("", ctx);
 
-				expect(notify).toHaveBeenCalledWith(
-					expect.stringContaining("Failed to refresh CLIProxyAPI models"),
-					"error",
-				);
+				expect(notify).toHaveBeenCalledWith(expect.stringContaining("Failed to refresh Provimux models"), "error");
 			} finally {
 				fetchMock.mockRestore();
 			}

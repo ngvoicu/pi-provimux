@@ -20,6 +20,7 @@ import {
 	firstNonEmpty,
 	isModelReferencedAsDefault,
 	isUnauthorizedModelsError,
+	LEGACY_DEFAULT_PROVIDER_NAME,
 	loadAuthConnection,
 	loadConfigFile,
 	loadConfiguredDefaultSettings,
@@ -570,6 +571,27 @@ describe("config and auth file helpers", () => {
 			providerName: DEFAULT_PROVIDER_NAME,
 		});
 		expect(DEFAULT_BASE_URL).toBe("http://127.0.0.1:8317");
+	});
+
+	it("shows the provider as Provimux, also for a setup whose file holds the old default name", () => {
+		const previous = process.env.CLIPROXYAPI_PROVIDER_NAME;
+		delete process.env.CLIPROXYAPI_PROVIDER_NAME;
+		try {
+			expect(DEFAULT_PROVIDER_NAME).toBe("Provimux");
+			const agentDir = tempAgentDir();
+			saveConfigFile(agentDir, { providerName: LEGACY_DEFAULT_PROVIDER_NAME });
+			expect(resolveIdentity(agentDir).providerName).toBe("Provimux");
+			saveConfigFile(agentDir, { providerName: "CPA" });
+			expect(resolveIdentity(agentDir).providerName).toBe("CPA");
+			process.env.CLIPROXYAPI_PROVIDER_NAME = "CLIProxyAPI";
+			expect(resolveIdentity(agentDir).providerName).toBe("CLIProxyAPI");
+		} finally {
+			if (previous === undefined) {
+				delete process.env.CLIPROXYAPI_PROVIDER_NAME;
+			} else {
+				process.env.CLIPROXYAPI_PROVIDER_NAME = previous;
+			}
+		}
 	});
 
 	it("loads configured default settings from settings.json", () => {

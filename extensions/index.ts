@@ -1,11 +1,13 @@
 /**
- * CLIProxyAPI dynamic model provider for pi.
+ * Provimux dynamic model provider for pi (works with a Provimux or a plain CLIProxyAPI server).
  *
  * Supports login-style setup via `/login`:
- * 1. Provider is registered as OAuth-only so `/login CLIProxyAPI` / `/login cliproxyapi`
+ * 1. Provider is registered as OAuth-only so `/login Provimux` / `/login cliproxyapi`
  *    skip the API-key vs account selector and go straight to multi-field prompts
- *    (pi only supports multi-field prompts on the account/OAuth path).
- * 2. Preferred shortcuts: `/login CLIProxyAPI` or `/login cliproxyapi`.
+ *    (pi only supports multi-field prompts on the account/OAuth path). pi matches the
+ *    reference against the id and the display name ignoring case, so `/login CLIProxyAPI`
+ *    still matches, by the id.
+ * 2. Preferred shortcuts: `/login Provimux` or `/login cliproxyapi`.
  * 3. Setup prompts for baseUrl + apiKey.
  * 4. Final login step validates credentials via /v1/models?client_version=pi
  *    (HTTP 200 = success even if the catalog is empty; otherwise re-prompt).
@@ -276,12 +278,14 @@ function resolveDefaultBaseUrl(agentDir: string, providerId: string): string {
 
 async function promptConnection(
 	callbacks: OAuthLoginCallbacks,
-	defaults: { baseUrl: string },
+	defaults: { baseUrl: string; providerName: string },
 ): Promise<{ baseUrlInput: string; apiKey: string }> {
-	callbacks.onProgress?.("Configure CLIProxyAPI. Preferred baseUrl form: host:port (e.g. http://127.0.0.1:8317).");
+	callbacks.onProgress?.(
+		`Configure ${defaults.providerName} (a Provimux or CLIProxyAPI server). Preferred baseUrl form: host:port (e.g. http://127.0.0.1:8317).`,
+	);
 
 	const baseUrlRaw = await callbacks.onPrompt({
-		message: `CLIProxyAPI base URL [${defaults.baseUrl}]:`,
+		message: `${defaults.providerName} base URL [${defaults.baseUrl}]:`,
 		placeholder: defaults.baseUrl,
 		allowEmpty: true,
 	});
@@ -292,7 +296,7 @@ async function promptConnection(
 
 	const apiKey = (
 		await callbacks.onPrompt({
-			message: "CLIProxyAPI API key:",
+			message: `${defaults.providerName} API key:`,
 			placeholder: "sk-...",
 			allowEmpty: false,
 		})
@@ -415,6 +419,7 @@ function createOAuthHandlers(options: {
 			while (true) {
 				const { baseUrlInput, apiKey } = await promptConnection(callbacks, {
 					baseUrl: promptDefaultBaseUrl,
+					providerName,
 				});
 
 				callbacks.onProgress?.("Validating credentials via models endpoint...");
@@ -611,7 +616,7 @@ export function registerFastCommands(options: {
 	let modeChangeInProgress = false;
 
 	const createCommand = (name: string, label: string, selected: Exclude<FastPreference, false>) => ({
-		description: `Toggle CLIProxyAPI ${label} mode globally.`,
+		description: `Toggle Provimux ${label} mode globally.`,
 		handler: async (args: string, ctx: ExtensionContext) => {
 			if (args.trim()) {
 				ctx.ui.notify(`Usage: /${name}`, "error");
@@ -684,6 +689,10 @@ export function registerFastCommands(options: {
 	pi.registerCommand("ultrafast", createCommand("ultrafast", "Ultra Fast", "ultrafast"));
 }
 
+/** The refresh command, and the original extension's name for it, kept as an alias. */
+export const REFRESH_COMMAND = "provimux-refresh";
+export const LEGACY_REFRESH_COMMAND = "cliproxyapi-refresh";
+
 export function registerRefreshCommand(options: {
 	pi: ExtensionAPI;
 	agentDir: string;
@@ -707,18 +716,18 @@ export function registerRefreshCommand(options: {
 		onRefresh,
 	} = options;
 
-	pi.registerCommand("cliproxyapi-refresh", {
-		description: "Force refresh CLIProxyAPI models from the remote catalog.",
-		handler: async (args, ctx) => {
+	const refreshHandler =
+		(name: string) =>
+		async (args: string, ctx: ExtensionContext): Promise<void> => {
 			if (args.trim()) {
-				ctx.ui.notify("Usage: /cliproxyapi-refresh", "error");
+				ctx.ui.notify(`Usage: /${name}`, "error");
 				return;
 			}
 
 			const connection = resolveConnection(agentDir, providerId);
 			if (!connection) {
 				ctx.ui.notify(
-					`CLIProxyAPI is not configured. Use /login ${providerName} or /login ${providerId}.`,
+					`${providerName} is not configured. Use /login ${providerName} or /login ${providerId}.`,
 					"error",
 				);
 				return;
@@ -766,14 +775,23 @@ export function registerRefreshCommand(options: {
 				const staleSuffix =
 					result.staleCount && result.staleCount > 0 ? ` (${result.staleCount} retained from cache)` : "";
 				ctx.ui.notify(
-					`Refreshed ${result.modelCount} CLIProxyAPI models${staleSuffix} from ${result.modelsUrl}.`,
+					`Refreshed ${result.modelCount} ${providerName} models${staleSuffix} from ${result.modelsUrl}.`,
 					"info",
 				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Failed to refresh CLIProxyAPI models: ${message}`, "error");
+				ctx.ui.notify(`Failed to refresh ${providerName} models: ${message}`, "error");
 			}
-		},
+		};
+
+	pi.registerCommand(REFRESH_COMMAND, {
+		description: "Force refresh Provimux models from the remote catalog.",
+		handler: refreshHandler(REFRESH_COMMAND),
+	});
+	// The original extension's name for it, kept for people coming from pi-cliproxyapi-provider.
+	pi.registerCommand(LEGACY_REFRESH_COMMAND, {
+		description: `Old name of /${REFRESH_COMMAND}: force refresh Provimux models from the remote catalog.`,
+		handler: refreshHandler(LEGACY_REFRESH_COMMAND),
 	});
 }
 

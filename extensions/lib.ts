@@ -25,7 +25,13 @@ export interface PiProviderModelCompat {
 export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
 
 export const DEFAULT_PROVIDER_ID = "cliproxyapi";
-export const DEFAULT_PROVIDER_NAME = "CLIProxyAPI";
+export const DEFAULT_PROVIDER_NAME = "Provimux";
+/**
+ * The display name before 105.0.3. `/login` writes the name into `cliproxyapi.json`, so a setup made then holds it
+ * without anyone having chosen it: read from the file, it means the default. Set by `CLIPROXYAPI_PROVIDER_NAME`, it
+ * is a choice and is kept.
+ */
+export const LEGACY_DEFAULT_PROVIDER_NAME = "CLIProxyAPI";
 export const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
 export const CONFIG_FILE_NAME = "cliproxyapi.json";
 export const MODELS_CACHE_FILE_NAME = "cliproxyapi-models.json";
@@ -413,7 +419,13 @@ export function resolveIdentity(agentDir: string): ResolvedIdentity {
 
 	return {
 		providerId: firstNonEmpty(process.env.CLIPROXYAPI_PROVIDER_ID, file.providerId, DEFAULT_PROVIDER_ID)!,
-		providerName: firstNonEmpty(process.env.CLIPROXYAPI_PROVIDER_NAME, file.providerName, DEFAULT_PROVIDER_NAME)!,
+		providerName: firstNonEmpty(
+			process.env.CLIPROXYAPI_PROVIDER_NAME,
+			typeof file.providerName === "string" && file.providerName.trim() === LEGACY_DEFAULT_PROVIDER_NAME
+				? undefined
+				: file.providerName,
+			DEFAULT_PROVIDER_NAME,
+		)!,
 	};
 }
 

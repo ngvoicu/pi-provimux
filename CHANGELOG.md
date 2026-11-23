@@ -1,5 +1,20 @@
 # Changelog
 
+## 105.0.3
+
+The command and the login now say Provimux. The old names keep working.
+
+- **`/provimux-refresh`** reloads the model list. `/cliproxyapi-refresh`, its name in the original extension, stays
+  as an alias, and its description says it is the old name of `/provimux-refresh`.
+- **The login is shown as Provimux** in `/login`'s list, its prompts and the extension's messages (was
+  CLIProxyAPI). `/login Provimux` and `/login cliproxyapi` work; so does `/login CLIProxyAPI`, which pi matches,
+  ignoring case, to the provider id. A `cliproxyapi.json` written by an earlier `/login` holds
+  `"providerName": "CLIProxyAPI"`: that value now reads as the default, Provimux. Another name in the file, or any
+  name in `CLIPROXYAPI_PROVIDER_NAME`, is kept.
+- **Unchanged:** the provider id `cliproxyapi` (`cliproxyapi/<model>` in settings and sessions), the
+  `CLIPROXYAPI_*` environment variables, `cliproxyapi.json`, `cliproxyapi-models.json`, and the internal API name
+  `cliproxyapi-codex-responses`.
+
 ## 105.0.2
 
 The extension is the same as in 105.0.1; what changes is how pi-provimux is released.

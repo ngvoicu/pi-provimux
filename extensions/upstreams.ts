@@ -12,7 +12,7 @@
  *
  * - `model-upstreams:request` (sent by an extension that wants them): CLIProxyAPI is asked, and the answer follows.
  * - `model-upstreams`: `{ provider, models: { [id]: { upstreams, fallbacks? } } }`, after a request and, once one came,
- *   after `/cliproxyapi-refresh`. `upstreams` are what may serve the model (several: not known which), `fallbacks` what may
+ *   after `/provimux-refresh`. `upstreams` are what may serve the model (several: not known which), `fallbacks` what may
  *   answer when those fail.
  * - `model-upstreams:answered`: `{ provider, model, upstreams }`, once per answer, while the request is out. Over HTTP
  *   and SSE only the response headers (`X-CPA-AUTH-*`) count; over the Codex WebSocket, which has no headers per turn,

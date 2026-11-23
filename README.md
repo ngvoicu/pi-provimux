@@ -14,7 +14,7 @@ pi install npm:pi-provimux
 Then, in pi:
 
 ```text
-/login CLIProxyAPI
+/login Provimux
 ```
 
 and enter the server's address (for example `http://127.0.0.1:8317`) and your client key.
@@ -28,8 +28,8 @@ From the original extension:
 
 - **Your models in pi.** It reads the model list from `{root}/v1/models?client_version=pi` and registers each model
   with its context window, reasoning levels and, when [models.dev](https://models.dev) knows it, its price.
-- **Setup by `/login`.** `/login CLIProxyAPI` asks for the address and the key, checks them, and saves them.
-- **A model cache**, so pi starts at once when the server is slow; `/cliproxyapi-refresh` reloads the list.
+- **Setup by `/login`.** `/login Provimux` asks for the address and the key, checks them, and saves them.
+- **A model cache**, so pi starts at once when the server is slow; `/provimux-refresh` reloads the list.
 - **`/fast` and `/ultrafast`**: faster service tiers on the models that offer them.
 - **`/pause` and `/continue`**: hold every request to the provider until you continue.
 - **GPT prompt caching kept**: the base prompt of `gpt-` models is sent so the prompt cache keeps being read (pi
@@ -80,9 +80,19 @@ It needs pi 0.99.0 or newer: the Codex WebSocket reports which kind of account a
 ### Coming from pi-cliproxyapi-provider
 
 pi-provimux keeps everything your setup names: the provider id `cliproxyapi` (so `cliproxyapi/<model>` in your
-settings still works), `/login CLIProxyAPI`, the commands, the `CLIPROXYAPI_*` environment variables, and the files
-`cliproxyapi.json` and `cliproxyapi-models.json`. Remove the old package first, so that only one of them registers
-the provider:
+settings still works), the `CLIPROXYAPI_*` environment variables, and the files `cliproxyapi.json` and
+`cliproxyapi-models.json`. Two names changed, and the old ones still work:
+
+| Was | Now | The old one |
+| --- | --- | --- |
+| `/cliproxyapi-refresh` | `/provimux-refresh` | Kept as an alias of `/provimux-refresh`. |
+| The login shown as **CLIProxyAPI** | **Provimux** | `/login CLIProxyAPI` still works: pi matches it, ignoring case, to the id `cliproxyapi`. |
+
+A `cliproxyapi.json` written by an earlier `/login` holds `"providerName": "CLIProxyAPI"`; it is read as the
+default, so the login shows as Provimux there too. A name you set yourself, or through `CLIPROXYAPI_PROVIDER_NAME`,
+is kept.
+
+Remove the old package first, so that only one of them registers the provider:
 
 ```bash
 pi remove npm:@router-for-me/pi-cliproxyapi-provider   # or the source you installed it from
@@ -91,21 +101,21 @@ pi install npm:pi-provimux
 
 ## Login-style setup (recommended)
 
-This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so CLIProxyAPI appears under **Sign in with an account** (not API key).
+This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so Provimux appears under **Sign in with an account** (not API key).
 
 ### Preferred: /login shortcuts
 
 ```text
-/login CLIProxyAPI
+/login Provimux
 ```
 
-or:
+or, by the provider id:
 
 ```text
 /login cliproxyapi
 ```
 
-These shortcuts jump straight into CLIProxyAPI's multi-field baseUrl + API key prompts. The provider is registered as OAuth-only, so pi does not ask you to choose between API key and account first.
+(`/login CLIProxyAPI` is the same id, as pi ignores case.) These shortcuts jump straight into the multi-field baseUrl + API key prompts. The provider is registered as OAuth-only, so pi does not ask you to choose between API key and account first.
 
 ### Menu path
 
@@ -117,7 +127,7 @@ Then choose:
 
 1. **Sign in with an account**
    (required for multi-field baseUrl + API key prompts)
-2. **CLIProxyAPI**
+2. **Provimux**
 3. Enter:
    - base URL — preferred form is host:port, e.g. `http://127.0.0.1:8317`
    - API key
@@ -133,7 +143,7 @@ On success:
 - `baseUrl` / `apiKey` are written to `~/.pi/agent/cliproxyapi.json`
 - pi also stores the returned credential in `~/.pi/agent/auth.json`
 
-Re-run `/login CLIProxyAPI` or `/login cliproxyapi` anytime to reconfigure. The built-in `/logout` command only removes credentials saved in `auth.json`; it does not erase `cliproxyapi.json`. Remove or update that file if you also need to clear the provider configuration.
+Re-run `/login Provimux` or `/login cliproxyapi` anytime to reconfigure. The built-in `/logout` command only removes credentials saved in `auth.json`; it does not erase `cliproxyapi.json`. Remove or update that file if you also need to clear the provider configuration.
 
 ## Non-interactive configuration
 
@@ -156,10 +166,10 @@ Optional fields:
 
 | Field | Default | Description |
 | ------- | --------- | ------------- |
-| `baseUrl` | `http://127.0.0.1:8317` | CLIProxyAPI address |
+| `baseUrl` | `http://127.0.0.1:8317` | Provimux or CLIProxyAPI address |
 | `apiKey` | _(required unless set via /login or env)_ | Bearer token / CPA API key |
 | `providerId` | `cliproxyapi` | Provider id shown in `/model` |
-| `providerName` | `CLIProxyAPI` | Display name in `/login` and UI |
+| `providerName` | `Provimux` | Display name in `/login` and UI (`CLIProxyAPI`, the default before 105.0.3, written here by `/login`, reads as the default) |
 | `fast` | `false` | Persisted speed preference: `false` (off), `true` (Fast), or `"ultrafast"` (Ultra Fast) |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
 | `tps` | `true` | Show the elapsed time footer and TPS summary in the TUI; see [Elapsed time and TPS](#elapsed-time-and-tps-tui) |
@@ -250,12 +260,12 @@ When the provider loads (including session resume):
 1. If a cache exists for the configured `baseUrl`, its models are registered immediately. A remote query to `{root}/v1/models?client_version=pi` then runs in the background; on success, the cache is rewritten and the registered model list is refreshed. If the query fails, the existing cache remains active.
 2. If no matching cache exists, the remote query runs synchronously. On success, the cache is written and the fetched models are registered. If it fails, startup logs a warning and no models are registered until the proxy responds.
 
-Use `/cliproxyapi-refresh` to force an immediate remote refresh of the model catalog.
+Use `/provimux-refresh` to force an immediate remote refresh of the model catalog.
 
 ### Refresh commands
 
-- `/cliproxyapi-refresh` — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi.
-- `/login CLIProxyAPI` / `/login cliproxyapi` — re-entering credentials always forces a fresh models query and rewrites the cache.
+- `/provimux-refresh` (or its old name `/cliproxyapi-refresh`) — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi.
+- `/login Provimux` / `/login cliproxyapi` — re-entering credentials always forces a fresh models query and rewrites the cache.
 
 Delete `~/.pi/agent/cliproxyapi-models.json` to clear the cache manually.
 
@@ -336,7 +346,7 @@ anthropic/claude-opus-5.5 · OpenRouter api
 - Everything is read from CLIProxyAPI's list; nothing is guessed from a model's id or owner. A CLIProxyAPI that does
   not list its credentials, or a list that can't be read, leaves every name as it was.
 - It says what the list said when it was fetched: after changing credentials or priorities in CLIProxyAPI, run
-  `/cliproxyapi-refresh` (the startup refresh also updates it). What answered a given request is a separate matter:
+  `/provimux-refresh` (the startup refresh also updates it). What answered a given request is a separate matter:
   see the next section.
 
 pi shows a model's name in `/model` beside its id and searches it, and its model patterns (`--model`, scoped models)
@@ -358,7 +368,7 @@ from providers.dev.
   The answer belongs to the session that asked: when it ends (quit, `/reload`, another session) before the list
   arrives, the lookup is aborted and nothing is said.
 - **`model-upstreams`**: `{ provider, models: { [modelId]: { upstreams, fallbacks? } } }`, the answer, and again after
-  `/cliproxyapi-refresh`. `upstreams` are what may serve the model (several: it is not known which), `fallbacks` what
+  `/provimux-refresh`. `upstreams` are what may serve the model (several: it is not known which), `fallbacks` what
   may answer when those fail or cool down.
 - **`model-upstreams:answered`** (Provimux): `{ provider, model, upstreams }`, what answered a request, at most once
   per answer. `model` is the model the request was sent to (a virtual model's routed model, not the selection).
@@ -426,7 +436,7 @@ How the routes are made:
 
 If you previously maintained a static provider such as `cpa-responses` in `~/.pi/agent/models.json`:
 
-1. Install this package and run `/login CLIProxyAPI` or `/login cliproxyapi` (or set `cliproxyapi.json`).
+1. Install this package and run `/login Provimux` or `/login cliproxyapi` (or set `cliproxyapi.json`).
 2. Point `defaultProvider` / `enabledModels` at `cliproxyapi/<model-id>` (or set `providerId` to `cpa-responses` for a drop-in id).
 3. Remove the hand-maintained models array once the dynamic list looks correct.
 
@@ -446,11 +456,11 @@ Set `"tps": false` in `~/.pi/agent/cliproxyapi.json` to turn off just this helpe
 - Before setup / without credentials: provider still appears in `/login`; no models are listed yet.
 - After successful `/login`: models are registered; credentials are stored in `auth.json` and mirrored to `cliproxyapi.json`.
 - The built-in `/logout` command removes only the matching `auth.json` credential; environment variables and `cliproxyapi.json` are unchanged.
-- If a models request returns **HTTP 401** or CPA is unreachable during startup, an existing matching cache remains in use while the background refresh fails. Only when no cache is available is a warning logged; reconfigure via `/login CLIProxyAPI` or fix config/env.
+- If a models request returns **HTTP 401** or CPA is unreachable during startup, an existing matching cache remains in use while the background refresh fails. Only when no cache is available is a warning logged; reconfigure via `/login Provimux` or fix config/env.
 - Login final step validates credentials by requesting models:
   - HTTP 200 (including empty catalog) → credentials are persisted
   - non-200 / network / invalid baseUrl → nothing is persisted; re-enter baseUrl + API key
-- If CPA returns HTTP 200 with zero usable models: login still succeeds; re-run `/login CLIProxyAPI` later after models become available.
+- If CPA returns HTTP 200 with zero usable models: login still succeeds; re-run `/login Provimux` later after models become available.
 - If the selected model does not provide a non-empty `service_tiers` array: the request is left unchanged; `/fast` and `/ultrafast` still update the global preference and warn when enabling a mode.
 - After `/compact`, threshold compaction, or overflow recovery, the provider closes the reused Codex WebSocket for the current session. CLIProxyAPI binds server-side context to the connection, so a reused socket would keep reporting a near-full `cacheRead` and retrigger proactive compaction even though the client context is now small. SSE is unaffected because it bills from the request body.
 

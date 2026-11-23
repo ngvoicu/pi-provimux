@@ -110,18 +110,19 @@ describe("pi 0.82.0 compatibility", () => {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
 				expect(fetchMock).not.toHaveBeenCalled();
 
-				expect(commands.size).toBe(5);
+				expect(commands.size).toBe(6);
 				expect(commands.has("fast")).toBe(true);
 				expect(commands.has("ultrafast")).toBe(true);
 				expect(commands.has("pause")).toBe(true);
 				expect(commands.has("continue")).toBe(true);
+				expect(commands.has("provimux-refresh")).toBe(true);
 				expect(commands.has("cliproxyapi-refresh")).toBe(true);
 				expect(commands.has("cliproxyapi")).toBe(false);
 				expect(pi.unregisterProvider).toHaveBeenCalledWith("cliproxyapi");
 				expect(pi.registerProvider).toHaveBeenCalledWith(
 					"cliproxyapi",
 					expect.objectContaining({
-						name: "CLIProxyAPI",
+						name: "Provimux",
 						oauth: expect.any(Object),
 					}),
 				);
@@ -295,11 +296,12 @@ describe("pi 0.82.0 compatibility", () => {
 			try {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
 				expect(fetchMock).toHaveBeenCalled();
-				expect(commands.size).toBe(5);
+				expect(commands.size).toBe(6);
 				expect(commands.has("fast")).toBe(true);
 				expect(commands.has("ultrafast")).toBe(true);
 				expect(commands.has("pause")).toBe(true);
 				expect(commands.has("continue")).toBe(true);
+				expect(commands.has("provimux-refresh")).toBe(true);
 				expect(commands.has("cliproxyapi-refresh")).toBe(true);
 				expect(commands.has("cliproxyapi")).toBe(false);
 				expect(pi.registerProvider).toHaveBeenCalledWith(
