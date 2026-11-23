@@ -1254,19 +1254,16 @@ describe("/provimux-refresh command", () => {
 		});
 	});
 
-	it("keeps /cliproxyapi-refresh, the original extension's name, as an alias that says so", async () => {
+	it("is the only refresh command: /cliproxyapi-refresh, the original extension's name, is gone", async () => {
 		await withTempAgentDir(async () => {
 			const { pi, commands } = createPiMock();
 			await providerExtension(pi);
-			const alias = commands.get("cliproxyapi-refresh")!;
-			expect(alias).toBeDefined();
-			expect(alias.description).toContain("Old name of /provimux-refresh");
+			expect(commands.has("cliproxyapi-refresh")).toBe(false);
+			expect([...commands.keys()].filter((name) => name.endsWith("-refresh"))).toEqual(["provimux-refresh"]);
 			const notify = vi.fn();
 			const ctx = { ui: { notify } } as unknown as ExtensionCommandContext;
 
-			await alias.handler("now", ctx);
-			expect(notify).toHaveBeenCalledWith("Usage: /cliproxyapi-refresh", "error");
-			await alias.handler("", ctx);
+			await commands.get("provimux-refresh")!.handler("", ctx);
 			expect(notify).toHaveBeenCalledWith(
 				"Provimux is not configured. Use /login Provimux or /login cliproxyapi.",
 				"error",

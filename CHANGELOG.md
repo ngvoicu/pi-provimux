@@ -1,5 +1,12 @@
 # Changelog
 
+## 105.0.4
+
+- **`/cliproxyapi-refresh` is gone.** Only `/provimux-refresh` reloads the model list; pi no longer shows two
+  refresh commands. Everything else of 105.0.3 stays: the provider id `cliproxyapi`, the `CLIPROXYAPI_*`
+  environment variables, `cliproxyapi.json` and `cliproxyapi-models.json`, `/login cliproxyapi` (and
+  `/login CLIProxyAPI`, the same id), and a stored `"providerName": "CLIProxyAPI"` read as Provimux.
+
 ## 105.0.3
 
 The command and the login now say Provimux. The old names keep working.

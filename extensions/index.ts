@@ -689,9 +689,8 @@ export function registerFastCommands(options: {
 	pi.registerCommand("ultrafast", createCommand("ultrafast", "Ultra Fast", "ultrafast"));
 }
 
-/** The refresh command, and the original extension's name for it, kept as an alias. */
+/** The refresh command. The original extension's name for it, `/cliproxyapi-refresh`, is gone since 105.0.4. */
 export const REFRESH_COMMAND = "provimux-refresh";
-export const LEGACY_REFRESH_COMMAND = "cliproxyapi-refresh";
 
 export function registerRefreshCommand(options: {
 	pi: ExtensionAPI;
@@ -787,11 +786,6 @@ export function registerRefreshCommand(options: {
 	pi.registerCommand(REFRESH_COMMAND, {
 		description: "Force refresh Provimux models from the remote catalog.",
 		handler: refreshHandler(REFRESH_COMMAND),
-	});
-	// The original extension's name for it, kept for people coming from pi-cliproxyapi-provider.
-	pi.registerCommand(LEGACY_REFRESH_COMMAND, {
-		description: `Old name of /${REFRESH_COMMAND}: force refresh Provimux models from the remote catalog.`,
-		handler: refreshHandler(LEGACY_REFRESH_COMMAND),
 	});
 }
 

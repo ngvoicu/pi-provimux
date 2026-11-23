@@ -462,9 +462,6 @@ describe("pi's CLI with this extension, against a fixture proxy", { timeout: 120
 		models.find((m) => m.slug === "gpt-catalog-fixture")!.levels = ["medium", "high"];
 		const refresh = await pi(["--no-session", "--model", CODEX, "-p", "/provimux-refresh"]);
 		expect(refresh.code, said(refresh)).toBe(0);
-		// The original extension's name for it still runs it.
-		const legacy = await pi(["--no-session", "--model", CODEX, "-p", "/cliproxyapi-refresh"]);
-		expect(legacy.code, said(legacy)).toBe(0);
 
 		const resumed = await pi([...sessions, "--model", CODEX, "-c", "-p", "--thinking", "medium", "second"]);
 		expect(resumed.code, said(resumed)).toBe(0);

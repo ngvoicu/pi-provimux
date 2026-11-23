@@ -81,11 +81,11 @@ It needs pi 0.99.0 or newer: the Codex WebSocket reports which kind of account a
 
 pi-provimux keeps everything your setup names: the provider id `cliproxyapi` (so `cliproxyapi/<model>` in your
 settings still works), the `CLIPROXYAPI_*` environment variables, and the files `cliproxyapi.json` and
-`cliproxyapi-models.json`. Two names changed, and the old ones still work:
+`cliproxyapi-models.json`. Two names changed:
 
 | Was | Now | The old one |
 | --- | --- | --- |
-| `/cliproxyapi-refresh` | `/provimux-refresh` | Kept as an alias of `/provimux-refresh`. |
+| `/cliproxyapi-refresh` | `/provimux-refresh` | Gone since 105.0.4: use `/provimux-refresh`. |
 | The login shown as **CLIProxyAPI** | **Provimux** | `/login CLIProxyAPI` still works: pi matches it, ignoring case, to the id `cliproxyapi`. |
 
 A `cliproxyapi.json` written by an earlier `/login` holds `"providerName": "CLIProxyAPI"`; it is read as the
@@ -264,7 +264,7 @@ Use `/provimux-refresh` to force an immediate remote refresh of the model catalo
 
 ### Refresh commands
 
-- `/provimux-refresh` (or its old name `/cliproxyapi-refresh`) — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi.
+- `/provimux-refresh` — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi.
 - `/login Provimux` / `/login cliproxyapi` — re-entering credentials always forces a fresh models query and rewrites the cache.
 
 Delete `~/.pi/agent/cliproxyapi-models.json` to clear the cache manually.
