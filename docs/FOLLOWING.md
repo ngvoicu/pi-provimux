@@ -146,6 +146,23 @@ owner before it does. If the original is silent that long: `gh workflow enable f
 - **The cost:** the fork is no longer "the original plus N patches" in the log. What the fork changes is read with
   `git diff router-for-me/main...main`.
 
+**The provider id differs from the original's (105.0.5).** These lines are the fork's on purpose. A release that
+touches them stops in a conflict, and the resolution keeps the fork's side:
+
+- `extensions/lib.ts`: the original has `DEFAULT_PROVIDER_ID = "cliproxyapi"`; the fork has `"provimux"`, plus
+  `LEGACY_DEFAULT_PROVIDER_ID = "cliproxyapi"`. In `resolveIdentity`, a file `providerId` equal to that old value
+  reads as the default, as `LEGACY_DEFAULT_PROVIDER_NAME` does for the name.
+- `extensions/index.ts`: the original passes `[identity.providerId, "cliproxyapi"]` to `loadCliproxyCodexStreams`;
+  the fork passes `[identity.providerId]`. pi-ai checks that list against the provider of the model being called,
+  and only this provider's models use that stream, so the old literal could only matter when it is the resolved id
+  anyway.
+
+A clean merge can still bring in a new literal `"cliproxyapi"` used as a provider id (a comparison, a default). No
+guard looks for one. After a merge, `grep -n '"cliproxyapi' extensions/*.ts` should show only `LEGACY_DEFAULT_PROVIDER_ID`
+and `loadCliproxyCodexStreams`' default argument (used only by tests). The CLI test (`test/cli.test.ts`, "the
+provider id, in pi's CLI") fails if the models stop showing under `provimux` or the owner-shaped setup stops
+answering.
+
 ### 2.4 The run: `follow.yml`
 
 Every job checks out the run's own commit (`github.sha`, the `main` the run names) and runs **that commit's**

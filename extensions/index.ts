@@ -2,12 +2,11 @@
  * Provimux dynamic model provider for pi (works with a Provimux or a plain CLIProxyAPI server).
  *
  * Supports login-style setup via `/login`:
- * 1. Provider is registered as OAuth-only so `/login Provimux` / `/login cliproxyapi`
+ * 1. Provider is registered as OAuth-only so `/login Provimux` / `/login provimux`
  *    skip the API-key vs account selector and go straight to multi-field prompts
  *    (pi only supports multi-field prompts on the account/OAuth path). pi matches the
- *    reference against the id and the display name ignoring case, so `/login CLIProxyAPI`
- *    still matches, by the id.
- * 2. Preferred shortcuts: `/login Provimux` or `/login cliproxyapi`.
+ *    reference against the id and the display name ignoring case.
+ * 2. Preferred shortcuts: `/login Provimux` or `/login provimux`.
  * 3. Setup prompts for baseUrl + apiKey.
  * 4. Final login step validates credentials via /v1/models?client_version=pi
  *    (HTTP 200 = success even if the catalog is empty; otherwise re-prompt).
@@ -839,7 +838,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		);
 	};
 	try {
-		const streams = await loadCliproxyCodexStreams([identity.providerId, "cliproxyapi"], {
+		// pi checks this list against the model being called, and only this provider's models use this stream.
+		const streams = await loadCliproxyCodexStreams([identity.providerId], {
 			resolveServiceTier: (model) =>
 				model.provider === identity.providerId ? fastMode.getServiceTierFor(model.id) : undefined,
 		});

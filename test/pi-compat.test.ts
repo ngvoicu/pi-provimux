@@ -118,15 +118,15 @@ describe("pi 0.82.0 compatibility", () => {
 				expect(commands.has("provimux-refresh")).toBe(true);
 				expect(commands.has("cliproxyapi-refresh")).toBe(false);
 				expect(commands.has("cliproxyapi")).toBe(false);
-				expect(pi.unregisterProvider).toHaveBeenCalledWith("cliproxyapi");
+				expect(pi.unregisterProvider).toHaveBeenCalledWith("provimux");
 				expect(pi.registerProvider).toHaveBeenCalledWith(
-					"cliproxyapi",
+					"provimux",
 					expect.objectContaining({
 						name: "Provimux",
 						oauth: expect.any(Object),
 					}),
 				);
-				// OAuth-only registration keeps `/login cliproxyapi` off the API-key selector.
+				// OAuth-only registration keeps `/login provimux` off the API-key selector.
 				for (const [, config] of (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls) {
 					expect(config).not.toHaveProperty("apiKey");
 				}
@@ -184,7 +184,7 @@ describe("pi 0.82.0 compatibility", () => {
 
 			try {
 				await providerExtension(pi);
-				const currentModel = registeredModels.get("cliproxyapi/gpt-5.6-sol");
+				const currentModel = registeredModels.get("provimux/gpt-5.6-sol");
 				expect(currentModel?.cost.input).toBe(5);
 				const command = commands.get(name);
 				if (!command || !currentModel) throw new Error(`/${name} or active model is unavailable`);
@@ -231,14 +231,14 @@ describe("pi 0.82.0 compatibility", () => {
 				expect(pi.setModel).toHaveBeenCalledWith(
 					expect.objectContaining({
 						id: "gpt-5.6-sol",
-						provider: "cliproxyapi",
+						provider: "provimux",
 						cost: { input: 10, output: 60, cacheRead: 1, cacheWrite: 12.5 },
 					}),
 				);
 
 				const fastModel = vi.mocked(pi.setModel).mock.calls[0][0];
 				expect(await captureTier(foregroundStream, fastModel)).toBe(tier);
-				const unsupportedModel = registeredModels.get("cliproxyapi/custom-model")!;
+				const unsupportedModel = registeredModels.get("provimux/custom-model")!;
 				expect(await captureTier(foregroundStream, unsupportedModel)).toBeUndefined();
 				for (const dispatch of [stream, streamSimple]) {
 					expect(await captureTier(dispatch, fastModel)).toBeUndefined();
@@ -254,7 +254,7 @@ describe("pi 0.82.0 compatibility", () => {
 				expect(pi.setModel).toHaveBeenLastCalledWith(
 					expect.objectContaining({
 						id: "gpt-5.6-sol",
-						provider: "cliproxyapi",
+						provider: "provimux",
 						cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
 					}),
 				);
@@ -269,7 +269,7 @@ describe("pi 0.82.0 compatibility", () => {
 			writeFileSync(
 				join(agentDir, AUTH_FILE_NAME),
 				JSON.stringify({
-					cliproxyapi: {
+					provimux: {
 						type: "oauth",
 						access: "stored-key",
 						refresh: JSON.stringify({ baseUrl: "http://127.0.0.1:8317" }),
@@ -305,7 +305,7 @@ describe("pi 0.82.0 compatibility", () => {
 				expect(commands.has("cliproxyapi-refresh")).toBe(false);
 				expect(commands.has("cliproxyapi")).toBe(false);
 				expect(pi.registerProvider).toHaveBeenCalledWith(
-					"cliproxyapi",
+					"provimux",
 					expect.objectContaining({
 						oauth: expect.any(Object),
 					}),
@@ -328,7 +328,7 @@ describe("pi 0.82.0 compatibility", () => {
 
 			const testModel = {
 				id: "gpt-5.6-terra",
-				provider: "cliproxyapi",
+				provider: "provimux",
 				api: "cliproxyapi-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -369,7 +369,7 @@ describe("pi 0.82.0 compatibility", () => {
 
 			const testModel = {
 				id: "gpt-5.6-terra",
-				provider: "cliproxyapi",
+				provider: "provimux",
 				api: "cliproxyapi-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				contextWindow: 372000,
@@ -393,7 +393,7 @@ describe("pi 0.82.0 compatibility", () => {
 			const turnEndHandlers = handlers.get("turn_end") ?? [];
 			const overThresholdMessage = {
 				role: "assistant",
-				provider: "cliproxyapi",
+				provider: "provimux",
 				model: "gpt-5.6-terra",
 				content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }],
 				stopReason: "toolUse",
@@ -448,7 +448,7 @@ describe("pi 0.82.0 compatibility", () => {
 
 			const testModel = {
 				id: "gpt-5.6-terra",
-				provider: "cliproxyapi",
+				provider: "provimux",
 				api: "cliproxyapi-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -489,7 +489,7 @@ describe("pi 0.82.0 compatibility", () => {
 
 			const testModel = {
 				id: "gpt-5.6-terra",
-				provider: "cliproxyapi",
+				provider: "provimux",
 				api: "cliproxyapi-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -532,7 +532,7 @@ describe("pi 0.82.0 compatibility", () => {
 
 			const modelDefault = {
 				id: "gpt-5.6-terra",
-				provider: "cliproxyapi",
+				provider: "provimux",
 				api: "cliproxyapi-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
