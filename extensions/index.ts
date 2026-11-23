@@ -48,7 +48,6 @@ import {
 	isModelReferencedAsDefault,
 	isUnauthorizedModelsError,
 	loadAuthConnection,
-	loadAuthType,
 	loadConfigFile,
 	loadConfiguredDefaultSettings,
 	type MappedModels,
@@ -238,17 +237,9 @@ function findActiveCompatEntry(
 	return undefined;
 }
 
-/**
- * Whether /login's account path stored the credential (`auth.json`, type `oauth`). Only then is the provider
- * registered OAuth-only. A stored `api_key` (pi's "Sign in with an API key") needs the API-key method registered as
- * well: pi resolves a stored credential only through the method of its type, and without it reports the provider as
- * not configured.
- */
-function hasAccountLogin(agentDir: string, providerId: string): boolean {
+function hasLoginCredential(agentDir: string, providerId: string): boolean {
 	try {
-		return (
-			loadAuthType(agentDir, providerId) === "oauth" && Boolean(loadAuthConnection(agentDir, providerId)?.apiKey)
-		);
+		return Boolean(loadAuthConnection(agentDir, providerId)?.apiKey);
 	} catch {
 		return false;
 	}
@@ -758,7 +749,7 @@ export function registerRefreshCommand(options: {
 					if (refresh && !refreshCoordinator?.isCurrent(refresh.generation)) return;
 					fastMode.setSupportedModelIds(loaded.fastModelIds);
 
-					const hasStoredLogin = hasAccountLogin(agentDir, providerId);
+					const hasStoredLogin = hasLoginCredential(agentDir, providerId);
 					registerProvider(pi, {
 						providerId,
 						providerName,
@@ -974,19 +965,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}
 	};
 
-	// Always register oauth so the provider is visible in /login immediately after install. A login stored as an API
-	// key needs the API-key method from the start too, also when the model list cannot be loaded below.
-	let storedApiKeyLogin = false;
-	try {
-		storedApiKeyLogin = loadAuthType(agentDir, identity.providerId) === "api_key";
-	} catch {
-		storedApiKeyLogin = false;
-	}
+	// Always register oauth so the provider is visible in /login immediately after install.
 	registerProvider(pi, {
 		providerId: identity.providerId,
 		providerName: identity.providerName,
 		baseUrlInput: defaultBaseUrl,
-		apiKey: storedApiKeyLogin ? resolveConnection(agentDir, identity.providerId)?.apiKey : undefined,
 		defaultBaseUrl,
 		agentDir,
 		streamSimple,
@@ -1085,7 +1068,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			// Prefer OAuth-only registration when /login already stored credentials so
 			// `/login <provider>` jumps straight into the multi-field flow. Fall back to
 			// ambient apiKey only for config-file / env setups without auth.json.
-			const hasStoredLogin = hasAccountLogin(agentDir, identity.providerId);
+			const hasStoredLogin = hasLoginCredential(agentDir, identity.providerId);
 			registerProvider(pi, {
 				providerId: identity.providerId,
 				providerName: identity.providerName,

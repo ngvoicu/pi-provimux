@@ -26,11 +26,11 @@
   - a setup whose key is only in `auth.json` under `cliproxyapi` (no `apiKey` in `cliproxyapi.json`, no
     `CLIPROXYAPI_API_KEY`) needs one `/login provimux`;
   - `CLIPROXYAPI_PROVIDER_ID=cliproxyapi` keeps the old id for anyone who wants it, with its stored login.
-- **A login with "Sign in with an API key" keeps working after a restart.** pi offers that method when
-  `cliproxyapi.json` or `CLIPROXYAPI_API_KEY` holds a key and no account login is stored. Until now the next start
-  registered the provider without the API-key method, so pi said `Provider is not configured`, and a saved default
-  or a resumed session went to another provider (105.0.4 does the same under `cliproxyapi`). The API-key method is
-  now registered whenever the stored login is an API key.
+- **Logins work as in 105.0.4.** Use `/login provimux` with **Sign in with an account**, or `apiKey` and
+  `baseUrl` in `cliproxyapi.json`. pi's **Sign in with an API key**, offered when the file or
+  `CLIPROXYAPI_API_KEY` already holds a key, still does not survive a restart (`Provider is not configured`), as in
+  105.0.4. A key in `cliproxyapi.json` (or `CLIPROXYAPI_API_KEY`) wins over a key saved by a later `/login` that
+  does not rewrite the file; the account login rewrites it.
 - **Unchanged:** the files `cliproxyapi.json` and `cliproxyapi-models.json`, the `CLIPROXYAPI_*` environment
   variables, the internal API name `cliproxyapi-codex-responses`, and `/provimux-refresh`.
 

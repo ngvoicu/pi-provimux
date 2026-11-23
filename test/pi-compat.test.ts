@@ -316,55 +316,6 @@ describe("pi 0.82.0 compatibility", () => {
 		});
 	});
 
-	it("keeps the API-key method when the stored login is an API key, and leaves it out for an account login", async () => {
-		for (const [stored, expectKey] of [
-			[{ type: "api_key", key: "stored-key" }, true],
-			[
-				{
-					type: "oauth",
-					access: "stored-key",
-					refresh: JSON.stringify({ baseUrl: "http://127.0.0.1:9" }),
-					expires: Date.now() + 60_000,
-				},
-				false,
-			],
-		] as const) {
-			await withTempAgentDir(async (agentDir) => {
-				writeFileSync(join(agentDir, AUTH_FILE_NAME), JSON.stringify({ provimux: stored }), "utf8");
-				writeFileSync(
-					join(agentDir, "cliproxyapi.json"),
-					JSON.stringify({ baseUrl: "http://127.0.0.1:9", apiKey: "file-key" }),
-					"utf8",
-				);
-				const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
-				const { pi } = createPiMock(commands);
-				const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-					new Response(JSON.stringify({ models: [] }), {
-						status: 200,
-						headers: { "Content-Type": "application/json" },
-					}),
-				);
-				try {
-					await providerExtension(pi);
-					const config = vi
-						.mocked(pi.registerProvider)
-						.mock.calls.filter(([id]) => id === "provimux")
-						.at(-1)?.[1];
-					const calls = vi.mocked(pi.registerProvider).mock.calls.filter(([id]) => id === "provimux");
-					// Every registration, the first (before the model list) included.
-					expect(
-						calls.map(([, c]) => c.apiKey),
-						stored.type,
-					).toEqual(calls.map(() => (expectKey ? "file-key" : undefined)));
-					expect(config?.oauth, stored.type).toBeDefined();
-					expect(config?.apiKey, stored.type).toBe(expectKey ? "file-key" : undefined);
-				} finally {
-					fetchMock.mockRestore();
-				}
-			});
-		}
-	});
-
 	it("registers and unregisters cliproxyapi-codex-responses with the pi-ai compat dispatcher", async () => {
 		await withTempAgentDir(async () => {
 			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();

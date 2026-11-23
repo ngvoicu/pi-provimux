@@ -147,7 +147,9 @@ migrates, and the old id is not kept as a second provider. What that means for a
 
 This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so Provimux appears under **Sign in with an account**.
 
-When `cliproxyapi.json` or `CLIPROXYAPI_API_KEY` already holds a key and no account login is stored, pi offers a second method too, **Sign in with an API key**. It asks only for the key and stores it in `auth.json`; the address stays the one in the file or the environment, and the file is not rewritten. Either method keeps working after a restart.
+When `cliproxyapi.json` or `CLIPROXYAPI_API_KEY` already holds a key and no account login is stored, pi also offers **Sign in with an API key**. Do not use it: it stores only the key, in `auth.json`, and it does not survive a restart. The next start says `Provider is not configured: provimux`, and a saved default or a resumed session moves to another provider if you have one (105.0.4 does the same under `cliproxyapi`). Use **Sign in with an account**, or put `apiKey` and `baseUrl` in `cliproxyapi.json`. If you already used it, remove the `provimux` entry from `auth.json` (`/logout`) and log in with an account.
+
+**Which key wins.** The extension reads the address and the key from the `CLIPROXYAPI_*` variables first, then `cliproxyapi.json`, then the login in `auth.json` (see [Resolution order](#environment-overrides)). So a key in `cliproxyapi.json` wins over a key saved by a later `/login` that does not rewrite the file, as the API-key login does not. The account login writes its address and key into `cliproxyapi.json` as well, so after it the two agree. Change the key or the proxy with an account `/login`. If you change them in `cliproxyapi.json` or the environment while an account login is stored, the model list follows the new values but requests still carry the stored login's key: run `/login` again, or remove the `provimux` entry from `auth.json`.
 
 ### Preferred: /login shortcuts
 
@@ -161,7 +163,7 @@ or, by the provider id:
 /login provimux
 ```
 
-(pi ignores case, so both name the same provider.) These shortcuts jump straight into the multi-field baseUrl + API key prompts, unless pi also offers the API-key method (above): then it asks which one first.
+(pi ignores case, so both name the same provider.) These shortcuts jump straight into the multi-field baseUrl + API key prompts, unless pi also offers the API-key method (above): then it asks which one first, and you choose **Sign in with an account**.
 
 ### Menu path
 

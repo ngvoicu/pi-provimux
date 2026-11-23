@@ -350,6 +350,10 @@ async function serve(req: IncomingMessage, res: ServerResponse) {
 }
 
 let server: Server;
+/** A second proxy, B: answers as the first does, and logs every request it gets (the model list too) with its key. */
+let serverB: Server;
+let originB: string;
+let atB: Array<{ path: string; key?: string }> = [];
 let origin: string;
 let root: string;
 let agentDir: string;
@@ -366,11 +370,25 @@ beforeAll(async () => {
 	const port = (server.address() as AddressInfo).port;
 	if (port === 8317 || port === 8787) throw new Error("the fixture got a reserved port");
 	origin = `http://127.0.0.1:${port}`;
+	serverB = createServer((req, res) => {
+		const authorization = req.headers.authorization ?? req.headers["x-api-key"];
+		atB.push({
+			path: (req.url ?? "/").split("?")[0],
+			key: typeof authorization === "string" ? authorization.replace(/^Bearer\s+/i, "") : undefined,
+		});
+		serve(req, res).catch(() => res.destroy());
+	});
+	await new Promise<void>((resolve) => serverB.listen(0, "127.0.0.1", resolve));
+	const portB = (serverB.address() as AddressInfo).port;
+	if (portB === 8317 || portB === 8787) throw new Error("the fixture got a reserved port");
+	originB = `http://127.0.0.1:${portB}`;
 });
 
 afterAll(async () => {
-	server.closeAllConnections();
-	await new Promise((resolve) => server.close(resolve));
+	for (const one of [server, serverB]) {
+		one.closeAllConnections();
+		await new Promise((resolve) => one.close(resolve));
+	}
 });
 
 beforeEach(() => {
@@ -754,8 +772,8 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		expect(answer?.message.provider).toBe("provimux");
 	});
 
-	for (const method of ["oauth", "api_key"]) {
-		it(`/login provimux, ${method === "oauth" ? "an account" : "an API key"}: works after a restart, and a saved default and a session stay on Provimux with another provider logged in`, async () => {
+	for (const method of ["oauth"]) {
+		it("/login provimux, an account: works after a restart, and a saved default and a session stay on Provimux with another provider logged in", async () => {
 			// The file holds a key and no login is stored: pi's /login provimux offers both methods.
 			writeFileSync(CONFIG(), JSON.stringify({ baseUrl: origin, apiKey: FILE_KEY }));
 			const env = { OTHER_URL: `${origin}/other/v1` };
@@ -800,6 +818,54 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 			expect(resumed.requests.map((r) => [r.model, r.key])).toEqual([[OPUS, LOGIN_KEY]]);
 		});
 	}
+
+	it('an API-key login (pi\'s "Sign in with an API key") does not survive a restart, as in 105.0.4', async () => {
+		writeFileSync(CONFIG(), JSON.stringify({ baseUrl: origin, apiKey: FILE_KEY }));
+		const login = await pi(["--no-session", "--model", `provimux/${GPT}`, "-p", "/observe-login provimux api_key"], {
+			env: { LOGIN_KEY },
+		});
+		expect(
+			login.events.filter((e) => e.event === "login").map((e) => e.payload),
+			said(login),
+		).toEqual(["api_key"]);
+		const restarted = await pi(["--no-session", "--model", `provimux/${GPT}`, "-p", "say hi"]);
+		expect(restarted.code, said(restarted)).toBe(1);
+		expect(restarted.stderr).toContain("Provider is not configured: provimux");
+		expect(restarted.requests).toEqual([]);
+	});
+
+	it("an API-key login at proxy A, then proxy B's URL and key in the environment or the file: B never gets A's key", async () => {
+		const B_KEY = "fixture-b-key";
+		// The login: at A, with a key A alone knows.
+		writeFileSync(CONFIG(), JSON.stringify({ baseUrl: origin, apiKey: FILE_KEY }));
+		const login = await pi(["--no-session", "--model", `provimux/${GPT}`, "-p", "/observe-login provimux api_key"], {
+			env: { LOGIN_KEY },
+		});
+		expect(
+			login.events.filter((e) => e.event === "login").map((e) => e.payload),
+			said(login),
+		).toEqual(["api_key"]);
+		const config = readFileSync(CONFIG());
+		for (const [how, env] of [
+			["environment", { CLIPROXYAPI_BASE_URL: originB, CLIPROXYAPI_API_KEY: B_KEY }],
+			["file", {}],
+		] as const) {
+			if (how === "file") writeFileSync(CONFIG(), JSON.stringify({ baseUrl: originB, apiKey: B_KEY }));
+			else writeFileSync(CONFIG(), config);
+			atB = [];
+			const sent = await pi(["--no-session", "--model", `provimux/${GPT}`, "-p", "say hi"], { env });
+			// B was asked (its model list, with its own key), and never with A's key.
+			expect(atB.length, `${how}\n${said(sent)}`).toBeGreaterThan(0);
+			expect(
+				atB.filter((r) => r.path === "/v1/models").map((r) => r.key),
+				how,
+			).toContain(B_KEY);
+			expect(
+				atB.filter((r) => r.key === LOGIN_KEY),
+				`${how}: requests at B with A's key\n${said(sent)}`,
+			).toEqual([]);
+		}
+	});
 
 	it("the README's steps for an existing setup: settings, --provider, models.json under provimux", async () => {
 		ownerShaped();
