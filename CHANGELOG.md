@@ -1,5 +1,24 @@
 # Changelog
 
+## 105.0.6
+
+**Needs pi 1.6.0 or newer** (was 0.99.0), and reads no value of its own older versions.
+
+- **pi 1.6.0 or newer.** `peerDependencies` say `>=1.6.0`, and every check runs on pi 1.6.0. The code for older pi is
+  gone: the mid-conversation thinking level patch for pi 1.3 to 1.5 (pi 1.6.0 carries those changes itself; the
+  provider still moves them to the place OpenAI documents), the classic-context path for pi before 0.86, and the move
+  of the top-level `instructions` older pi built. On pi 1.6.0 requests are unchanged.
+- **`"providerId": "cliproxyapi"` in `cliproxyapi.json` is no longer read as `provimux`**, nor
+  `"providerName": "CLIProxyAPI"` as `Provimux`. A value in the file is used as written, as any other id or name
+  always was. A setup whose `/login` ran before 105.0.5 holds those values: change them in `~/.pi/agent/cliproxyapi.json`
+  to `"providerId": "provimux"` and `"providerName": "Provimux"` (or remove both lines) **before** updating, or its
+  models move back to `cliproxyapi/<id>`.
+- **A models cache whose `claudeMessages` is a boolean** (written by the first versions with the Claude Messages
+  format) is read as `"off"`: one with `true` is fetched again once instead of read as `"on"`. `true` and `false`
+  in `cliproxyapi.json` keep their meaning.
+- The README no longer explains moving from pi-cliproxyapi-provider, from the provider id `cliproxyapi` or from a git
+  install.
+
 ## 105.0.5
 
 Two changes: Provimux's models now go by the provider id `provimux`, and the footer names the route that answered.

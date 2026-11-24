@@ -544,7 +544,7 @@ async function startPi(options: StartOptions = {}): Promise<Harness> {
 			if (data.type === "message_start" && data.message?.id) firstEvents.push(data.message.id);
 			if (data.type === "response.created" && data.response?.id) firstEvents.push(data.response.id);
 		});
-		// The warmer refreshes whatever its own estimate (pi >=1.3 asks extensions; typed only from later versions).
+		// The warmer refreshes whatever its own estimate.
 		(pi.on as (event: string, handler: () => unknown) => void)("cache_warming_decision", () => ({
 			action: "refresh",
 		}));

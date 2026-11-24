@@ -1841,7 +1841,7 @@ t_workflows() {
 		done
 		# 6.2: the git-install claim is qualified for a package manager pi does not recognise.
 		has "$b" "with a package-manager command pi does not recognise" "6.2: FOLLOWING.md qualifies the git install"
-		has "$b" "pi 1.3.0 runs a plain install in the git checkout" "6.2: a plain install installs development dependencies"
+		has "$b" "pi runs a plain install in the git checkout" "6.2: a plain install installs development dependencies"
 	else
 		bad "no docs/FOLLOWING.md at $TREE"
 	fi
@@ -1917,11 +1917,11 @@ t_workflows() {
 		# shellcheck disable=SC2086
 		b=$(job $j | grep -v '^ *#' | grep -v -- '- name:')
 		# shellcheck disable=SC2086
-		eq "$(grep -cE 'npm (ci|install)' <<<"$b")" "$(job_containers $j | grep -cE '^npm (ci|install --no-save --ignore-scripts)( |$)')" \
-			"deps: $j installs only in the container (npm ci, or pi 1.6.0 without saving or scripts)"
+		eq "$(grep -cE 'npm (ci|install)' <<<"$b")" "$(job_containers $j | grep -cE '^npm ci( |$)')" \
+			"deps: $j installs only in the container (npm ci)"
 	done
-	# The checks on pi 1.3.0 (the lockfile's) and then on pi 1.6.0, before landing and before publishing: the container
-	# steps in this order (t_f5_order runs them).
+	# The checks on the lockfile's pi (1.6.0), before landing and before publishing: the container steps in this order
+	# (t_f5_order runs them).
 	for j in "$f test-candidate" "$p test"; do
 		# shellcheck disable=SC2086
 		eq "$(job_containers $j | awk '
@@ -1929,9 +1929,8 @@ t_workflows() {
 			/^npm ci$/ { print "ci"; next }
 			/node \/follow\/load.mjs/ { print "load"; next }
 			/^npm run check$/ { print "check"; next }
-			/^npm install --no-save --ignore-scripts @earendil-works\/pi-ai@1.6.0 @earendil-works\/pi-coding-agent@1.6.0$/ { print "pi-1.6.0"; next }
 			/^sh -c .npm ls @earendil-works\/pi-ai @earendil-works\/pi-coding-agent && npm run check.$/ { print "check"; next }
-			{ print "other" }' | tr '\n' ' ')" "pack ci load check pi-1.6.0 load check " "pi versions: $j loads and checks on pi 1.3.0, then on 1.6.0"
+			{ print "other" }' | tr '\n' ' ')" "pack ci load check " "pi version: $j loads and checks on the lockfile's pi"
 	done
 	eq "$(grep -vE '^\s*(#|echo|refuse|say)' "$SCRIPTS/follow.sh" | grep -cE '\bnpm(_neutral)? +(ci|install|rebuild)\b' || true)" 0 "deps: follow.sh installs nothing"
 	eq "$(grep -vE '^\s*(#|echo|refuse|say)' "$SCRIPTS/follow.sh" | grep -E '\bnpm(_neutral)? +(pack|publish)\b' | grep -vc -- '--ignore-scripts' || true)" 0 \

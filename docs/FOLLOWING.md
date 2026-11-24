@@ -1,12 +1,12 @@
 # pi-provimux: following the original, versions, npm, the mirror, the rename
 
-**Status: on `main` since 105.0.2, and live: the dry run is switched off.** The scripts, the two workflows and the
-mirror are on `main` (10). Since the switch (4.5), after 105.0.2, scheduled `follow` runs land a release of the
-original that passes and `publish.yml` publishes it, with no person in between: the owner's choice of fully automatic
-releases (2.8, the risk he accepted in 6.2). A dry run is now only one asked for by hand with `dry_run=yes`. 105.0.2,
-the first version this automation published, went out through a run of `publish.yml` by hand with `dry_run=no`, while
-the runs were still dry. 105.0.1 was published by hand
-from the owner's Mac and tagged by hand (4.4 step 2). When a build shows this file wrong, it is corrected.
+**Status: live.** Scheduled `follow` runs land a release of the original that passes, and `publish.yml` publishes
+it, with no person in between: the owner's choice of fully automatic releases (2.8, the risk he accepted in 6.2). A
+dry run is only one asked for by hand with `dry_run=yes` (4.5). When a build shows this file wrong, it is corrected.
+
+**pi 1.6.0 or newer only** (the owner's decision of 2026-11-24). `peerDependencies` say `>=1.6.0`, the lockfile's pi
+is 1.6.0, and every check runs on it. The fork carries no code for older pi, and none for its own older versions or
+their files (2.3).
 
 - **The original:** `router-for-me/pi-cliproxyapi-provider` (MIT), npm `@router-for-me/pi-cliproxyapi-provider`.
 - **The fork:** `ngvoicu/pi-provimux` on GitHub (renamed from `ngvoicu/pi-cliproxyapi-provider` on 2026-11-22),
@@ -16,8 +16,7 @@ from the owner's Mac and tagged by hand (4.4 step 2). When a build shows this fi
   that run the original's code can do nothing else, and the job that publishes runs none of it.
 
 Facts in this file were read on 2026-11-21 (repository state, pi's package manager, npm's and GitHub's
-documentation). [What was read, and what is not verified](#9-what-was-read-and-what-is-not-verified) lists what a
-worker must confirm while building.
+documentation) and checked while building ([9](#9-what-was-checked-while-building)).
 
 ## 1. In short
 
@@ -136,7 +135,7 @@ owner before it does. If the original is silent that long: `gh workflow enable f
 - **`main` is public and is itself a release channel.** A git install (`pi install git:github.com/ngvoicu/…`)
   follows `main`: whatever lands there reaches those users at their next `pi update`, before and whether or not
   npm gets a version. Tags and npm provenance point at commits of `main`; with a merge they stay its ancestors.
-- **What `pi update` does with a git install** (read in pi-coding-agent 1.3.0, `dist/core/package-manager.js`,
+- **What `pi update` does with a git install** (read in pi-coding-agent 1.6.0, `dist/core/package-manager.js`,
   `ensureGitRef`): it fetches the branch, then `git reset --hard` to it, `git clean -fdx`, and installs
   dependencies. So pi itself would survive a rewritten `main`. Everything else would not: a plain clone or a fork
   of this repository, a `git pull`, and the Forgejo mirror, which is fast-forward only by design and would stop.
@@ -146,22 +145,27 @@ owner before it does. If the original is silent that long: `gh workflow enable f
 - **The cost:** the fork is no longer "the original plus N patches" in the log. What the fork changes is read with
   `git diff router-for-me/main...main`.
 
-**The provider id differs from the original's (105.0.5).** These lines are the fork's on purpose. A release that
-touches them stops in a conflict, and the resolution keeps the fork's side:
+**Where the fork's code differs from the original's on purpose.** A release of the original that touches these
+lines stops in a conflict, and the resolution keeps the fork's side:
 
-- `extensions/lib.ts`: the original has `DEFAULT_PROVIDER_ID = "cliproxyapi"`; the fork has `"provimux"`, plus
-  `LEGACY_DEFAULT_PROVIDER_ID = "cliproxyapi"`. In `resolveIdentity`, a file `providerId` equal to that old value
-  reads as the default, as `LEGACY_DEFAULT_PROVIDER_NAME` does for the name.
-- `extensions/index.ts`: the original passes `[identity.providerId, "cliproxyapi"]` to `loadCliproxyCodexStreams`;
-  the fork passes `[identity.providerId]`. pi-ai checks that list against the provider of the model being called,
-  and only this provider's models use that stream, so the old literal could only matter when it is the resolved id
-  anyway.
+- **The provider id.** `extensions/lib.ts`: the original has `DEFAULT_PROVIDER_ID = "cliproxyapi"`; the fork has
+  `"provimux"` (and `DEFAULT_PROVIDER_NAME = "Provimux"`). `resolveIdentity` is the original's: a value in
+  `cliproxyapi.json` or `CLIPROXYAPI_PROVIDER_ID` is used as written. `extensions/index.ts`: the original passes
+  `[identity.providerId, "cliproxyapi"]` to `loadCliproxyCodexStreams`; the fork passes `[identity.providerId]`.
+- **No code for pi before 1.6.0.** `extensions/codex-stream.ts`: the original carries a mid-conversation effort patch
+  for pi-ai 1.3 to 1.5 (`MID_CONVO_RESOLVER_SNIPPET`, `patchMidConvoEffort`, `sharedSupportsConfigurationUpdate`,
+  `hasNativeMidConvoEffort`), the classic-context path for pi before 0.86 (`adaptTranscriptContext`,
+  `supportsTranscriptSource`, `adaptContextForModule`) and the move of the `instructions` pi before 1.6.0 built; the
+  fork has none of them. pi 1.6.0 does that work itself; the fork keeps only what still acts on 1.6.0 (the
+  configuration_update placement, the default GPT base prompt, a hook's `instructions`). A resolution does not bring
+  them back.
+- **No reader of the fork's own older values.** A `cliproxyapi.json` value is read as written, and
+  `claudeMessagesMode` reads only `"on"` and `"auto"` (anything else is `"off"`).
 
 A clean merge can still bring in a new literal `"cliproxyapi"` used as a provider id (a comparison, a default). No
-guard looks for one. After a merge, `grep -n '"cliproxyapi' extensions/*.ts` should show only `LEGACY_DEFAULT_PROVIDER_ID`
-and `loadCliproxyCodexStreams`' default argument (used only by tests). The CLI test (`test/cli.test.ts`, "the
-provider id, in pi's CLI") fails if the models stop showing under `provimux` or the owner-shaped setup stops
-answering.
+guard looks for one. After a merge, `grep -n '"cliproxyapi' extensions/*.ts` should show only
+`loadCliproxyCodexStreams`' default argument (used only by tests). The CLI test (`test/cli.test.ts`, "the provider
+id, in pi's CLI") fails if the models stop showing under `provimux` or the owner-shaped setup stops answering.
 
 ### 2.4 The run: `follow.yml`
 
@@ -171,7 +175,7 @@ Every job checks out the run's own commit (`github.sha`, the `main` the run name
 | Job | What it does | What it runs | Permissions |
 |---|---|---|---|
 | `prepare` | Selects the release and binds it to npm's tarball (2.1, 2.2). Decides whether there is anything to do. Runs the guard on git objects (paths and kinds of file) before anything is written, then merges `B` into `main` in a temporary worktree, applies the file rules (2.5), stamps the version and the changelog (3) and runs the whole guard (2.6). Uploads the candidate as a git bundle. | git, `npm view` and npm's tarball (data, never run), `npm pack --dry-run --ignore-scripts` on `B`'s regular files written out (a list, nothing run), `jq`, the run's own scripts. No code of the original or of the candidate. | `contents: read` |
-| `test (candidate)` | Writes the candidate's tree with `git checkout-index` (no `.git`, no export attribute) to a folder of its own, then **in a container** (pinned `node:24` image) that gets that tree, this run's scripts read-only and the network, and none of the runner's variables, tokens or caches: `npm pack` of the clean tree, before anything is installed; `npm ci`; **that archive loaded by pi's own loader** from a consumer folder of its own (`load.mjs`, 4.2); `npm run check`; then the load and `npm run check` again on pi 1.6.0, installed over the lockfile's pi 1.3.0 with `npm install --no-save --ignore-scripts` (4.2, "Two pi versions"). | **The original's and the fork's code, and their dev dependencies**, in the container. | `contents: read`, `actions: read` |
+| `test (candidate)` | Writes the candidate's tree with `git checkout-index` (no `.git`, no export attribute) to a folder of its own, then **in a container** (pinned `node:24` image) that gets that tree, this run's scripts read-only and the network, and none of the runner's variables, tokens or caches: `npm pack` of the clean tree, before anything is installed; `npm ci`; **that archive loaded by pi's own loader** from a consumer folder of its own (`load.mjs`, 4.2); `npm run check`, on the lockfile's pi, 1.6.0 (4.2, "The pi version"). | **The original's and the fork's code, and their dev dependencies**, in the container. | `contents: read`, `actions: read` |
 | `test (original)` | The same on `B` alone. Information only: it tells the owner whether a failure is the original's own. It never decides. | **The original's code**, in the container. | `contents: read` |
 | `land` | Needs `prepare` and a successful `test (candidate)`. Takes the bundle by the id and digest `prepare` output, checks it is the commit `prepare` named, then **checks it again by content** (`follow.sh recheck`: the whole guard, and npm's tarball against `M`'s second parent), pushes it to `main` without force, then starts `publish.yml`. | git, `gh`, the run's own scripts. | `contents: write`, `actions: write`; environment `main-only` |
 | `report` | Always. Writes the issue (2.7). | The run's own script, `gh`. | `issues: write`; environment `main-only` |
@@ -287,7 +291,7 @@ after. A checker that fails to run is an error, never a pass.
    - anything else refuses: a link, a bundled package, a git, file or other source, another package's tarball under
      this name, no root, a declared dependency with no entry, a lockfile version other than 2 or 3.
 
-   Today 118 of the lock's 202 entries are reached from the root's `peerDependencies` (`@earendil-works/pi-ai` and
+   Today 121 of the lock's 205 entries are reached from the root's `peerDependencies` (`@earendil-works/pi-ai` and
    `@earendil-works/pi-coding-agent`, which are also development dependencies), `protobufjs` and `@google/genai`
    among them: a change the original makes to those stops for the owner. The other 84 (Biome, TypeScript, Vitest,
    `@types/node` and what they bring) may change by themselves, install scripts included, because only the test
@@ -396,21 +400,6 @@ pi-provimux's releases on it, from 1. The README says this once.
 - **Git tags:** `v<version>` (`v105.0.1`), made by `publish.yml` at the published commit, never moved (a tag
   ruleset forbids updating and deleting `v*`).
 
-**On the code branch** (`pi-provimux` at `20f06a0`, which says `2.0.0`), this numbering changes: `"version"` in
-`package.json`, its two copies in `package-lock.json`, and in `CHANGELOG.md` the heading `## 2.0.0` and the line
-"Already in this fork before 2.0.0". Nothing else: the four internal symbol keys that keep the old name on purpose
-are not part of a version or of the rename. Done: `main` released `105.0.1` with this numbering, and the README
-says how the version reads.
-
-Alternatives, for the owner's choice:
-
-| Numbering | Shows the base | Cost |
-|---|---|---|
-| **`105.0.1`** (this design) | In the number, by a rule to learn once. | An unusual first number. |
-| `2.0.0`, `2.0.1`, … with a field `"upstream": {"version": "1.5.0"}` in `package.json`, the base in the changelog and the release title | Not in the number. | `pi list` and npm show nothing about the base. The worker's branch has this today. |
-| `1.5.0-pmx.1` (Provimux's own form) | Exactly. | A pre-release: it sorts *below* 1.5.0; ranges skip it; npm demands an explicit `--tag` to publish it; pi's update works only while the install is unpinned. |
-| `1.5.<patch × 100 + n>` | Partly. | On a base with patch 0 the first release is `1.5.1`, which reads as the original's 1.5.1. |
-
 ### 3.2 Where the version is written
 
 In one place: `"version"` in `package.json` on `main` (and its two copies in `package-lock.json`). What git has is
@@ -442,8 +431,8 @@ Read on 2026-11-21 in npm's documentation (9).
 - **Provenance is automatic** with trusted publishing from a public repository for a public package; `--provenance`
   is not needed. `repository.url` in `package.json` must match the repository exactly, case included
   (`git+https://github.com/ngvoicu/pi-provimux.git`): so the GitHub rename comes **before** the first publish.
-- **A trusted publisher is set on a package that exists.** The first version is therefore published another way:
-  by the owner, from his Mac (4.4).
+- **A trusted publisher is set on a package that exists.** The first version (105.0.1) was published by the owner,
+  from his Mac.
 - **A trusted publisher names:** the user (`ngvoicu`), the repository (`pi-provimux`), the workflow file name
   (`publish.yml`, the name only) and optionally an environment (`npm`). All case-sensitive. npm does not check them
   when they are saved; a mistake shows at the first publish.
@@ -468,7 +457,7 @@ One run at a time, never cancelled midway.
 | Job | What it does | What it runs | Permissions |
 |---|---|---|---|
 | `plan` | Names `main`'s version first, from git alone, so that every outcome, an early refusal included, reaches `notify`. Refuses an `.npmrc` anywhere in the tree before npm runs on it (only the version check, 6.1, comes first). Asks npm, from a neutral folder with no configuration and `--registry=https://registry.npmjs.org/`, whether it has that version: yes, nothing to publish, go to `tag`. Otherwise the publish guard (below). | git, `jq`, `npm view`, `npm pack --dry-run --ignore-scripts`. No repository code. | `contents: read` |
-| `test` | Writes that commit's tree with `git checkout-index` to a folder of its own (no `.git`; the workspace, whose `.git` the checkout action's cleanup opens afterwards with a credential, is never given to the container). In the same container as `follow`'s tests: `npm pack` of the clean tree, before anything is installed; then, on the runner and still before any dependency code runs, that archive's sha512 recorded as the job's output and the archive uploaded as the artifact `publish-archive` ("The tested archive", below); `npm ci`; that archive loaded by pi (below); `npm run check`; then the load and `npm run check` again on pi 1.6.0 (below). | **The repository's code and dev dependencies**, in the container. | `contents: read` |
+| `test` | Writes that commit's tree with `git checkout-index` to a folder of its own (no `.git`; the workspace, whose `.git` the checkout action's cleanup opens afterwards with a credential, is never given to the container). In the same container as `follow`'s tests: `npm pack` of the clean tree, before anything is installed; then, on the runner and still before any dependency code runs, that archive's sha512 recorded as the job's output and the archive uploaded as the artifact `publish-archive` ("The tested archive", below); `npm ci`; that archive loaded by pi (below); `npm run check`, on the lockfile's pi (below). | **The repository's code and dev dependencies**, in the container. | `contents: read` |
 | `publish` | Needs `plan` and `test`. Checks out the commit with no stored credential. Takes **the archive `test` packed, loaded and checked** (`follow.sh archive`, below). Then **in one step** checks that archive's sha512 again, that the tree is clean and that the live `main` is still that commit, and runs `npm publish --ignore-scripts --access public --registry https://registry.npmjs.org/ <that archive>`. | `git`, the npm CLI, the run's own scripts (`follow.sh archive`, `tarball.mjs`). **No code of the package:** no `npm ci`, no lifecycle script, no build, no pack. | `id-token: write`, `contents: read`, `actions: read` (the artifact); environment `npm` |
 | `tag` | `follow.sh tag`: the tag `v<version>` at the commit just published, which must be in the live `main` and whose `package.json` must name that version, and the GitHub release with the changelog entry; a missing release is made even when the tag exists. When the version was already on npm (repair), the commit npm recorded (`gitHead`), else the existing tag, each only if it is in the live `main` **and its `package.json` names the version**; with neither, the job **fails** and `notify` tells the owner to make the tag. An annotated tag is followed to its commit. | git, `gh`, `npm view`, the run's own script. | `contents: write`; environment `main-only` |
 | `notify` | After a failure: the issue `publish: <version> — failed` (`publish: unknown — failed` when `main`'s version is not plain). After a success that is not a dry run, and only once npm shows the version, it closes that issue. npm lists a version a while after its upload, so `notify` asks again every 30 s for up to 15 minutes (`FOLLOW_NPM_SHOW_WAIT`, `FOLLOW_NPM_SHOW_POLL`); only a version still missing then counts as a failed publish. | The run's own script, `gh`, `npm view`. | `issues: write`; environment `main-only` |
@@ -516,27 +505,12 @@ checks the sha512 once more, then runs `npm publish` on that file. With a file a
 bytes (pacote reads the tarball as it is; checked with npm 11.20.0: `npm publish --dry-run <file>` reports the
 file's sha512), and the OIDC exchange and provenance do not depend on the argument: npm exchanges the token for the
 package the manifest names, and the provenance statement's subject is that name, version and the uploaded bytes'
-sha512. That the trusted publisher accepts it is shown only by the first live publish (4.4 step 5).
+sha512. The trusted publisher accepts it: every version since 105.0.2 was published this way.
 
-**Two pi versions.** `npm ci` gives the lockfile's pi, 1.3.0. pi 1.6.0 does some of the extension's Codex work
-itself, and the tests take that into account (`test/pi-ai-version.ts`). So after the load and `npm run check` on
-1.3.0, the same container step installs `@earendil-works/pi-ai@1.6.0` and `@earendil-works/pi-coding-agent@1.6.0`
-over them with `npm install --no-save --ignore-scripts`, and the archive is loaded and `npm run check` run again.
-`follow`'s `test (candidate)` runs the same steps, so that nothing lands that this test would refuse. The
-install runs in the container, like `npm ci`; no credentialed job installs anything.
-
-**What replaced the tag-triggered `publish.yml` of 105.0.1.** `main` had a `publish.yml` started by a pushed tag
-`v*`, which published from that tag. This design publishes from `main` and makes the tag itself, so that file was
-replaced in the merge. What it checked is still checked:
-
-| Its check | Here |
-|---|---|
-| `npm run check` on pi 1.3.0 and again on pi 1.6.0 | The `test` job, in the container (above). |
-| The tag is `v` + `package.json`'s version | No tag starts anything: `tag` makes `v<version>` from `package.json`'s version, at the commit published. |
-| The tag's commit is on `main` | Stricter: `publish` checks, in the same step as `npm publish`, that the live `main` is that very commit. |
-| A clean checkout | The same, in the `publish` step, and no `.npmrc` tracked. |
-| npm 11.5.1 or later | The same, in `publish`, and in every `follow.sh` command (6.1). |
-| `npm publish --provenance` | Provenance comes with trusted publishing from a public repository; the flag is not needed (4.1). |
+**The pi version.** `npm ci` gives the lockfile's pi, 1.6.0, the floor `peerDependencies` name; the check step
+first names it (`npm ls @earendil-works/pi-ai @earendil-works/pi-coding-agent`). `follow`'s `test (candidate)` runs
+the same steps, so that nothing lands that this test would refuse. A change to that pi is a change to a lockfile
+entry the root's peers reach, so the original cannot make it without the owner (2.6).
 
 The file keeps its name and the publish job its environment `npm`: the trusted publisher names both.
 
@@ -568,23 +542,13 @@ hand.
 marks the bad one. To stop following meanwhile: `gh workflow disable follow.yml -R ngvoicu/pi-provimux`. A reverted
 merge stays merged for git: the original's next release is then merged by hand (2.7), reverting the revert first.
 
-### 4.4 The owner's one-time steps
+### 4.4 Settings outside the repository
 
-Steps 2 to 5 belong together: do them on one day, when the chief says the automation is ready to merge.
+Made once (2026-11-22); the commands rebuild or check them.
 
-1. **npm account.** Sign in at npmjs.com (create the account if there is none) and turn on two-factor
-   authentication: a security key or passkey (Touch ID works), or an authenticator app. Then, in a terminal:
-   `npm login`.
-2. **First publish, from the Mac** (after the GitHub rename; the chief names the commit):
-   ```sh
-   git clone https://github.com/ngvoicu/pi-provimux.git /tmp/pi-provimux-first
-   cd /tmp/pi-provimux-first && git checkout <the commit>
-   npm publish --ignore-scripts --access public
-   npm view pi-provimux version
-   ```
-   npm asks for the second factor. This one version has no provenance; every later one has.
-3. **The two environments** (GitHub), each admitting the branch `main` alone (6.3). Run once, after the rename
-   (step 1 of 7), before the first run of either workflow:
+1. **The two environments** (GitHub), each admitting the branch `main` alone (6.3). Before any run of either
+   workflow, they must exist with this rule: a job that names an environment GitHub does not know makes GitHub
+   create it with no rule.
    ```sh
    gh api -X PUT repos/ngvoicu/pi-provimux/environments/npm \
      -F 'deployment_branch_policy[protected_branches]=false' -F 'deployment_branch_policy[custom_branch_policies]=true'
@@ -597,28 +561,17 @@ Steps 2 to 5 belong together: do them on one day, when the chief says the automa
    gh api repos/ngvoicu/pi-provimux/environments/main-only/deployment-branch-policies --jq '.branch_policies[] | {name, type}'
    ```
    Each must show `custom_branch_policies: true` and the one policy `main`, of type `branch`. No tag policy: no job
-   runs on a tag ref. **The environment `npm` made for 105.0.1** admits the tags `v*` (a policy of type `tag`), for
-   the tag-triggered workflow this design replaced: delete that policy after adding `main`, so that only `main`
-   remains:
-   ```sh
-   gh api repos/ngvoicu/pi-provimux/environments/npm/deployment-branch-policies \
-     --jq '.branch_policies[] | select(.type == "tag") | .id' |
-     while read -r id; do gh api -X DELETE "repos/ngvoicu/pi-provimux/environments/npm/deployment-branch-policies/$id"; done
-   ```
-4. **Trusted publisher** (needs npm 11.15 or later; this Mac has 11.19):
+   runs on a tag ref.
+2. **Trusted publisher** (npm 11.15 or later), by the owner:
    ```sh
    npm trust github pi-provimux --file publish.yml --repo ngvoicu/pi-provimux --env npm --allow-publish
    npm trust list pi-provimux
    ```
    Or on npmjs.com: the package → Settings → Trusted Publisher → GitHub Actions: user `ngvoicu`, repository
-   `pi-provimux`, workflow `publish.yml`, environment `npm`, and tick `npm publish` under allowed actions.
-5. **Tell the chief.** The automation was merged with the next version, `105.0.2`, and **without** the switch: its
-   push to `main` only dry-runs. Then `gh workflow run publish.yml -R ngvoicu/pi-provimux --ref main -f dry_run=no`
-   publishes it from GitHub, which binds the publisher (it must happen within 2 days of step 4). Check the
-   version's page on npmjs.com: it shows "Provenance" with the commit. The switch (4.5) is a later commit of its
-   own. Done: 105.0.2 was published this way on 2026-11-22, and the switch followed.
-6. **Close the door to tokens:** the package → Settings → Publishing access → **Require two-factor authentication
-   and disallow tokens** → Update Package Settings.
+   `pi-provimux`, workflow `publish.yml`, environment `npm`, and tick `npm publish` under allowed actions. A new
+   publisher must publish within 2 days (4.1).
+3. **No tokens:** the package → Settings → Publishing access → **Require two-factor authentication and disallow
+   tokens**.
 
 There is no secret to store on GitHub.
 
@@ -626,8 +579,7 @@ There is no secret to store on GitHub.
 
 Both workflows have an input `dry_run` (`yes` or `no`, default `no`) and the line
 `DRY_RUN: ${{ inputs.dry_run || 'no' }}`. A run by hand chooses; a scheduled `follow` run and a `push` to `main` have
-no input and take the fallback, `no`: **they are live.** The switch was turned off after 105.0.2 was published (4.4
-step 5); until then both lines said `'yes'`. A dry run is now one started by hand:
+no input and take the fallback, `no`: **they are live.** A dry run is one started by hand:
 `gh workflow run follow.yml -R ngvoicu/pi-provimux --ref main -f dry_run=yes` (or `publish.yml`).
 
 In a dry run everything is checked and nothing changes: `follow`'s `land` fetches and rechecks the candidate, checks
@@ -642,7 +594,7 @@ enters the environment `npm` and holds `id-token: write`; it uses neither.
 
 **The switch** is one commit: in `.github/workflows/follow.yml` and `.github/workflows/publish.yml`,
 `default: '…'` ("the switch (1 of 2)") and `inputs.dry_run || '…'` ("the switch (2 of 2)"), four lines in all.
-It was switched off (`'yes'` to `'no'`) after 4.4 steps 1 to 5. **To put the dry run back**, for example while a
+**To put the dry run back**, for example while a
 release of the original is in doubt, change the four lines back to `'yes'`, in one commit pushed by a person (the
 workflows' own token cannot change workflow files); or, at once and without a commit,
 `gh workflow disable follow.yml -R ngvoicu/pi-provimux` stops the scheduled runs. A single dry run without the
@@ -650,7 +602,7 @@ commit: `gh workflow run follow.yml -R ngvoicu/pi-provimux --ref main -f dry_run
 likewise).
 
 Before **any** run of either workflow, dry or not, the environments `npm` and `main-only` must exist with their
-branch rule (4.4 step 3, 6.3): a job that names an environment GitHub does not know makes GitHub create it with no
+branch rule (4.4, 6.3): a job that names an environment GitHub does not know makes GitHub create it with no
 rule.
 
 ## 5. The Forgejo mirror
@@ -687,7 +639,8 @@ rule.
 
 **Nobody pushes to the NAS.** Locally the remotes keep the names every repository of the owner uses: `origin` is the
 NAS, `upstream` is GitHub, `router-for-me` is the original. Work is pushed to `upstream`; `origin` catches up
-within the hour. The runbook makes a push to the other two fail on purpose.
+within the hour. The push addresses of `origin` and `router-for-me` are set to fail on purpose
+(`git remote set-url --push origin no-push-the-NAS-follows-GitHub`, and the same for `router-for-me`).
 
 The Forgejo repository needs Actions switched on and a runner that serves `ubuntu-latest`, as the site's has.
 
@@ -697,9 +650,9 @@ The Forgejo repository needs Actions switched on and a runner that serves `ubunt
 
 | Job | Runs | Token | Secrets | Can push or publish |
 |---|---|---|---|---|
-| `follow.yml` → `test (candidate)` | the merged tree: `npm ci`, `npm run check`; pi 1.6.0 installed `--no-save --ignore-scripts`, `npm run check` again | `contents: read` | none | no |
+| `follow.yml` → `test (candidate)` | the merged tree: `npm ci`, `npm run check` | `contents: read` | none | no |
 | `follow.yml` → `test (original)` | the original's release alone | `contents: read` | none | no |
-| `publish.yml` → `test` | `main`: `npm ci`, `npm run check`; pi 1.6.0 the same way, `npm run check` again | `contents: read` | none | no |
+| `publish.yml` → `test` | `main`: `npm ci`, `npm run check` | `contents: read` | none | no |
 
 These three are the only jobs that install dependencies or execute anything from the tree. None has `id-token`,
 none declares an environment, and there is no secret in the repository for them to find. The code runs **in a
@@ -804,12 +757,12 @@ candidate's; the `dev` flag is never read), and every entry resolves to **the re
 and version** with a full `sha512`. Anything else refuses. Their install scripts run in the test container only. A
 hostile development dependency can therefore make the tests pass whatever the code does: the same class of risk as
 hostile code passing CI, accepted with it. By the graph, it reaches no user of an npm install (a package's
-development dependencies are never installed for its users) nor of pi's git install as pi 1.3.0 runs it with its
+development dependencies are never installed for its users) nor of pi's git install as pi runs it with its
 recognised npm configuration (`npm install --omit=dev --legacy-peer-deps`), and no credential (6.1). **One
 qualification:** with a package-manager command pi does not recognise (an uncommon choice in the user's pi
-settings), pi 1.3.0 runs a plain install in the git checkout, which installs development dependencies too; a git
+settings), pi runs a plain install in the git checkout, which installs development dependencies too; a git
 install so configured gets them, install scripts included. npm installs (`pi install npm:pi-provimux`) are not
-affected. Today this covers 84 of the lock's 202 entries; the other 118, reached from the root's peers, stop
+affected. Today this covers 84 of the lock's 205 entries; the other 121, reached from the root's peers, stop
 for the owner.
 
 Two more residual points: the test jobs' result is produced by the code they run, so a hostile release can make
@@ -821,13 +774,11 @@ by pushing a new version to `main`. That is the owner alone: the repository has 
 - **Ruleset on `main`:** no force push, no deletion. (No required pull request: `land` pushes directly.)
 - **Ruleset on tags `v*`:** no update, no deletion.
 - **Environments `npm` and `main-only`:** each with a deployment-branch policy that admits the branch `main` alone
-  (custom policies, one policy `main` of type `branch`; the `gh api` commands are 4.4 step 3); no secret, no
+  (custom policies, one policy `main` of type `branch`; the `gh api` commands are in 4.4); no secret, no
   reviewer. `npm` holds the job `publish` (`id-token: write`); `main-only` holds every other job that can write:
   `land` and `report` (`follow.yml`), `tag` and `notify` (`publish.yml`). The jobs that only read declare none. No
   job runs on a tag ref, so neither needs a tag pattern; if a workflow ever published from a tag, its environment
   would need a `type=tag` policy for `v*`, which would also admit any `v*` tag ref anyone with push access creates.
-  (105.0.1's `npm` environment had exactly that policy, for the tag-triggered workflow this design replaced; 4.4
-  step 3 deletes it.)
   **What this binds outside the YAML, and what it does not.** GitHub refuses a job that names one of these
   environments from any ref but `main`, before it starts, whatever the branch's workflow file checks. And npm's
   trusted publisher names the environment `npm`, so an OIDC token from a job outside it, from any ref, cannot
@@ -840,146 +791,29 @@ by pushing a new version to `main`. That is the owner alone: the repository has 
 - **Repository secrets:** none, ever. A workflow that needs one is a change to this design.
 - **npm:** 2FA on the account; trusted publisher as in 4.4; tokens disallowed for the package.
 
-## 7. The rename: runbook
+## 7. Open: the owner's project
 
-For a later worker, in this order. The steps marked **owner** are his own; workers never install into or edit the
-owner's pi, and never touch his npm account.
+The repository was renamed from `pi-cliproxyapi-provider` on 2026-11-22, and the owner's pi installs
+`npm:pi-provimux`. One step of the owner's own is open (as of 2026-11-23): twelve files under his project's `v1/`
+(and one README there) still load the extension by the path of pi's old git checkout,
+`pi -e ~/.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/extensions/index.ts`. The npm install lives in
+`~/.pi/agent/npm/node_modules/pi-provimux/`; the change, in that project and only by him:
 
-**Before:** the pi-provimux code is on `main`, on GitHub and the NAS (pushed to both, as until now); the
-automation is built and reviewed on a branch but **not merged**; nobody is working in a worktree of this repository
-(`git worktree list`, and ask the chief).
-
-1. **GitHub: rename.**
-   ```sh
-   gh repo rename pi-provimux -R ngvoicu/pi-cliproxyapi-provider --yes
-   gh api repos/ngvoicu/pi-provimux --jq .full_name
-   ```
-   What GitHub's redirect keeps working: the old web address, issues, and `git clone`, `git fetch` and `git push`
-   to the old address. So:
-   - **a git install keeps updating.** pi's checkout for `git:github.com/ngvoicu/pi-cliproxyapi-provider` has the
-     old address as its `origin`; `pi update` fetches it and GitHub answers for the new one. This holds for the
-     owner's pi too, whose settings name that source: he needs to do nothing until step 9;
-   - what is **not** redirected: a `uses:` of an action hosted in the renamed repository (there is none);
-   - what **ends** the redirect: a new repository named `pi-cliproxyapi-provider` under `ngvoicu`. Never create or
-     fork one under that name.
-2. **GitHub: settings.** Issues on (`gh repo edit ngvoicu/pi-provimux --enable-issues`); the two rulesets of 6.3;
-   the environments `npm` and `main-only`, by the commands of 4.4 step 3. The repository stays a fork of the original on GitHub ("forked from" is the credit).
-3. **Forgejo: rename**, in its web interface (the repository → Settings → Repository name → `pi-provimux`). Switch
-   Actions on for it. Whether Forgejo redirects the old address afterwards is not relied on: the next step sets
-   every address.
-4. **Local: remotes and folder.**
-   ```sh
-   cd <the local checkout of this repository>
-   git remote set-url upstream https://github.com/ngvoicu/pi-provimux.git
-   git remote set-url origin ssh://git@zeenas:2222/ngvoicu/pi-provimux.git
-   git remote set-url --push origin no-push-the-NAS-follows-GitHub
-   git remote set-url --push router-for-me no-push-this-is-the-original
-   git fetch --all --prune
-   cd .. && mv pi-cliproxyapi-provider pi-provimux && cd pi-provimux
-   git worktree repair
-   git worktree list
-   git worktree prune --dry-run
-   ```
-   `git worktree repair`, run in the moved main folder, rewrites the link each worktree keeps to it; the worktrees
-   themselves (`/tmp/pi-provimux`, `/tmp/pi-cliproxyapi-provider-answered`, `/tmp/pi-provimux-follow`) did not
-   move. Check each with `git -C <worktree> status`. A worktree whose folder is gone (a restart empties `/tmp`) is
-   listed by the dry run; prune it only then, and its branch stays. `main` tracks `origin/main`; set it to
-   GitHub's so that a plain `git push` goes there: `git branch -u upstream/main main`.
-5. **Other places that name the old repository** (list them first: `grep -rIl pi-cliproxyapi-provider` over
-   `providers.dev`, without `node_modules` and `.git`): `pi-cache-keeper/README.md` links it; the
-   `providers-dev-sme` brain names it (through kluris, never by hand). Mentions of the original
-   (`router-for-me/…`, `@router-for-me/…`) stay as they are. The owner's project that loads this extension by path
-   is **not** in this step: it is his, and it is step 9.
-6. **Owner: npm account and first publish** (4.4, steps 1 and 2). A worker then tags that commit on GitHub
-   (`git tag v<version> <the commit>`, `git push upstream v<version>`): no workflow exists yet to do it. Done for
-   105.0.1 (`v105.0.1`), with step 1, on 2026-11-22.
-7. **Owner: trusted publisher** (4.4, step 4).
-8. **Merge the automation** to `main` on GitHub, with the next version (105.0.2): the workflows, the scripts, the
-   mirror workflow, this file. The push dry-runs; `publish.yml` started by hand with `dry_run=no` publishes it (4.4,
-   step 5). **Each deploy is one ref update to the merged
-   tip** (`git push upstream <tip>:refs/heads/main`, then the same to the NAS), never a series of pushes through the
-   branch's commits. Push `main` to the NAS one last time that way, with the push address given in full, so that
-   the mirror workflow is there to run; from then on the NAS follows. Check: the
-   version on npm with provenance, the tag `v<version>`, the NAS equal to GitHub within the hour, and only "Follow
-   GitHub" in the NAS's Actions. Then the owner sets "disallow tokens" (4.4, step 6).
-9. **Owner: his own pi, from git to npm.** The login and the settings stay (`~/.pi/agent/cliproxyapi.json` is not
-   the package's):
-   ```sh
-   pi remove git:github.com/ngvoicu/pi-cliproxyapi-provider
-   pi install npm:pi-provimux
-   pi list
-   ```
-   `pi list` must show `npm:pi-provimux` once and the old source not at all. Then, at once, the owner's
-   project (below): its setups stop working at the `pi remove`. Done: the owner's pi installs `npm:pi-provimux`
-   (checked 2026-11-23).
-
-**The owner's project (the owner's step).** Twelve files under its `v1/` load this extension by the path of pi's
-git checkout, `pi -e ~/.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/extensions/index.ts` (15 lines),
-and one README there shows the same line.
-
-- **What keeps them working through the rename:** that folder is named after the source in the owner's pi settings,
-  not after the repository on GitHub. Renaming the repository on GitHub and on the NAS, and the local folder,
-  change nothing in it, and `pi update` keeps refreshing it through GitHub's redirect. So steps 1 to 8 break
-  nothing there, and for as long as the owner keeps the git install, nothing ever does.
-- **What breaks them:** only `pi remove git:github.com/ngvoicu/pi-cliproxyapi-provider` in step 9. pi deletes the
-  checkout with the entry.
-- **The owner's step, right after `pi install npm:pi-provimux`**, with no run of the project in progress. The npm
-  install lives in `~/.pi/agent/npm/node_modules/pi-provimux/` (check: `ls ~/.pi/agent/npm/node_modules/pi-provimux/extensions/index.ts`):
-  ```sh
-  cd <the local checkout of the project>
-  grep -rIl '.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/' v1 |
-    xargs sed -i '' 's#~/.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/#~/.pi/agent/npm/node_modules/pi-provimux/#g'
-  grep -rn 'pi-cliproxyapi-provider' v1    # nothing left
-  git diff --stat                           # 13 files, 16 lines
-  ```
-  Not done as of 2026-11-23: the project's `v1/` setups still name the git checkout's path.
-- **Or he does not switch.** Step 9 is his to do when he likes, or never: the git install keeps following `main`,
-  which has every release the npm package has. Then the project stays as it is.
-
-**The README says the move once**, in "Coming from pi-cliproxyapi-provider", for anyone who installed from git:
-
-> Installed from git? It keeps working: GitHub redirects the old address, and a git install follows `main`. To move
-> to the npm package, remove the git one first:
->
-> ```bash
-> pi remove git:github.com/ngvoicu/pi-cliproxyapi-provider
-> pi install npm:pi-provimux
-> ```
->
-> Keep only one. pi counts the old git address, the new one and the npm package as three different packages, and
-> each would register the provider `cliproxyapi`.
-
-The README does not carry this block: its "Coming from pi-cliproxyapi-provider" shows the move from the original's
-npm package, and since 105.0.5 the provider id is `provimux`.
-
-(pi identifies a git package by its repository address and an npm package by its name, so nothing replaces the old
-entry by itself.)
+```sh
+grep -rIl '.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/' v1 |
+  xargs sed -i '' 's#~/.pi/agent/git/github.com/ngvoicu/pi-cliproxyapi-provider/#~/.pi/agent/npm/node_modules/pi-provimux/#g'
+grep -rn 'pi-cliproxyapi-provider' v1    # nothing left
+```
 
 ## 8. The owner's choices
 
-| # | Choice | Recommended | The other answers |
-|---|---|---|---|
-| 1 | Does a clean, passing update land and publish by itself? | **Yes**, as he asked, and as Provimux does. | A pull request he merges for each release of the original (2.8): closes the residual risk of 6.2, costs a click each time. |
-| 2 | How long a release of the original waits before it is taken. | **24 hours.** The cost is only lateness; `no_wait` skips it by hand. | None (within 3 hours, as Provimux); 72 hours. |
-| 3 | The numbering. | **`105.0.1`** (3.1): the base is in the number and it is a plain version. | `2.0.0` with the base in a field; `1.5.0-pmx.1`. |
-| 4 | The first publish. | **From his Mac** (4.4): no token is ever made. The one cost: that version has no provenance. | A one-day token in an Actions secret, so that the first version has provenance too: more steps, and a token that can publish for his whole account while it lives. |
-| 5 | What the trusted publisher may do. | **`npm publish` directly** (needed for choice 1). | Staging only: he approves every version on npm with 2FA, while git installs already have it. |
+- A clean, passing update lands and is published by itself, as Provimux's are (2.8); no pull request, no approval.
+- A release of the original waits 24 hours before it is taken; `no_wait` skips that by hand.
+- The numbering `105.0.1` (3.1): the base is in the number and it is a plain version.
+- The trusted publisher may `npm publish` directly (no staging).
+- pi 1.6.0 or newer only, and no code for the extension's own older versions or their files (2026-11-24).
 
-## 9. What was read, and what is not verified
-
-**Read:**
-
-- This repository at `59e0947`, the original at `5a1641b` (npm `latest` 1.5.0, published 2026-11-18), the worker's
-  branch `pi-provimux` at `20f06a0`.
-- pi-coding-agent 1.3.0: `docs/packages.md`, `docs/cli.md`, `dist/core/package-manager.js` (`updateGit`,
-  `ensureGitRef`, `npmHasAvailableUpdate`, `getLatestNpmVersion`).
-- Provimux: `.github/provimux/SYNC.md`, `provimux-check.yml`, `provimux-publish.yml`, `provimux-release.yml`.
-- The site's `.forgejo/workflows/follow-github.yml`.
-- npm's documentation: trusted publishers, provenance, staged publishing, `npm trust`, `npm stage`, `npm publish`,
-  scripts, access tokens, 2FA for packages. `npm trust --help` and `npm stage --help` on npm 11.19.0.
-- GitHub's documentation: renaming a repository, events that trigger workflows, environments.
-
-**What was not verified at design time, as checked while building (2026-11-22):**
+## 9. What was checked while building
 
 1. **npm and the environment: npm compares it, both ways.** npm's page still calls the field optional and says
    nothing more, but projects report both failures: a publisher that names an environment refuses a job that
@@ -1001,7 +835,7 @@ entry by itself.)
    (`npm trust github … --allow-publish`, npm 11.15 or later), as 4.1 says.
 5. **Node 24's npm:** Node 24.22.0 (2026-10-14) bundles npm 11.19.1; 24.22.3 is the current 24. The job still
    asserts 11.5.1.
-6. **pi 1.6.0** (read in the owner's install, `dist/core/package-manager.js`): the same as 1.3.0. A git update
+6. **pi 1.6.0** (`dist/core/package-manager.js`): a git update
    fetches, `git reset --hard`, `git clean -fdx`, then `npm install --omit=dev --legacy-peer-deps`; an npm update asks
    `npm view <name> version --json` and installs when it is greater (`gt`). Dev dependencies are not installed for a
    git install, so the lockfile check of 2.6 protects the CI jobs, not users.
@@ -1014,19 +848,6 @@ entry by itself.)
 Also confirmed: `actions/checkout` v7.0.1 (`3d3c42e`), `actions/setup-node` v7.1.0 (`949feb2`) and
 `actions/upload-artifact` v7.0.2 (`cf430e0`) are each action's newest release and the commits pinned. Scheduled
 workflows of a public repository are still disabled after 60 days without activity.
-
-## 10. Build order
-
-1. Done. `.github/follow/`: `follow.sh` (`select`, `merge`, `stamp`, `guard`, `report`, and for the workflows
-   `prepare`, `fetch-candidate`, `recheck`, `land`, `plan`, `tag`, `report-publish`), `manifest.mjs`,
-   `tarball.mjs`, `headers.mjs`, `nodetar.mjs`, `load.mjs`, `paths.txt`, `test.sh`. Revised after the security review of 2026-11-22
-   (findings 2 to 12), and again after the second review of the same day, with the scope narrowed: no scripted
-   recovery (2.7), environments for every writing job (6.3), development dependencies by the lock's graph (2.6),
-   only exported trees for the test containers (6.1).
-2. Done. `follow.yml` and `publish.yml`, with `land` and `publish` behind the dry run (4.5) until 105.0.2 was
-   published, live since the switch.
-3. Done. `.forgejo/workflows/follow-github.yml`.
-4. The runbook of 7, with the owner's steps of 4.4.
 
 ## 11. The tests
 
@@ -1065,7 +886,7 @@ there and says so. Cases that do not run `follow.sh` (e.g. `tarball.mjs`'s heade
 | `f9_issues` | Past 350 issues; a contributor's issue with the bot's title and key untouched; the bot's closed issue reopened, not duplicated; the failure issue first, written even when the README issue fails; a 5000-line list kept under GitHub's limit; a README issue quoting the failure key, and a bot issue without the label, untouched. |
 | `f10_publish`, `f10_land` | A dry run closes nothing; a success without the version on npm closes nothing; a version npm shows only after a delay opens no issue, one it never shows opens `publish: <v> — failed` once the wait is over, and a dry run does not wait; an annotated tag at the commit passes; a missing release is made; no `gitHead` and no tag fails; a long changelog; a commit outside the live `main` is not tagged; a tag or `gitHead` at a commit of `main` naming another version is not taken; `plan` names the version when it refuses an `.npmrc`; a failed retry dispatch is red with an issue; a failed dispatch is `dispatch-failed`, never `landed`; a tampered candidate is refused by `land` and nothing is pushed; `main` moved during the push is `moved`. |
 | `f11_mirror` | A tag the NAS refuses leaves `main` unmoved too; a tag named `origin/main` does not stand in for the branch; the mirror follows; in a reused workspace, a tag gone from GitHub is seen as on the NAS only; GitHub's `main` rewritten: the NAS's old `main` kept as `refs/nas-backup/main-<UTC time>`, `main` and the new tag GitHub's, GitHub untouched; a backup the server refuses leaves `main` unmoved; the NAS's `main` moved between the read and the push: the lease refuses, nothing changes. |
-| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; every job that writes is in `main-only`, the OIDC job in `npm`, the others in none, and this file has the `gh api` commands for both; the version input checked; the test jobs in a container with no `setup-node` and no `git archive` (`test (candidate)`: one `setup-node`, for `follow.sh`'s npm gate, before the tree and any container); every job that runs `follow.sh` sets up Node 24 before it, mounting only the exported tree and the scripts, never the workspace; the clean tree packed read-only before `npm ci` and nothing packed after, and that archive given read-only to the loader, in `test (candidate)` and `publish`'s `test`; no cache; `land` by `follow.sh land`; no credentialed job (nor `follow.sh`) runs `npm ci`, `npm install` or `npm rebuild`, `npm pack` and `npm publish` only with `--ignore-scripts`, and the test jobs install only in the container (`npm ci`, and pi 1.6.0 with `--no-save --ignore-scripts`), and pack, `npm ci`, load, check on pi 1.3.0, then install pi 1.6.0, load, check, in that order; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA; `publish.yml`'s `test` records the archive's sha512 and uploads it before `npm ci`, and `publish` takes it by `follow.sh archive` by the test job's id and digest, packs nothing, checks the sha512 again in the publishing step, and publishes or dry-runs that file alone, the dry run without the OIDC request variables. |
+| `workflows` | Read as text: every job's first step checks the exact ref, every job runs on GitHub only; every job that writes is in `main-only`, the OIDC job in `npm`, the others in none, and this file has the `gh api` commands for both; the version input checked; the test jobs in a container with no `setup-node` and no `git archive` (`test (candidate)`: one `setup-node`, for `follow.sh`'s npm gate, before the tree and any container); every job that runs `follow.sh` sets up Node 24 before it, mounting only the exported tree and the scripts, never the workspace; the clean tree packed read-only before `npm ci` and nothing packed after, and that archive given read-only to the loader, in `test (candidate)` and `publish`'s `test`; no cache; `land` by `follow.sh land`; no credentialed job (nor `follow.sh`) runs `npm ci`, `npm install` or `npm rebuild`, `npm pack` and `npm publish` only with `--ignore-scripts`, and the test jobs install only in the container (`npm ci`), and pack, `npm ci`, load, check on the lockfile's pi, in that order; `land`, `publish`, `tag` in one concurrency group; main checked in the publish step; the mirror atomic, qualified and pinned; every action pinned by SHA; `publish.yml`'s `test` records the archive's sha512 and uploads it before `npm ci`, and `publish` takes it by `follow.sh archive` by the test job's id and digest, packs nothing, checks the sha512 again in the publishing step, and publishes or dry-runs that file alone, the dry run without the OIDC request variables. |
 | `f12_history` | A commit with `.github/workflows/` but no `.forgejo/workflows/` has exactly `publish.yml`, one of the two known blobs of `main`'s 105.0.1 revisions; both are met in the history and run their two jobs on GitHub only; on a throwaway repository, another workflow beside it, a changed `publish.yml`, or the known bytes under another name fail the rule. |
 | `archive` | `follow.sh archive`: the tested archive is taken and its path alone printed; refused: a recorded sha512 of another archive (a digest mismatch, nothing written), the same files compressed again, another artifact digest, an artifact of another name, an artifact with another file, an archive whose files are not the commit's. |
 | `npm_gate` | Every command of `follow.sh`'s dispatcher, read from the script itself, and an unknown word, under a stand-in npm 10.9.3 with tokens in the environment: each exits 1 with the reason after exactly one `--version`, with no other npm call. The review's `merge` of a release whose tree has a `prepare` starts no hook and leaves the fork alone. `help`, `-h` and `--help` run without npm. |
@@ -1074,8 +895,3 @@ there and says so. Cases that do not run `follow.sh` (e.g. `tarball.mjs`'s heade
 | `readme` | The original's README change: the fork's README byte for byte, the diff kept; both sides changing it is no conflict. |
 | `report` | A conflict opens the issue (its key the first line, no recovery commands) and the README issue; a rerun writes no comment; a new state renames it with one comment; check failed with its log in a longer fence; dry run green; land failed; landed; up to date and published closes it only in a live run, never in a dry run; the publish issue opens and closes. |
 | `plan` | The publish guard: to publish, already published, first publish, a version of another form or base, a lifecycle script, an untracked file in the tarball, a dirty tree, an `.npmrc`. |
-
-The real history was also replayed: from `59e0947` (before the fork merged 1.5.0), `prepare` with `1.5.0` resolves
-`package.json`, `package-lock.json` and `README.md` by rule and stops on a real conflict in `extensions/lib.ts`; taking
-the worker's resolution of it, `stamp` and `guard` finish, and the tree equals the worker's merge `12034ae` but for
-the version, `105.0.1`.

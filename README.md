@@ -32,9 +32,9 @@ From the original extension:
 - **A model cache**, so pi starts at once when the server is slow; `/provimux-refresh` reloads the list.
 - **`/fast` and `/ultrafast`**: faster service tiers on the models that offer them.
 - **`/pause` and `/continue`**: hold every request to the provider until you continue.
-- **GPT prompt caching kept**: the base prompt of `gpt-` models is sent so the prompt cache keeps being read (pi
-  before 1.6.0; pi 1.6.0 does it itself).
-- **Thinking level changes that keep the cache**, for models that support them (from pi 1.6.0, pi's own).
+- **GPT prompt caching kept**: a `gpt-` request always starts with its base prompt as a developer message, so the
+  prompt cache keeps being read.
+- **Thinking level changes that keep the cache**, for models that support them: pi's own, placed as OpenAI documents.
 - **Elapsed time and tokens per second** in pi's footer.
 - **A fresh Codex WebSocket after compaction**, so the server's context matches the compacted one.
 
@@ -74,80 +74,13 @@ follows the original's releases: once a day old, one that merges cleanly and pas
 and released, with no person in between: this is switched on. [docs/FOLLOWING.md](docs/FOLLOWING.md) says how, and
 what that accepts.
 
-It needs pi 0.99.0 or newer: the Codex WebSocket reports which kind of account answered through pi's
-`provider_stream_event`, which older pi does not have.
-
-### Coming from pi-cliproxyapi-provider
-
-pi-provimux keeps the `CLIPROXYAPI_*` environment variables and the files `cliproxyapi.json` and
-`cliproxyapi-models.json`. Three names changed:
-
-| Was | Now | The old one |
-| --- | --- | --- |
-| The provider id `cliproxyapi` | `provimux` (since 105.0.5) | Not registered any more. See [The provider id `provimux`](#the-provider-id-provimux-since-10505). |
-| `/cliproxyapi-refresh` | `/provimux-refresh` | Gone since 105.0.4: use `/provimux-refresh`. |
-| The login shown as **CLIProxyAPI** | **Provimux** | `/login provimux` or `/login Provimux`. |
-
-A `cliproxyapi.json` written by an earlier `/login` holds `"providerName": "CLIProxyAPI"` and
-`"providerId": "cliproxyapi"`. Nobody chose those values, so both are read as the defaults: the login shows as
-Provimux, and the models are listed under `provimux`. A name or an id you set yourself, in the file or through
-`CLIPROXYAPI_PROVIDER_NAME` / `CLIPROXYAPI_PROVIDER_ID`, is kept.
-
-Remove the old package first, so that only one of them registers the provider:
-
-```bash
-pi remove npm:@router-for-me/pi-cliproxyapi-provider   # or the source you installed it from
-pi install npm:pi-provimux
-```
-
-### The provider id `provimux` (since 105.0.5)
-
-pi shows a model as `<provider id>/<model id>`. Up to 105.0.4 that was `cliproxyapi/<model>`; from 105.0.5 it is
-`provimux/<model>`. Only the id changes: the files, the environment variables and your saved settings stay. Nothing
-migrates, and the old id is not kept as a second provider. What that means for a setup made before 105.0.5:
-
-- **The models now show as `provimux/<id>`** in `/model`, `--list-models` and pi's RPC model list.
-- **Your connection keeps working when it is in `cliproxyapi.json`.** An earlier `/login` wrote
-  `"providerId": "cliproxyapi"`, `apiKey` and `baseUrl` there. That id is read as the default, `provimux`, and the
-  key and address are used as before. You do not need a new `/login`.
-- **A key that is only in pi's `auth.json`, under `cliproxyapi`, is not read.** No `apiKey` in `cliproxyapi.json`
-  and no `CLIPROXYAPI_API_KEY`: run `/login provimux` once. pi then stores the login under `provimux`. You can
-  delete the old `cliproxyapi` entry from `auth.json`.
-- **Settings that name the old id match nothing.** In `~/.pi/agent/settings.json`:
-  - `"defaultProvider": "cliproxyapi"`: pi starts on another model, with no warning. Set `"defaultProvider":
-    "provimux"` and keep `"defaultModel": "<id>"` (the id alone, not `provimux/<id>`). Or, in `/model`, highlight
-    the model and press **Ctrl+S**: that saves it as the default. **Enter** only switches the model you are using
-    now, and the next start goes back to the saved default.
-  - an `enabledModels` entry `"cliproxyapi/<id>"`: pi prints `No models match pattern "cliproxyapi/<id>"`. Change
-    it to `"provimux/<id>"` by hand; Ctrl+S does not touch this list.
-- **A session recorded on `cliproxyapi/<id>` does not get its model back** when you resume it. pi says
-  `Could not restore model cliproxyapi/<id>. Using <provider>/<model>` and goes on with the model it would start
-  with. That can be another Provimux model, or another provider's model if you have logged in to one. Pick
-  `provimux/<id>` with `/model` (Enter) before you send anything. pi 1.6.0 and newer also print that warning in
-  `-p`, JSON and RPC mode; older pi shows it only in the TUI.
-- **`--model cliproxyapi/<id>` is not found.** Write `--model provimux/<id>`, or `--provider provimux --model <id>`
-  (`--provider` alone is refused: pi needs `--model` with it).
-- **`models.json` settings under `providers.cliproxyapi` apply to nothing.** pi keys them by provider id. Rename
-  the block in `~/.pi/agent/models.json` to `providers.provimux`. Left under the old id, everything in it is lost
-  for the `provimux` models: extra `headers` (a request that needs one then fails, for example with HTTP 401),
-  `modelOverrides` such as a `thinkingLevelMap` that adds a level (pi then offers and sends only the catalog's
-  levels), a `contextWindow`, `maxTokens` or prices.
-  - **pi-cache-keeper's values move by themselves.** pi-cache-keeper writes its `modelOverrides` (input window,
-    output limit, cache lifetimes, prices) under the provider id of each model pi lists. At its first start next to
-    105.0.5 it writes them under `providers.provimux`, and it takes its own values out of `providers.cliproxyapi`
-    (the models are gone). A field you set yourself is never touched, so it stays under `cliproxyapi`: move it by
-    hand. A block that ends up empty is removed.
-- **To keep the old id**, set `CLIPROXYAPI_PROVIDER_ID=cliproxyapi` in the environment pi runs in. The models are
-  then listed under `cliproxyapi` as before, and the login stored under `cliproxyapi` in `auth.json` is used again.
-  Set in the environment, it is your choice and is kept. In `cliproxyapi.json`, `"providerId": "cliproxyapi"` means
-  the default, because that is what the old `/login` wrote; any other id there is kept. So keep the variable set:
-  `/login` writes the id it used into `cliproxyapi.json`, and there `cliproxyapi` reads as `provimux`.
+It needs pi 1.6.0 or newer.
 
 ## Login-style setup (recommended)
 
 This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so Provimux appears under **Sign in with an account**.
 
-When `cliproxyapi.json` or `CLIPROXYAPI_API_KEY` already holds a key and no account login is stored, pi also offers **Sign in with an API key**. Do not use it: it stores only the key, in `auth.json`, and it does not survive a restart. The next start says `Provider is not configured: provimux`, and a saved default or a resumed session moves to another provider if you have one (105.0.4 does the same under `cliproxyapi`). Use **Sign in with an account**, or put `apiKey` and `baseUrl` in `cliproxyapi.json`. If you already used it, remove the `provimux` entry from `auth.json` (`/logout`) and log in with an account.
+When `cliproxyapi.json` or `CLIPROXYAPI_API_KEY` already holds a key and no account login is stored, pi also offers **Sign in with an API key**. Do not use it: it stores only the key, in `auth.json`, and it does not survive a restart. The next start says `Provider is not configured: provimux`, and a saved default or a resumed session moves to another provider if you have one. Use **Sign in with an account**, or put `apiKey` and `baseUrl` in `cliproxyapi.json`. If you already used it, remove the `provimux` entry from `auth.json` (`/logout`) and log in with an account.
 
 **Which key wins.** The extension reads the address and the key from the `CLIPROXYAPI_*` variables first, then `cliproxyapi.json`, then the login in `auth.json` (see [Resolution order](#environment-overrides)). So a key in `cliproxyapi.json` wins over a key saved by a later `/login` that does not rewrite the file, as the API-key login does not. The account login writes its address and key into `cliproxyapi.json` as well, so after it the two agree. Change the key or the proxy with an account `/login`. If you change them in `cliproxyapi.json` or the environment while an account login is stored, the model list follows the new values but requests still carry the stored login's key: run `/login` again, or remove the `provimux` entry from `auth.json`.
 
@@ -216,8 +149,8 @@ Optional fields:
 | ------- | --------- | ------------- |
 | `baseUrl` | `http://127.0.0.1:8317` | Provimux or CLIProxyAPI address |
 | `apiKey` | _(required unless set via /login or env)_ | Bearer token / CPA API key |
-| `providerId` | `provimux` | Provider id shown in `/model` (`cliproxyapi`, the default before 105.0.5, written here by `/login`, reads as the default) |
-| `providerName` | `Provimux` | Display name in `/login` and UI (`CLIProxyAPI`, the default before 105.0.3, written here by `/login`, reads as the default) |
+| `providerId` | `provimux` | Provider id shown in `/model` (written here by `/login`) |
+| `providerName` | `Provimux` | Display name in `/login` and UI (written here by `/login`) |
 | `fast` | `false` | Persisted speed preference: `false` (off), `true` (Fast), or `"ultrafast"` (Ultra Fast) |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
 | `tps` | `true` | Show the elapsed time footer and TPS summary in the TUI; see [Elapsed time and TPS](#elapsed-time-and-tps-tui) |
@@ -336,13 +269,20 @@ Unsupported pi thinking levels are set to `null` so they are hidden in the UI. A
 
 ## GPT Responses prompt caching
 
-For `gpt-` model IDs (ignoring case and surrounding whitespace), the provider sends the base prompt as the first `developer` input message instead of top-level `instructions`. Nonblank text is kept verbatim; blank text defaults to `You are a helpful assistant.` Existing input items stay in order, tools and `prompt_cache_key` are unchanged, and other models keep their existing request shape. This applies to HTTP and WebSocket requests, including Pi background streams that use this provider. A changed developer prefix or model sends the full input instead of a WebSocket continuation delta. An extension's `before_provider_request` hook comes first: if it changes `instructions`, its text is the one moved; if it removes them (deleted or set to `undefined`), no base prompt is put back, and the request goes as the hook left it.
-
-All of this is for pi before 1.6.0. **pi 1.6.0** does it itself, for every model: it builds no `instructions` and puts the system prompt, as given, in a leading `{ "role": "developer", "content": "…" }` input item, and the provider sends that as pi built it. A hook then finds no `instructions`; to drop or replace the base prompt it has to remove or change that first item. One thing the provider still does on pi 1.6.0: a `gpt-` request whose input does not start with a developer message (no system prompt, or a hook that put another item first) gets `You are a helpful assistant.` as a developer message in front, as on older pi.
+pi builds no top-level `instructions`: it puts the system prompt, as given, in a leading
+`{ "role": "developer", "content": "…" }` input item, for every model, and the provider sends that as pi built it.
+For `gpt-` model IDs (ignoring case and surrounding whitespace) the provider makes sure the request starts with a base
+prompt: when the final body has `instructions` (an extension's `before_provider_request` hook set them), their text
+becomes the leading developer message instead; when the input does not start with a developer message (no system
+prompt, or a hook put another item first), `You are a helpful assistant.` is put in front as one. Existing input items
+stay in order, tools and `prompt_cache_key` are unchanged, and other models keep their request shape. This applies
+to HTTP and WebSocket requests, including pi background streams that use this provider. A changed developer prefix or
+model sends the full input instead of a WebSocket continuation delta. To drop or replace the base prompt, a hook
+removes or changes that first item.
 
 ## Cache-preserving thinking level changes
 
-Models whose catalog entry sets `supports_reasoning_effort_updates` (GPT-6 on CLIProxyAPI) get pi's cache-preserving mid-session thinking level changes, matching the behavior pi >=1.3.0 ships for the OpenAI provider, with placement following the OpenAI documentation: the effort of the first turn becomes the fixed request-level `reasoning.effort`, and each later change is carried by a `configuration_update` input item placed immediately before the user message it applies to, so switching levels mid-session keeps the prompt prefix — and the upstream prompt cache — intact instead of rewriting it. WebSocket `previous_response_id` continuation also survives level changes. Histories lacking initial recorded levels (for example, sessions started before this support landed) may still need one full-context request while the baseline is being established. The behavior requires a pi >=1.3.0 host (its shared Responses converter); on older hosts the plugin detects the missing support and falls back to the classic request-level effort. On **pi 1.6.0**, pi's Codex adapter carries these changes itself: the provider leaves pi's own code in place and only moves the items to the placement above. pi 1.6.0 also records the level it sent with thinking off, `none`, on the reply.
+Models whose catalog entry sets `supports_reasoning_effort_updates` (GPT-6 on CLIProxyAPI) get pi's cache-preserving mid-session thinking level changes, with placement following the OpenAI documentation: the effort of the first turn becomes the fixed request-level `reasoning.effort`, and each later change is carried by a `configuration_update` input item placed immediately before the user message it applies to, so switching levels mid-session keeps the prompt prefix — and the upstream prompt cache — intact instead of rewriting it. WebSocket `previous_response_id` continuation also survives level changes. pi's Codex adapter carries these changes itself; the provider only moves the items to the placement above. pi records the level it sent on each reply, `none` with thinking off.
 
 The raw `models.dev` response is cached for 24 hours at `~/.pi/agent/tmp/models-dev-cache.json`. A fresh cache avoids the network request; an expired cache is refreshed with a three-second timeout, and stale data is retained if refresh fails. If neither the network nor a previous cache is available, pricing safely falls back to zero. A small explicit alias table covers known CLIProxyAPI variants such as `gemini-pro-agent` → `gemini-3.1-pro-preview`; unknown variants are not guessed.
 

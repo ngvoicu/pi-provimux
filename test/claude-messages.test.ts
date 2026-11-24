@@ -70,12 +70,12 @@ describe("resolveClaudeMessagesDefault", () => {
 });
 
 describe("claudeMessagesMode", () => {
-	it("reads modes and the booleans older caches stored", () => {
-		expect(claudeMessagesMode(true)).toBe("on");
+	it("reads the stored modes; anything else is off", () => {
 		expect(claudeMessagesMode("on")).toBe("on");
 		expect(claudeMessagesMode("auto")).toBe("auto");
 		expect(claudeMessagesMode(false)).toBe("off");
 		expect(claudeMessagesMode(undefined)).toBe("off");
+		expect(claudeMessagesMode(true)).toBe("off");
 	});
 });
 
@@ -207,13 +207,6 @@ describe("loadMappedModels with claudeMessages", () => {
 		expect(claude?.api).toBe(ANTHROPIC_MESSAGES_API);
 		expect(gpt?.api).toBeUndefined();
 		expect(loaded.fastModelIds).toEqual(["gpt-6.1-sol"]);
-		expect(loaded.claudeMessages).toBe("on");
-	});
-
-	it("still accepts true from older callers", async () => {
-		mockCpa();
-		const loaded = await loadMappedModels("http://127.0.0.1:8317", "key", false, agentDir(), undefined, true);
-		expect(loaded.models.find((m) => m.id === "claude-opus-5-5")?.api).toBe(ANTHROPIC_MESSAGES_API);
 		expect(loaded.claudeMessages).toBe("on");
 	});
 

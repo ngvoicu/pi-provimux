@@ -6,7 +6,8 @@
  * - chatgpt-account-id header is omitted when account id is unavailable
  * - provider id(s) are added to CODEX_TOOL_CALL_PROVIDERS for tool-call id handling
  * - model/message api id uses cliproxyapi-codex-responses
- * - GPT base instructions become the first developer input item
+ * - a GPT request's base prompt is its first developer input item, also when a hook set `instructions`
+ * - configuration_update items are moved to the documented mid-conversation placement
  *
  * The patched module is derived at runtime from the installed
  * @earendil-works/pi-ai openai-codex-responses implementation so we track
@@ -49,121 +50,8 @@ export interface CliproxyCodexStreamOptions {
 
 type PayloadHook = NonNullable<SimpleStreamOptions["onPayload"]>;
 
-interface TranscriptMessage {
-	role?: string;
-	content?: unknown;
-	sections?: Record<string, string | null | undefined>;
-	toolsAdded?: unknown[];
-	toolsRemoved?: Array<{ name: string }>;
-	[key: string]: unknown;
-}
-
 function isGptModelId(id: unknown): boolean {
 	return typeof id === "string" && id.trim().toLowerCase().startsWith("gpt-");
-}
-
-function extractContentText(content: unknown, preserveWhitespace: boolean): string {
-	if (typeof content === "string") return preserveWhitespace ? content : content.trim();
-	if (Array.isArray(content)) {
-		const parts = content
-			.filter((b) => b && typeof b === "object" && b.type === "text" && typeof b.text === "string")
-			.map((b) => b.text as string);
-		return (preserveWhitespace ? parts : parts.map((text) => text.trim()).filter(Boolean)).join("\n");
-	}
-	return "";
-}
-
-/**
- * Adapt a pi >=0.86.0 TranscriptContext into a classic Context with top-level systemPrompt and tools.
- *
- * In pi >=0.86.0, custom provider stream handlers receive a normalized TranscriptContext where
- * system prompt sections and tool declarations are encoded into system messages inside context.messages.
- * Classic openai-codex-responses expects context.systemPrompt and context.tools, and fails when
- * encountering system messages inside context.messages during token estimation or payload generation.
- */
-export function adaptTranscriptContext(
-	context: Context | { messages?: unknown[]; [key: string]: unknown },
-	preserveSystemWhitespace = false,
-): Context {
-	if (!context || !Array.isArray(context.messages)) {
-		return context as Context;
-	}
-
-	const rawMessages = context.messages as TranscriptMessage[];
-	const hasSystemMessage = rawMessages.some((m) => m && m.role === "system");
-
-	if (!hasSystemMessage) {
-		return context as Context;
-	}
-
-	let leadingText = "";
-	const sections = new Map<string, string>();
-	const toolsMap = new Map<string, unknown>();
-
-	if (Array.isArray(context.tools)) {
-		for (const tool of context.tools) {
-			if (tool && typeof tool === "object" && "name" in tool && typeof tool.name === "string") {
-				toolsMap.set(tool.name, tool);
-			}
-		}
-	}
-
-	const nonSystemMessages: unknown[] = [];
-
-	for (const msg of rawMessages) {
-		if (!msg || typeof msg !== "object") continue;
-
-		if (msg.role === "system") {
-			const text = extractContentText(msg.content, preserveSystemWhitespace);
-			if (text) {
-				leadingText = leadingText ? `${leadingText}\n\n${text}` : text;
-			}
-			if (msg.sections && typeof msg.sections === "object") {
-				for (const [name, sectionText] of Object.entries(msg.sections)) {
-					if (sectionText === null || sectionText === undefined) {
-						sections.delete(name);
-					} else if (typeof sectionText === "string") {
-						const section = preserveSystemWhitespace ? sectionText : sectionText.trim();
-						if (section) sections.set(name, section);
-					}
-				}
-			}
-			if (Array.isArray(msg.toolsRemoved)) {
-				for (const tool of msg.toolsRemoved) {
-					if (tool && typeof tool.name === "string") {
-						toolsMap.delete(tool.name);
-					}
-				}
-			}
-			if (Array.isArray(msg.toolsAdded)) {
-				for (const tool of msg.toolsAdded) {
-					if (tool && typeof tool === "object" && "name" in tool && typeof tool.name === "string") {
-						toolsMap.set(tool.name, tool);
-					}
-				}
-			}
-		} else {
-			nonSystemMessages.push(msg);
-		}
-	}
-
-	const sectionParts = [...sections.values()];
-	const extractedSystemPrompt = [leadingText, ...sectionParts].filter(Boolean).join("\n\n");
-	const finalSystemPrompt =
-		extractedSystemPrompt || (typeof context.systemPrompt === "string" ? context.systemPrompt : undefined);
-	const finalTools =
-		toolsMap.size > 0
-			? [...toolsMap.values()]
-			: Array.isArray(context.tools) && context.tools.length > 0
-				? context.tools
-				: undefined;
-
-	return {
-		...(context as Record<string, unknown>),
-		systemPrompt: finalSystemPrompt,
-		tools: finalTools as Context["tools"],
-		messages: nonSystemMessages as Context["messages"],
-	};
 }
 
 /**
@@ -193,53 +81,27 @@ export function ensureTranscriptContext(context: Context | { messages?: unknown[
 	};
 }
 
-export function supportsTranscriptSource(source: string): boolean {
-	return source.includes("resolveTranscriptTools") || source.includes("resolveTranscript");
-}
-
-export function adaptContextForModule(
-	context: Context | { messages?: unknown[]; [key: string]: unknown },
-	supportsTranscript: boolean,
-): Context {
-	return supportsTranscript ? ensureTranscriptContext(context) : adaptTranscriptContext(context);
-}
-
-function matchesInputText(content: unknown, text: string): boolean {
-	if (typeof content === "string") return content === text;
-	return (
-		Array.isArray(content) &&
-		content.every((part) => part?.type === "input_text" && typeof part.text === "string") &&
-		content.map((part) => part.text).join("") === text
-	);
-}
-
-function moveGptInstructionsToInput(
-	body: Record<string, unknown>,
-	builtInstructions: unknown,
-	legacyContext?: Context,
-): Record<string, unknown> {
+/**
+ * pi builds no `instructions`: the system prompt is its leading developer item. A `gpt-` request whose final body
+ * has `instructions` (set by a hook) gets them as that leading developer item instead, and one that starts without a
+ * developer message gets the default base prompt there, so the prompt cache keeps being read.
+ */
+function moveGptInstructionsToInput(body: Record<string, unknown>): Record<string, unknown> {
 	if (!isGptModelId(body.model)) return body;
 
 	const { input, instructions, ...rest } = body;
 	if (input !== undefined && typeof input !== "string" && !Array.isArray(input)) return body;
 	const messages =
 		typeof input === "string" ? [{ role: "user", content: [{ type: "input_text", text: input }] }] : (input ?? []);
-	let prompt = instructions === undefined ? builtInstructions : instructions;
-	if (legacyContext && (instructions === undefined || instructions === builtInstructions)) {
-		// Recover whitespace only for the outgoing GPT prompt, not the classic context or hook replacements.
-		const legacyPrompt = adaptTranscriptContext(legacyContext, true).systemPrompt;
-		if (legacyPrompt?.trim()) prompt = legacyPrompt;
-	}
-	const text = typeof prompt === "string" && prompt.trim() ? prompt : "You are a helpful assistant.";
+	const text = typeof instructions === "string" && instructions.trim() ? instructions : "You are a helpful assistant.";
 
-	// An unrelated leading developer message must not replace the base prompt.
+	// A leading developer message is the base prompt already.
 	const first = messages[0];
 	if (
 		instructions === undefined &&
 		first?.role === "developer" &&
 		(first.type === undefined || first.type === "message") &&
-		(typeof first.content === "string" || Array.isArray(first.content)) &&
-		(builtInstructions === undefined || matchesInputText(first.content, text))
+		(typeof first.content === "string" || Array.isArray(first.content))
 	) {
 		return body;
 	}
@@ -305,31 +167,6 @@ const EXTRACT_ACCOUNT_ID_PATCH = `function extractAccountId(token) {
 
 /** Request-level reasoning.effort pinned while configuration_update items carry the level. */
 export const MID_CONVO_BASELINE_EFFORT = "medium";
-
-interface MidConvoModelLike {
-	compat?: { supportsMidConvoEffort?: boolean };
-	thinkingLevelMap?: Record<string, string | null | undefined>;
-}
-
-/**
- * Resolve the effort to carry in configuration_update items, or undefined to
- * keep the classic request-level effort. Mirrors pi-ai openai-responses, plus
- * the Codex adapter's special case: raw efforts of "none" route through the
- * thinkingLevelMap off entry, whose null disables the update entirely.
- */
-export function resolveConfigurationUpdateEffort(
-	model: MidConvoModelLike,
-	options?: { reasoningEffort?: string; reasoningSummary?: string },
-): string | undefined {
-	if (model.compat?.supportsMidConvoEffort !== true || !options?.reasoningEffort) {
-		return undefined;
-	}
-	if (options.reasoningEffort === "none") {
-		const offEffort = model.thinkingLevelMap?.off === undefined ? "none" : model.thinkingLevelMap.off;
-		return offEffort ?? undefined;
-	}
-	return model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-}
 
 interface WireInputItemLike {
 	type?: string;
@@ -559,276 +396,6 @@ export function reshapeConfigurationUpdates<T extends Record<string, unknown>>(b
 			? { ...reasoning, effort: firstEffort ?? MID_CONVO_BASELINE_EFFORT }
 			: { effort: firstEffort ?? MID_CONVO_BASELINE_EFFORT, summary: "auto" };
 	return { ...body, input: reshaped, reasoning: nextReasoning };
-}
-
-const MID_CONVO_RESOLVER_SNIPPET = `/** Effort to send in configuration_update items, or undefined to send it as reasoning.effort. */
-function cpaGetConfigurationUpdateEffort(model, options) {
-    if (model.compat?.supportsMidConvoEffort !== true ||
-        !options?.reasoningEffort) {
-        return undefined;
-    }
-    if (options.reasoningEffort === "none") {
-        // Mirror the Codex adapter: "none" resolves through the off mapping.
-        const offEffort = model.thinkingLevelMap?.off === undefined ? "none" : model.thinkingLevelMap.off;
-        return offEffort ?? undefined;
-    }
-    return model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-}
-// Documented mid-conversation semantics: the first turn's effort becomes the
-// fixed request-level reasoning.effort; later changes ride as configuration_update
-// items placed immediately before the user message they apply to. The shared
-// converter emits one update right before the assistant turn it governed plus
-// a trailing one for the current turn, so map each update back to the start
-// of its prompt chain (user message or preceding tool outputs), pull a
-// trailing update back before the last user message, and drop repeats.
-const CPA_CONFIGURATION_UPDATE_REQUEST_EFFORT = ${JSON.stringify(MID_CONVO_BASELINE_EFFORT)};
-function cpaReshapeConfigurationUpdates(input) {
-    if (!Array.isArray(input)) {
-        return { input, firstEffort: undefined };
-    }
-    const firstUpdate = input.find((item) => item?.type === "configuration_update");
-    if (!firstUpdate) {
-        return { input, firstEffort: undefined };
-    }
-    const firstEffort = typeof firstUpdate.reasoning?.effort === "string" ? firstUpdate.reasoning.effort : undefined;
-    const ASSISTANT_ITEM_TYPES = new Set(["reasoning", "message", "function_call", "custom_tool_call", "tool_search_call", "web_search_call", "programmatic_tool_calling"]);
-    const isAssistantItem = (item) => {
-        if (!item || item.type === undefined || !ASSISTANT_ITEM_TYPES.has(item.type)) {
-            return false;
-        }
-        return item.type !== "message" || item.role === "assistant" || item.role === undefined;
-    };
-    const isTurnStart = (item) => item?.role === "user" || item?.type === "function_call_output" || item?.type === "custom_tool_call_output";
-    const isPertinent = (item) => isTurnStart(item) || isAssistantItem(item);
-    const effortOf = (update) => typeof update.reasoning?.effort === "string" ? update.reasoning.effort : undefined;
-    const turns = [];
-    let seenFirstUpdate = false;
-    let pendingForwardUpdate;
-    let trailingForwardUpdate;
-    let trailingForwardIsTrailing = false;
-    const orphanUpdates = [];
-    for (let index = 0; index < input.length; index++) {
-        const item = input[index];
-        const previousPertinent = [...input.slice(0, index)].reverse().find((entry) => isPertinent(entry));
-        if (isTurnStart(item) && !(previousPertinent && isTurnStart(previousPertinent))) {
-            turns.push({ startIndex: index, update: pendingForwardUpdate, answered: false, toolContinuation: item?.role !== "user", lastToolOutputIndex: -1, promptBoundaryIndex: -1 });
-            pendingForwardUpdate = undefined;
-        }
-        const currentTurn = turns[turns.length - 1];
-        if (currentTurn) {
-            if (isAssistantItem(item)) {
-                currentTurn.answered = true;
-            }
-            else if (currentTurn.toolContinuation && !currentTurn.answered && item?.type !== "configuration_update") {
-                if (isTurnStart(item)) {
-                    currentTurn.lastToolOutputIndex = index;
-                }
-                currentTurn.promptBoundaryIndex = index;
-            }
-        }
-        if (item?.type !== "configuration_update") {
-            continue;
-        }
-        if (!seenFirstUpdate) {
-            seenFirstUpdate = true;
-            continue;
-        }
-        let nextPertinent;
-        for (let scan = index + 1; scan < input.length; scan++) {
-            if (isPertinent(input[scan])) {
-                nextPertinent = input[scan];
-                break;
-            }
-        }
-        if (nextPertinent && isAssistantItem(nextPertinent)) {
-            if (currentTurn) {
-                currentTurn.update ??= item;
-            }
-            else {
-                orphanUpdates.push({ update: item, anchorIndex: index });
-            }
-        }
-        else {
-            pendingForwardUpdate = item;
-            trailingForwardUpdate = item;
-            trailingForwardIsTrailing = input.slice(index + 1).every((entry) => !isPertinent(entry));
-        }
-    }
-    let trackedEffort = firstEffort ?? CPA_CONFIGURATION_UPDATE_REQUEST_EFFORT;
-    const orphanByAnchorIndex = new Map();
-    for (const orphan of orphanUpdates) {
-        const orphanEffort = effortOf(orphan.update);
-        if (orphanEffort !== undefined) {
-            trackedEffort = orphanEffort;
-        }
-        orphanByAnchorIndex.set(orphan.anchorIndex, orphan.update);
-    }
-    const announcementByIndex = new Map();
-    const announcementAfterIndex = new Map();
-    let currentEffort = trackedEffort;
-    for (const turn of turns) {
-        const effort = turn.update ? effortOf(turn.update) : undefined;
-        if (effort !== undefined && effort !== currentEffort) {
-            if (turn.toolContinuation) {
-                const boundaryIndex = turn.promptBoundaryIndex !== -1 ? turn.promptBoundaryIndex : turn.lastToolOutputIndex !== -1 ? turn.lastToolOutputIndex : turn.startIndex;
-                announcementAfterIndex.set(boundaryIndex, turn.update);
-            }
-            else {
-                announcementByIndex.set(turn.startIndex, turn.update);
-            }
-            currentEffort = effort;
-        }
-    }
-    const trailingTarget = [...turns].reverse().find((turn) => !turn.answered);
-    let trailingAtEnd = false;
-    if (trailingForwardUpdate && trailingForwardIsTrailing) {
-        if (trailingTarget && announcementByIndex.get(trailingTarget.startIndex) === trailingForwardUpdate) {
-            announcementByIndex.delete(trailingTarget.startIndex);
-            let effortBefore = firstEffort ?? CPA_CONFIGURATION_UPDATE_REQUEST_EFFORT;
-            for (const turn of turns) {
-                if (turn === trailingTarget) {
-                    break;
-                }
-                const announced = announcementByIndex.get(turn.startIndex);
-                const announcedEffort = announced ? effortOf(announced) : undefined;
-                if (announcedEffort !== undefined) {
-                    effortBefore = announcedEffort;
-                }
-            }
-            currentEffort = effortBefore;
-        }
-        const effort = effortOf(trailingForwardUpdate);
-        if (effort === undefined || effort !== currentEffort) {
-            if (trailingTarget && input[trailingTarget.startIndex]?.role === "user") {
-                announcementByIndex.set(trailingTarget.startIndex, trailingForwardUpdate);
-            }
-            else {
-                trailingAtEnd = true;
-            }
-        }
-    }
-    const reshaped = [];
-    for (let index = 0; index < input.length; index++) {
-        const item = input[index];
-        if (item?.type === "configuration_update") {
-            const orphan = orphanByAnchorIndex.get(index);
-            if (orphan) {
-                reshaped.push(orphan);
-            }
-            continue;
-        }
-        const announced = announcementByIndex.get(index);
-        if (announced) {
-            reshaped.push(announced);
-        }
-        reshaped.push(item);
-        const announcedAfter = announcementAfterIndex.get(index);
-        if (announcedAfter) {
-            reshaped.push(announcedAfter);
-        }
-    }
-    if (trailingAtEnd && trailingForwardUpdate) {
-        reshaped.push(trailingForwardUpdate);
-    }
-    return { input: reshaped, firstEffort };
-}`;
-
-/**
- * Whether the installed openai-responses-shared converter honors the
- * configurationUpdateEffort option (pi >=1.3.0). Older hosts ignore the
- * unknown option, so the mid-convo machinery must stay disabled there.
- */
-export function sharedSupportsConfigurationUpdate(sharedSource: string): boolean {
-	return (
-		sharedSource.includes('type: "configuration_update"') &&
-		sharedSource.includes("options?.configurationUpdateEffort")
-	);
-}
-
-/**
- * Whether a Codex adapter source already wires configuration_update support
- * natively. Uses the upstream resolver's exact wiring so stray mentions in
- * comments or identifiers do not count.
- */
-export function hasNativeMidConvoEffort(source: string): boolean {
-	return (
-		source.includes("function getConfigurationUpdateEffort(") &&
-		source.includes("const configurationUpdateEffort = getConfigurationUpdateEffort(")
-	);
-}
-
-/**
- * Port pi 1.3.0 cache-preserving thinking level changes to the Codex adapter.
- *
- * Mirrors pi-ai openai-responses: when the model declares
- * compat.supportsMidConvoEffort, the real level travels as configuration_update
- * input items (replayed from providerThinkingLevel recorded on each reply),
- * so switching levels mid-session keeps the prompt prefix — and the prompt
- * cache — intact. On top of the converter layout, the built message list is
- * reshaped to the documented placement: the first turn's effort becomes the
- * fixed request-level reasoning.effort, and each later change sits right
- * before the user message it applies to.
- * The conversion itself is delegated to the shared openai-responses-shared
- * module via its configurationUpdateEffort option; callers only apply this
- * patch when that module supports it. The WebSocket response replay is left
- * untouched on purpose: the previous full request already ends with the
- * trailing configuration_update, so stored response items must not repeat it.
- */
-function patchMidConvoEffort(source: string): string {
-	const ANCHORS: Array<[string, string, string]> = [
-		[
-			"request build",
-			"let body = buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties);",
-			"let body = buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties, cpaConfigurationUpdateEffort);",
-		],
-		[
-			"buildRequestBody signature",
-			"model.compat?.supportsOpenAIGrammarTools ?? false)) {",
-			"model.compat?.supportsOpenAIGrammarTools ?? false), cpaConfigurationUpdateEffort) {",
-		],
-		[
-			"message conversion",
-			"        toolOptions: { strict: null, supportsStrictMode, supportsOpenAIGrammarTools },\n    });",
-			"        toolOptions: { strict: null, supportsStrictMode, supportsOpenAIGrammarTools },\n        configurationUpdateEffort: cpaConfigurationUpdateEffort,\n    });",
-		],
-		[
-			"body input field",
-			"        input: messages,",
-			"        input: cpaReshapeConfigurationUpdates(messages).input,",
-		],
-		[
-			"reasoning block",
-			`        if (effort !== null) {\n            body.reasoning = {\n                effort,`,
-			`        if (effort !== null) {\n            body.reasoning = {\n                effort: cpaConfigurationUpdateEffort === undefined ? effort : (cpaReshapeConfigurationUpdates(messages).firstEffort ?? CPA_CONFIGURATION_UPDATE_REQUEST_EFFORT),`,
-		],
-	];
-
-	for (const [name, anchor] of ANCHORS) {
-		if (!source.includes(anchor)) {
-			throw new Error(`openai-codex-responses source no longer supports the mid-convo effort patch (${name})`);
-		}
-	}
-
-	let src = `${source}\n${MID_CONVO_RESOLVER_SNIPPET}\n`;
-	// The output construction sits right after the stream's single async IIFE
-	// opener; anchor the providerThinkingLevel injection on that block instead
-	// of guessing the exact indentation of the role line.
-	const iifeIndex = src.indexOf("    (async () => {");
-	const roleIndex = iifeIndex === -1 ? -1 : src.indexOf('role: "assistant"', iifeIndex);
-	const roleLineEnd = roleIndex === -1 ? -1 : src.indexOf("\n", roleIndex);
-	if (iifeIndex === -1 || roleIndex === -1 || roleLineEnd === -1) {
-		throw new Error("openai-codex-responses source no longer supports the mid-convo effort patch (output role)");
-	}
-	src =
-		src.slice(0, iifeIndex) +
-		"    const cpaConfigurationUpdateEffort = cpaGetConfigurationUpdateEffort(model, options);\n" +
-		src.slice(iifeIndex, roleLineEnd) +
-		"\n            ...(cpaConfigurationUpdateEffort === undefined ? {} : { providerThinkingLevel: cpaConfigurationUpdateEffort })," +
-		src.slice(roleLineEnd);
-	for (const [, anchor, replacement] of ANCHORS) {
-		src = src.replace(anchor, replacement);
-	}
-	return src;
 }
 
 const IMPORT_FROM_SPECIFIER = /from\s+(["'])([^"']+)\1/g;
@@ -1069,12 +636,7 @@ function patchWebSocketTransport(source: string): string {
 		);
 }
 
-export interface PatchCodexSourceOptions {
-	/** Whether the shared converter honors configurationUpdateEffort (pi >=1.3.0). */
-	supportsConfigurationUpdate?: boolean;
-}
-
-export function patchCodexSource(source: string, providerIds: string[], options: PatchCodexSourceOptions = {}): string {
+export function patchCodexSource(source: string, providerIds: string[]): string {
 	let src = source;
 
 	if (!/function extractAccountId\(token\) \{/.test(src)) {
@@ -1109,13 +671,6 @@ export function patchCodexSource(source: string, providerIds: string[], options:
 
 	// CLIProxyAPI prefers a persistent WebSocket transport. Reconnect before the
 	// response starts, and gracefully fall back to SSE if retries are exhausted.
-	// Cache-preserving thinking level changes (pi 1.3.0 openai-responses parity).
-	// Requires a shared converter that honors configurationUpdateEffort; skipped
-	// when the source already implements the resolver with upstream wiring.
-	if (options.supportsConfigurationUpdate === true && !hasNativeMidConvoEffort(source)) {
-		src = patchMidConvoEffort(src);
-	}
-
 	src = patchWebSocketTransport(src);
 
 	// The generated module lives outside the original source map directory.
@@ -1405,27 +960,7 @@ export async function loadCliproxyCodexStreams(
 	const { path: originalPath } = resolveOriginalCodexModulePath();
 	const originalSource = readFileSync(originalPath, "utf8");
 
-	// The shared converter only honors configurationUpdateEffort on pi >=1.3.0.
-	// Gate the optional patch (and the compat flag below) on that capability so
-	// older hosts keep the classic request-level effort instead of pinning it
-	// to the baseline without carrying the real level.
-	const sharedSource = (() => {
-		for (const candidate of [
-			join(dirname(originalPath), "openai-responses-shared.js"),
-			join(dirname(originalPath), "api", "openai-responses-shared.js"),
-		]) {
-			try {
-				if (existsSync(candidate)) {
-					return readFileSync(candidate, "utf8");
-				}
-			} catch {
-				// try next
-			}
-		}
-		return "";
-	})();
-	const supportsConfigurationUpdate = sharedSupportsConfigurationUpdate(sharedSource);
-	const patched = patchCodexSource(originalSource, providerIds, { supportsConfigurationUpdate });
+	const patched = patchCodexSource(originalSource, providerIds);
 
 	const outPath = computePatchedModuleCachePath(originalPath, patched);
 	const cacheDir = dirname(outPath);
@@ -1455,59 +990,33 @@ export async function loadCliproxyCodexStreams(
 					);
 				};
 
-	const supportsTranscript = supportsTranscriptSource(originalSource);
-	const adaptContext = (context: Context): Context => adaptContextForModule(context, supportsTranscript);
-
-	const adaptModel = (model: Model<Api>): Model<Api> => {
-		const compat = model.compat as unknown as { supportsMidConvoEffort?: boolean } | undefined;
-		if (supportsConfigurationUpdate || compat?.supportsMidConvoEffort !== true) {
-			return model;
-		}
-		return { ...model, compat: { ...compat, supportsMidConvoEffort: false } } as Model<Api>;
-	};
-
-	// When the host adapter implements mid-convo effort natively, its placement
-	// follows pi's converter layout; reshape payloads to the documented layout
-	// in the wrapper instead of inside the patched module.
-	const nativeMidConvoEffort = hasNativeMidConvoEffort(originalSource);
-	const adaptOptions = (
-		model: Model<Api>,
-		context: Context,
-		streamOptions?: SimpleStreamOptions,
-	): SimpleStreamOptions => ({
+	const adaptOptions = (model: Model<Api>, streamOptions?: SimpleStreamOptions): SimpleStreamOptions => ({
 		...streamOptions,
 		onPayload: async (payload, payloadModel) => {
-			const builtInstructions =
-				payload && typeof payload === "object" && "instructions" in payload ? payload.instructions : undefined;
 			const nextPayload = await streamOptions?.onPayload?.(payload, payloadModel);
 			const effective = nextPayload === undefined ? payload : nextPayload;
 			if (!effective || typeof effective !== "object" || Array.isArray(effective)) return effective;
 
-			const body = effective as Record<string, unknown>;
-			// The efforts recovered from the history (the first turn's at the request level, later turns' in
-			// configuration_update items) are checked against the model as it is now: a level the catalog no longer has
-			// is moved, as pi moves it, and never sent.
-			const reshaped = withSupportedEfforts(model, nativeMidConvoEffort ? reshapeConfigurationUpdates(body) : body);
-			// A hook (pi's before_provider_request) that removed the built instructions, deleting them or setting them
-			// to undefined, decided what the model is told: send its body as it is, with no base prompt put back.
-			if (builtInstructions !== undefined && body.instructions === undefined) {
-				if (!("instructions" in reshaped)) return reshaped;
-				const { instructions: _removed, ...rest } = reshaped;
-				return rest;
-			}
+			// pi's own configuration_update items are moved to the documented placement. The efforts recovered from the
+			// history (the first turn's at the request level, later turns' in configuration_update items) are checked
+			// against the model as it is now: a level the catalog no longer has is moved, as pi moves it, and never sent.
+			const reshaped = withSupportedEfforts(
+				model,
+				reshapeConfigurationUpdates(effective as Record<string, unknown>),
+			);
 			// Prefix the final full body before either transport, including WebSocket delta detection.
-			return moveGptInstructionsToInput(reshaped, builtInstructions, supportsTranscript ? undefined : context);
+			return moveGptInstructionsToInput(reshaped);
 		},
 	});
 
 	// A level the model lacks never reaches the proxy, which would pick a variant of its own: it is moved first.
 	const adaptedStreamSimple: CliproxyCodexStreamSimple = (model, context, streamOptions) => {
 		const levelled = withSupportedLevel(model, streamOptions);
-		return mod.streamSimple(adaptModel(model), adaptContext(context), adaptOptions(model, context, levelled));
+		return mod.streamSimple(model, ensureTranscriptContext(context), adaptOptions(model, levelled));
 	};
 	const adaptedStream: CliproxyCodexStreamSimple = (model, context, streamOptions) => {
 		const levelled = withSupportedLevel(model, streamOptions);
-		return mod.stream(adaptModel(model), adaptContext(context), adaptOptions(model, context, levelled));
+		return mod.stream(model, ensureTranscriptContext(context), adaptOptions(model, levelled));
 	};
 
 	const streamSimple = wrapStreamForServiceTier(adaptedStreamSimple, options.resolveServiceTier);

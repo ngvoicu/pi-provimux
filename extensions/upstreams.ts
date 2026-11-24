@@ -589,7 +589,7 @@ export class UpstreamsAnnouncer {
 	}
 
 	register(): void {
-		// pi without a bus between extensions (older, or a test's stand-in): nobody to tell.
+		// No bus between extensions (a test's stand-in): nobody to tell.
 		if (!this.pi.events) return;
 		void this.loadBuiltin();
 		this.pi.on("session_start", (_event, ctx) => {

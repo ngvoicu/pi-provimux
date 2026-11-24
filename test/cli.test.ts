@@ -1,6 +1,6 @@
 /**
  * pi's own CLI, with this extension loaded, against a fixture proxy: the release review's cases, run on
- * whichever pi the tests have installed (1.3.0 from package-lock.json, 1.6.0 in CI's second pass).
+ * the pi the tests have installed (package-lock.json's).
  *
  * - A lookup of the credential list still out when its session ends (`pi -p` quitting, `/reload`) never ends pi.
  * - The thinking guard reads `--model` as pi does: `local-assistant:high` is a model id, not `local-assistant` at
@@ -24,12 +24,6 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const EXTENSION = join(ROOT, "extensions", "index.ts");
 const PI_CLI = join(ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
-/** pi's version as major + minor / 1000 (1.6.0 is 1.006), from the CLI's own package. */
-const PI_VERSION = (() => {
-	const pkg = JSON.parse(readFileSync(join(PI_CLI, "..", "..", "package.json"), "utf8")) as { version: string };
-	const [major, minor] = pkg.version.split(".").map(Number);
-	return major + minor / 1000;
-})();
 const NEMOTRON = "provimux/nemotron-3-5-super";
 const CLAUDE = "provimux/claude-opus-5-5";
 const LITERAL = "provimux/local-assistant:high";
@@ -586,9 +580,9 @@ describe("pi's CLI with this extension, against a fixture proxy", { timeout: 120
 });
 
 /**
- * The provider id `provimux` (105.0.5), with pi's own CLI: one provider, under the id the extension resolves. The
- * owner's setup holds `providerId: "cliproxyapi"` (written by the old /login), its key and its URL in
- * cliproxyapi.json, and nothing in auth.json.
+ * The provider id `provimux`, with pi's own CLI: one provider, under the id the extension resolves. The owner's setup
+ * holds `providerId: "provimux"` (written by /login), its key and its URL in cliproxyapi.json, and nothing in
+ * auth.json.
  */
 describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 	const OPUS = "claude-opus-5-5";
@@ -610,7 +604,7 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 	function ownerShaped() {
 		writeFileSync(
 			CONFIG(),
-			`${JSON.stringify({ baseUrl: origin, apiKey: FILE_KEY, providerId: "cliproxyapi", claudeMessages: "auto" }, null, 2)}\n`,
+			`${JSON.stringify({ baseUrl: origin, apiKey: FILE_KEY, providerId: "provimux", claudeMessages: "auto" }, null, 2)}\n`,
 		);
 	}
 
@@ -635,7 +629,7 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		return { shown, list };
 	}
 
-	it("the owner's setup (providerId cliproxyapi in the file, no auth.json): only provimux, each model once; a prompt reaches the proxy with the file's key", async () => {
+	it("the owner's setup (providerId provimux in the file, no auth.json): only provimux, each model once; a prompt reaches the proxy with the file's key", async () => {
 		ownerShaped();
 		const before = readFileSync(CONFIG());
 		const { shown, list } = await expectOnly("provimux");
@@ -756,13 +750,13 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		];
 		writeFileSync(file, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
 		// pi does not find cliproxyapi/<id> and goes on with the model it would start with (here the only provider's
-		// first); since pi 1.6.0 every mode says so on stderr, before that only the TUI did.
+		// first), and says so on stderr.
 		const resumed = await pi(["--session", file, "-p", "say hi"]);
 		expect(resumed.code, said(resumed)).toBe(0);
 		captures.push({ name: "old session resumed with -p: stderr", text: resumed.stderr });
 		expect(resumed.requests.map((r) => r.key)).toEqual([FILE_KEY]);
 		const restored = /Could not restore model cliproxyapi\/claude-opus-5-5\. Using (\S+)/.exec(resumed.stderr);
-		if (PI_VERSION >= 1.006) expect(restored?.[1], said(resumed)).toMatch(/^provimux\//);
+		expect(restored?.[1], said(resumed)).toMatch(/^provimux\//);
 		const answer = readFileSync(file, "utf8")
 			.split("\n")
 			.filter(Boolean)

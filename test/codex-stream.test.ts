@@ -5,30 +5,18 @@ import { pathToFileURL } from "node:url";
 import type { Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-	adaptContextForModule,
-	adaptTranscriptContext,
 	computePatchedModuleCachePath,
-	hasNativeMidConvoEffort,
 	loadCliproxyCodexStreams,
 	MID_CONVO_BASELINE_EFFORT,
 	patchCodexSource,
 	reshapeConfigurationUpdates,
 	resolveCodexModuleFromNodeEntry,
-	resolveConfigurationUpdateEffort,
 	resolveOriginalCodexModulePath,
-	sharedSupportsConfigurationUpdate,
 	wellKnownCodexModuleCandidates,
 	writePatchedModuleCache,
 } from "../extensions/codex-stream.ts";
-import { PI_AI_NATIVE_CODEX_PROMPT_AND_EFFORT, piAiAtLeast } from "./pi-ai-version.ts";
 
-/**
- * pi-ai 1.6.0 and later put the system prompt in a leading developer item themselves and carry thinking level
- * changes natively: the extension's prompt move and mid-convo patch apply to pi before 1.6.0 (pi-ai-version.ts).
- */
-const PI_NATIVE = piAiAtLeast(PI_AI_NATIVE_CODEX_PROMPT_AND_EFFORT);
-
-/** The developer item pi-ai 1.6.0 builds from the system prompt. */
+/** The developer item pi-ai builds from the system prompt. */
 function piDeveloperItem(text: string) {
 	return { role: "developer", content: text };
 }
@@ -615,128 +603,24 @@ export function registerHook(fn) { registerCleanup(fn); }
 	});
 });
 
-describe("resolveConfigurationUpdateEffort", () => {
-	const model = {
-		compat: { supportsMidConvoEffort: true },
-		thinkingLevelMap: { off: "none", high: "high" },
-	};
-
-	it("returns the mapped effort only for capable models with a requested level", () => {
-		expect(resolveConfigurationUpdateEffort(model, { reasoningEffort: "high" })).toBe("high");
-		expect(resolveConfigurationUpdateEffort(model, { reasoningEffort: "off" })).toBe("none");
-		expect(resolveConfigurationUpdateEffort(model, { reasoningEffort: "xhigh" })).toBe("xhigh");
-		expect(resolveConfigurationUpdateEffort(model, {})).toBeUndefined();
-		expect(resolveConfigurationUpdateEffort(model, undefined)).toBeUndefined();
-		expect(resolveConfigurationUpdateEffort({}, { reasoningEffort: "high" })).toBeUndefined();
-		expect(
-			resolveConfigurationUpdateEffort({ compat: { supportsMidConvoEffort: false } }, { reasoningEffort: "high" }),
-		).toBeUndefined();
-	});
-
-	it("routes raw none efforts through the off mapping", () => {
-		expect(resolveConfigurationUpdateEffort(model, { reasoningEffort: "none" })).toBe("none");
-		expect(
-			resolveConfigurationUpdateEffort(
-				{ compat: { supportsMidConvoEffort: true }, thinkingLevelMap: { off: "low" } },
-				{ reasoningEffort: "none" },
-			),
-		).toBe("low");
-		expect(
-			resolveConfigurationUpdateEffort(
-				{ compat: { supportsMidConvoEffort: true }, thinkingLevelMap: { off: null } },
-				{ reasoningEffort: "none" },
-			),
-		).toBeUndefined();
-		expect(
-			resolveConfigurationUpdateEffort({ compat: { supportsMidConvoEffort: true } }, { reasoningEffort: "none" }),
-		).toBe("none");
-	});
-
-	it("pins the request-level baseline effort", () => {
-		expect(MID_CONVO_BASELINE_EFFORT).toBe("medium");
-	});
-});
-
-describe("mid-convo capability detection", () => {
-	it("detects shared-converter configuration_update support", () => {
-		expect(sharedSupportsConfigurationUpdate('type: "configuration_update" options?.configurationUpdateEffort')).toBe(
-			true,
-		);
-		expect(sharedSupportsConfigurationUpdate('type: "configuration_update"')).toBe(false);
-		expect(sharedSupportsConfigurationUpdate("")).toBe(false);
-	});
-
-	it("only treats actual upstream wiring as native support", () => {
-		expect(hasNativeMidConvoEffort("// ports getConfigurationUpdateEffort behavior")).toBe(false);
-		expect(hasNativeMidConvoEffort('"cliproxyapi-getConfigurationUpdateEffort"')).toBe(false);
-		expect(hasNativeMidConvoEffort("function getConfigurationUpdateEffort(model, options, compat) {}")).toBe(false);
-		expect(
-			hasNativeMidConvoEffort(
-				"function getConfigurationUpdateEffort(model, options, compat) {}\nconst configurationUpdateEffort = getConfigurationUpdateEffort(model, options, compat);",
-			),
-		).toBe(true);
-	});
-});
-
-describe("patchCodexSource mid-convo effort", () => {
+describe("patchCodexSource", () => {
 	function installedSource(): string {
 		const { path } = resolveOriginalCodexModulePath();
 		return readFileSync(path, "utf8");
 	}
 
-	it("finds pi's own configuration_update wiring in the installed source from pi-ai 1.6.0 on, and none before", () => {
-		expect(hasNativeMidConvoEffort(installedSource())).toBe(PI_NATIVE);
-	});
-
-	it("injects the configuration_update machinery before pi-ai 1.6.0, and keeps pi's own from 1.6.0 on", () => {
-		const patched = patchCodexSource(installedSource(), ["cliproxyapi"], { supportsConfigurationUpdate: true });
-
-		if (PI_NATIVE) {
-			expect(patched).toContain("const configurationUpdateEffort = getConfigurationUpdateEffort(");
-			expect(patched).not.toContain("cpaGetConfigurationUpdateEffort");
-			expect(patched).not.toContain("CPA_CONFIGURATION_UPDATE_REQUEST_EFFORT");
-			return;
-		}
-		expect(patched).toContain("cpaGetConfigurationUpdateEffort");
-		expect(patched).toContain("CPA_CONFIGURATION_UPDATE_REQUEST_EFFORT");
-		expect(patched).toContain("providerThinkingLevel: cpaConfigurationUpdateEffort");
-		expect(patched).toContain("configurationUpdateEffort: cpaConfigurationUpdateEffort");
-		expect(patched).toContain("grammarToolInputProperties, cpaConfigurationUpdateEffort)");
-		expect(patched).toContain("cpaReshapeConfigurationUpdates(messages).input");
-		expect(patched).toContain("cpaReshapeConfigurationUpdates(messages).firstEffort");
-		// The WebSocket response replay must not emit configuration updates:
-		// the stored full request already ends with the trailing update.
-		expect(patched).not.toContain("configurationUpdateEffort: cpaGetConfigurationUpdateEffort");
-	});
-
-	it("skips the optional patch without shared-converter support", () => {
+	it("keeps pi's own configuration_update wiring and adds none of its own", () => {
 		const patched = patchCodexSource(installedSource(), ["cliproxyapi"]);
+		expect(patched).toContain("const configurationUpdateEffort = getConfigurationUpdateEffort(");
 		expect(patched).not.toContain("cpaGetConfigurationUpdateEffort");
 		expect(patched).not.toContain("CPA_CONFIGURATION_UPDATE_REQUEST_EFFORT");
 	});
 
-	it("loads a legacy-shaped source without the transcript anchors", () => {
-		// Pre-1.3.0 hosts build the body from `context`, not normalizedContext. pi-ai 1.6.0 passes its own effort too.
-		const call = PI_NATIVE
-			? "buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties, configurationUpdateEffort)"
-			: "buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties)";
-		const legacy = installedSource().replace(call, call.replace("normalizedContext", "context"));
-		expect(legacy).not.toBe(installedSource());
-		expect(() => patchCodexSource(legacy, ["cliproxyapi"])).not.toThrow();
-	});
-
-	it("does not treat a provider id containing the resolver name as native support", () => {
-		const patched = patchCodexSource(installedSource(), ["cliproxyapi-getConfigurationUpdateEffort"], {
-			supportsConfigurationUpdate: true,
-		});
-		expect(patched).toContain('"cliproxyapi-getConfigurationUpdateEffort"');
-		if (PI_NATIVE) {
-			// pi-ai 1.6.0's own wiring is what counts as native, never the provider id: nothing is injected.
-			expect(patched).toContain("const configurationUpdateEffort = getConfigurationUpdateEffort(");
-			expect(patched).not.toContain("function cpaGetConfigurationUpdateEffort");
-			return;
-		}
-		expect(patched).toContain("function cpaGetConfigurationUpdateEffort");
+	it("adds the provider ids to CODEX_TOOL_CALL_PROVIDERS", () => {
+		const patched = patchCodexSource(installedSource(), ["cliproxyapi-getConfigurationUpdateEffort"]);
+		expect(patched).toMatch(
+			/const CODEX_TOOL_CALL_PROVIDERS = new Set\(\[[^\]]*"cliproxyapi-getConfigurationUpdateEffort"\]\);/,
+		);
 	});
 });
 
@@ -1177,10 +1061,10 @@ describe("GPT Responses prompt caching", () => {
 	});
 
 	it.each([
-		{ id: "  GpT-6-sol  ", prompt: systemPrompt, developer: systemPrompt },
-		{ id: "gpt-6-sol", prompt: " \n\t", developer: "You are a helpful assistant." },
-		{ id: "custom-gpt-6-sol", prompt: systemPrompt, developer: undefined },
-	])("serializes the base prompt for $id", async ({ id, prompt, developer }) => {
+		{ id: "  GpT-6-sol  ", prompt: systemPrompt },
+		{ id: "gpt-6-sol", prompt: " \n\t" },
+		{ id: "custom-gpt-6-sol", prompt: systemPrompt },
+	])("serializes the base prompt for $id", async ({ id, prompt }) => {
 		const streams = await loadCliproxyCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const result = await streams
@@ -1202,19 +1086,9 @@ describe("GPT Responses prompt caching", () => {
 		expect(body.prompt_cache_key).toBe("gpt-prompt-test");
 		expect(body.tools).toEqual([expect.objectContaining({ type: "function", name: "read" })]);
 		const user = { role: "user", content: [{ type: "input_text", text: "question" }] };
-		if (PI_NATIVE) {
-			// pi-ai 1.6.0 puts the prompt, as given, in its own leading developer item for every model; it is sent as is.
-			expect(body).not.toHaveProperty("instructions");
-			expect(body.input).toEqual([piDeveloperItem(prompt), user]);
-			return;
-		}
-		if (developer === undefined) {
-			expect(body.instructions).toBe(prompt);
-			expect(body.input).toEqual([user]);
-		} else {
-			expect(body).not.toHaveProperty("instructions");
-			expect(body.input).toEqual([developerItem(developer), user]);
-		}
+		// pi puts the prompt, as given, in its own leading developer item for every model; it is sent as is.
+		expect(body).not.toHaveProperty("instructions");
+		expect(body.input).toEqual([piDeveloperItem(prompt), user]);
 	});
 
 	it.each(["priority", "ultrafast"] as const)("applies %s before the caller's SSE payload hook", async (tier) => {
@@ -1287,8 +1161,8 @@ describe("GPT Responses prompt caching", () => {
 		const { body } = captured[0];
 		expect(body).not.toHaveProperty("instructions");
 		expect(body.input).toEqual([
-			// pi-ai 1.6.0 builds no instructions: the base prompt is already its first input item, which the hook kept.
-			...(PI_NATIVE ? [piDeveloperItem(systemPrompt)] : []),
+			// pi builds no instructions: the base prompt is already its first input item, which the hook kept.
+			piDeveloperItem(systemPrompt),
 			{ role: "developer", content: extra },
 			{ role: "user", content: [{ type: "input_text", text: "question" }] },
 		]);
@@ -1306,7 +1180,7 @@ describe("GPT Responses prompt caching", () => {
 					...sseOptions(captured),
 					onPayload: (payload) => {
 						const { instructions, ...rest } = payload as Record<string, any>;
-						expect(instructions).toBe(PI_NATIVE ? undefined : systemPrompt);
+						expect(instructions).toBeUndefined();
 						return { ...rest, input: [replacement, ...rest.input] };
 					},
 				},
@@ -1318,8 +1192,8 @@ describe("GPT Responses prompt caching", () => {
 		expect(body).not.toHaveProperty("instructions");
 		expect(body.input).toEqual([
 			replacement,
-			// From pi-ai 1.6.0 the base prompt is pi's own input item, which this hook keeps.
-			...(PI_NATIVE ? [piDeveloperItem(systemPrompt)] : []),
+			// The base prompt is pi's own input item, which this hook keeps.
+			piDeveloperItem(systemPrompt),
 			{ role: "user", content: [{ type: "input_text", text: "question" }] },
 		]);
 	});
@@ -1343,7 +1217,7 @@ describe("GPT Responses prompt caching", () => {
 		expect(body).not.toHaveProperty("instructions");
 		expect(body.metadata).toEqual({ tagged: "yes" });
 		expect(body.input).toEqual([
-			PI_NATIVE ? piDeveloperItem(systemPrompt) : developerItem(systemPrompt),
+			piDeveloperItem(systemPrompt),
 			{ role: "user", content: [{ type: "input_text", text: "question" }] },
 		]);
 	});
@@ -1351,32 +1225,29 @@ describe("GPT Responses prompt caching", () => {
 	const additionalTools = { type: "additional_tools", role: "developer", tools: [] };
 	const explicitDeveloper = developerItem(systemPrompt);
 	const implicitDeveloper = { role: "developer", content: systemPrompt };
-	// From pi-ai 1.6.0 the hook finds no instructions and pi's developer item first: what it adds goes before that
+	// The hook finds no instructions and pi's developer item first: what it adds goes before that
 	// item, which stays. When the first item is then not a developer message (the tool item), the extension puts its
 	// default base prompt in front, as it does for any GPT request that starts without one.
 	const piBase = piDeveloperItem(systemPrompt);
 	const defaultBase = developerItem("You are a helpful assistant.");
 	it.each([
-		{ name: "instructions are deleted", remove: true, prefix: [], expected: [], native: [piBase] },
+		{ name: "instructions are deleted", remove: true, prefix: [], expected: [piBase] },
 		{
 			name: "instructions are unset and a developer-role tool item leads",
 			prefix: [additionalTools],
-			expected: [additionalTools],
-			native: [defaultBase, additionalTools, piBase],
+			expected: [defaultBase, additionalTools, piBase],
 		},
 		{
 			name: "the base is moved to a typed developer message",
 			prefix: [explicitDeveloper],
-			expected: [explicitDeveloper],
-			native: [explicitDeveloper, piBase],
+			expected: [explicitDeveloper, piBase],
 		},
 		{
 			name: "the base is moved to an untyped developer message",
 			prefix: [implicitDeveloper],
-			expected: [implicitDeveloper],
-			native: [implicitDeveloper, piBase],
+			expected: [implicitDeveloper, piBase],
 		},
-	])("sends what an in-place hook left when $name", async ({ remove, prefix, expected, native }) => {
+	])("sends what an in-place hook left when $name", async ({ remove, prefix, expected }) => {
 		const streams = await loadCliproxyCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const result = await streams
@@ -1398,10 +1269,7 @@ describe("GPT Responses prompt caching", () => {
 		expect(result.errorMessage).toBeUndefined();
 		const { body } = captured[0];
 		expect(body).not.toHaveProperty("instructions");
-		expect(body.input).toEqual([
-			...(PI_NATIVE ? native : expected),
-			{ role: "user", content: [{ type: "input_text", text: "question" }] },
-		]);
+		expect(body.input).toEqual([...expected, { role: "user", content: [{ type: "input_text", text: "question" }] }]);
 	});
 
 	it("keeps text input supplied by a raw stream payload hook", async () => {
@@ -1425,16 +1293,6 @@ describe("GPT Responses prompt caching", () => {
 			developerItem(systemPrompt),
 			{ role: "user", content: [{ type: "input_text", text: "question" }] },
 		]);
-	});
-
-	it("can recover verbatim legacy text without changing the classic adaptation", () => {
-		const context = {
-			messages: [
-				{ ...systemMessage(), content: [{ type: "text", text: systemPrompt }], sections: { rule: " rule " } },
-			],
-		};
-		expect(adaptContextForModule(context, false).systemPrompt).toBe("Follow the project's rules.\n\nrule");
-		expect(adaptTranscriptContext(context, true).systemPrompt).toBe(`${systemPrompt}\n\n rule `);
 	});
 });
 
@@ -1586,8 +1444,8 @@ describe("mid-convo effort streams", () => {
 			.result();
 
 		expect(result.errorMessage).toBeUndefined();
-		// pi-ai 1.6.0 records the level it sent, "none", on the reply; the request is the same on both.
-		expect(result.providerThinkingLevel).toBe(PI_NATIVE ? "none" : undefined);
+		// pi records the level it sent, "none", on the reply.
+		expect(result.providerThinkingLevel).toBe("none");
 		expect(captured).toHaveLength(1);
 		expect(captured[0].body.reasoning?.effort).toBe("none");
 		expect(configurationUpdates(captured[0].body)).toEqual([]);
@@ -1725,7 +1583,7 @@ describe("mid-convo effort streams", () => {
 				expect(first.reasoning?.effort).toBe("low");
 				expect(configurationUpdates(first)).toEqual([]);
 				expect(first).not.toHaveProperty("previous_response_id");
-				const baseItem = (text: string) => (PI_NATIVE ? piDeveloperItem(text) : developerItem(text));
+				const baseItem = piDeveloperItem;
 				expect(first.input[0]).toEqual(baseItem(prompt));
 				expect(wireUserItemIndex(first, "first question")).toBe(1);
 

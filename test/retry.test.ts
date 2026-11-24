@@ -2,7 +2,6 @@ import { type AssistantMessage, isRetryableAssistantError } from "@earendil-work
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { normalizeTransientNetworkError, registerTransientNetworkErrorRetry } from "../extensions/retry.ts";
-import { piAiAtLeast, type Version } from "./pi-ai-version.ts";
 
 const TRANSIENT_STREAM_ERRORS = [
 	"Codex error: read tcp 172.16.209.2:57303->172.64.155.209:443: use of closed network connection",
@@ -10,13 +9,8 @@ const TRANSIENT_STREAM_ERRORS = [
 	"Codex error: invalid SSE data JSON (len=33181)",
 ];
 
-/**
- * The first pi-ai release whose own isRetryableAssistantError retries the error, for the errors it does retry: from
- * then on the extension leaves the message as pi has it. An error not listed is not retried by any pi-ai yet.
- */
-const RETRIED_BY_PI_SINCE: Record<string, Version> = {
-	[TRANSIENT_STREAM_ERRORS[1]]: [1, 4, 0],
-};
+/** The errors pi's own isRetryableAssistantError retries: the extension leaves their message as pi has it. */
+const RETRIED_BY_PI = new Set([TRANSIENT_STREAM_ERRORS[1]]);
 
 function assistantError(errorMessage: string, provider = "cliproxyapi"): AssistantMessage {
 	return {
@@ -42,8 +36,7 @@ function assistantError(errorMessage: string, provider = "cliproxyapi"): Assista
 describe("transient network error normalization", () => {
 	it.each(TRANSIENT_STREAM_ERRORS)("makes CLIProxyAPI transient stream error retryable: %s", (errorMessage) => {
 		const original = assistantError(errorMessage);
-		const since = RETRIED_BY_PI_SINCE[errorMessage];
-		if (since && piAiAtLeast(since)) {
+		if (RETRIED_BY_PI.has(errorMessage)) {
 			// pi retries it itself: the message is left exactly as pi has it, and stays retryable.
 			expect(isRetryableAssistantError(original)).toBe(true);
 			expect(normalizeTransientNetworkError(original)).toBe(original);

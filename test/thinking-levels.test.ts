@@ -104,7 +104,7 @@ function registry(models: Model<Api>[] = [nemotron(), literalSuffixModel()]) {
 	return { getAll: () => models, getAvailable: () => models, hasConfiguredAuth: () => true };
 }
 
-/** pi's own resolvers, from the pi installed for the tests (1.3.0 or 1.6.0). */
+/** pi's own resolvers, from the pi installed for the tests. */
 const piReading = (models?: Model<Api>[]) =>
 	piModelReading(registry(models), { resolveCliModel, resolveModelScopeWithDiagnostics } as unknown as PiResolvers);
 

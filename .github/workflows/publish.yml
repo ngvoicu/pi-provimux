@@ -18,8 +18,8 @@
 #            public registry from a neutral folder, npm pack --dry-run --ignore-scripts, the registered extensions in
 #            the tarball
 #   test     npm ci, the packed package loaded by pi (load.mjs), npm run check, in a container without the runner's
-#            credentials, on a tree written out by git (no .git, nothing a later step uses); first on the lockfile's
-#            pi 1.3.0, then again on pi 1.6.0, installed --no-save over it. The archive it packs, loads and checks
+#            credentials, on a tree written out by git (no .git, nothing a later step uses), on the lockfile's pi
+#            (1.6.0, the floor). The archive it packs, loads and checks
 #            is recorded (sha512) and uploaded (publish-archive) before any dependency code runs
 #   publish  that very archive (follow.sh archive: by the artifact's id and digest, its sha512 the recorded one,
 #            its files exactly the commit's), then, in one step, main checked to be that commit and npm publish
@@ -162,24 +162,8 @@ jobs:
           -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack:ro"
           -v "$RUNNER_TEMP/follow:/follow:ro" -w /w "$NODE_IMAGE"
           sh -c 'set -- /pack/*.tgz && [ "$#" -eq 1 ] && [ -f "$1" ] && node /follow/load.mjs "$1" /w/node_modules'
-      - name: npm run check, on pi 1.3.0 (package-lock.json)
-        run: >-
-          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
-          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE" npm run check
-      # The same load and checks on pi 1.6.0, which does some of the extension's Codex work itself
-      # (test/pi-ai-version.ts): installed over the lockfile's pi without saving and without scripts, in the container.
-      - name: pi 1.6.0, without saving
-        run: >-
-          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
-          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE"
-          npm install --no-save --ignore-scripts @earendil-works/pi-ai@1.6.0 @earendil-works/pi-coding-agent@1.6.0
-      - name: The packed package loads, on pi 1.6.0
-        run: >-
-          docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
-          -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w:ro" -v "$RUNNER_TEMP/pack:/pack:ro"
-          -v "$RUNNER_TEMP/follow:/follow:ro" -w /w "$NODE_IMAGE"
-          sh -c 'set -- /pack/*.tgz && [ "$#" -eq 1 ] && [ -f "$1" ] && node /follow/load.mjs "$1" /w/node_modules'
-      - name: npm run check, on pi 1.6.0
+      # The lockfile's pi (1.6.0, the floor: package.json's peerDependencies), named in the log, then the checks.
+      - name: npm run check, on the lockfile's pi
         run: >-
           docker run --rm --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)"
           -e HOME=/tmp -e CI=true -v "$RUNNER_TEMP/tree:/w" -w /w "$NODE_IMAGE"

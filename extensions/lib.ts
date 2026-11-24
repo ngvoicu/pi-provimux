@@ -26,18 +26,6 @@ export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
 
 export const DEFAULT_PROVIDER_ID = "provimux";
 export const DEFAULT_PROVIDER_NAME = "Provimux";
-/**
- * The provider id before 105.0.5. `/login` writes the id into `cliproxyapi.json`, so a setup made then holds it
- * without anyone having chosen it: read from the file, it means the default. Set by `CLIPROXYAPI_PROVIDER_ID`, it
- * is a choice and is kept. Nothing registers it, moves sessions from it, or reads its `auth.json` entry.
- */
-export const LEGACY_DEFAULT_PROVIDER_ID = "cliproxyapi";
-/**
- * The display name before 105.0.3. `/login` writes the name into `cliproxyapi.json`, so a setup made then holds it
- * without anyone having chosen it: read from the file, it means the default. Set by `CLIPROXYAPI_PROVIDER_NAME`, it
- * is a choice and is kept.
- */
-export const LEGACY_DEFAULT_PROVIDER_NAME = "CLIProxyAPI";
 export const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
 export const CONFIG_FILE_NAME = "cliproxyapi.json";
 export const MODELS_CACHE_FILE_NAME = "cliproxyapi-models.json";
@@ -77,11 +65,9 @@ export interface CliproxyConfigFile {
  */
 export type ClaudeMessagesMode = "auto" | "on" | "off";
 
-/** Normalizes a stored or passed Claude Messages setting; old caches and callers use booleans. */
+/** Reads a stored Claude Messages mode; anything else is "off". */
 export function claudeMessagesMode(value: unknown): ClaudeMessagesMode {
-	if (value === true || value === "on") return "on";
-	if (value === "auto") return "auto";
-	return "off";
+	return value === "on" || value === "auto" ? value : "off";
 }
 
 export interface ResolvedIdentity {
@@ -172,10 +158,10 @@ export interface MappedModels {
 	inferenceBaseUrl: string;
 	modelsUrl: string;
 	fastMode?: boolean;
-	claudeMessages?: ClaudeMessagesMode | boolean;
+	claudeMessages?: ClaudeMessagesMode;
 	/**
 	 * The proxy listed the credentials that serve its models (`?include=accounts`): it names what answers. false: its
-	 * list was read and listed none; absent: not known (the lookup failed, or a cache from before this was kept).
+	 * list was read and listed none; absent: not known (the lookup failed, or the cache, which records only true).
 	 */
 	listsCredentials?: boolean;
 }
@@ -430,20 +416,8 @@ export function resolveIdentity(agentDir: string): ResolvedIdentity {
 	}
 
 	return {
-		providerId: firstNonEmpty(
-			process.env.CLIPROXYAPI_PROVIDER_ID,
-			typeof file.providerId === "string" && file.providerId.trim() === LEGACY_DEFAULT_PROVIDER_ID
-				? undefined
-				: file.providerId,
-			DEFAULT_PROVIDER_ID,
-		)!,
-		providerName: firstNonEmpty(
-			process.env.CLIPROXYAPI_PROVIDER_NAME,
-			typeof file.providerName === "string" && file.providerName.trim() === LEGACY_DEFAULT_PROVIDER_NAME
-				? undefined
-				: file.providerName,
-			DEFAULT_PROVIDER_NAME,
-		)!,
+		providerId: firstNonEmpty(process.env.CLIPROXYAPI_PROVIDER_ID, file.providerId, DEFAULT_PROVIDER_ID)!,
+		providerName: firstNonEmpty(process.env.CLIPROXYAPI_PROVIDER_NAME, file.providerName, DEFAULT_PROVIDER_NAME)!,
 	};
 }
 
@@ -1101,7 +1075,7 @@ export function findClaudeFormatEntry(modelId: string, catalog: ClaudeFormatCata
 	);
 }
 
-/** pi's built-in Anthropic models via the pi-ai peer; empty on pi versions without it. */
+/** pi's built-in Anthropic models via the pi-ai peer; empty if they cannot be loaded. */
 export async function loadBuiltinClaudeFormatCatalog(): Promise<ClaudeFormatCatalog> {
 	try {
 		const builtins = (await import("@earendil-works/pi-ai/providers/all")) as {
@@ -1185,9 +1159,8 @@ export async function loadMappedModels(
 	timeoutOrFastMode: number | boolean = MODELS_REQUEST_TIMEOUT_MS,
 	agentDir?: string,
 	signal?: AbortSignal,
-	claudeMessages: ClaudeMessagesMode | boolean = "off",
+	claudeMode: ClaudeMessagesMode = "off",
 ): Promise<MappedModels> {
-	const claudeMode = claudeMessagesMode(claudeMessages);
 	const claudeWanted = claudeMode !== "off";
 	const pricingEnabled = typeof timeoutOrFastMode === "boolean";
 	const effectiveFastMode = typeof timeoutOrFastMode === "boolean" ? timeoutOrFastMode : false;
@@ -1339,7 +1312,7 @@ export async function resolveMappedModels(
 		forceRefresh?: boolean;
 		replaceCache?: boolean;
 		fastMode?: boolean;
-		claudeMessages?: ClaudeMessagesMode | boolean;
+		claudeMessages?: ClaudeMessagesMode;
 		signal?: AbortSignal;
 		shouldCommit?: () => boolean;
 		staleTtlMs?: number;
@@ -1347,7 +1320,7 @@ export async function resolveMappedModels(
 ): Promise<ResolvedModelsResult> {
 	const cacheMatchesFastMode = (cache: ModelsCacheFile): boolean =>
 		(options.fastMode === undefined || (cache.fastMode ?? false) === options.fastMode) &&
-		claudeMessagesMode(cache.claudeMessages) === claudeMessagesMode(options.claudeMessages);
+		claudeMessagesMode(cache.claudeMessages) === (options.claudeMessages ?? "off");
 
 	const existingCache = loadModelsCache(agentDir, baseUrlInput);
 	if (!options.forceRefresh && !options.replaceCache) {

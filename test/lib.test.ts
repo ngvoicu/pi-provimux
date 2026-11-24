@@ -20,8 +20,6 @@ import {
 	firstNonEmpty,
 	isModelReferencedAsDefault,
 	isUnauthorizedModelsError,
-	LEGACY_DEFAULT_PROVIDER_ID,
-	LEGACY_DEFAULT_PROVIDER_NAME,
 	loadAuthConnection,
 	loadConfigFile,
 	loadConfiguredDefaultSettings,
@@ -575,18 +573,19 @@ describe("config and auth file helpers", () => {
 		expect(DEFAULT_BASE_URL).toBe("http://127.0.0.1:8317");
 	});
 
-	it("shows the provider as Provimux, also for a setup whose file holds the old default name", () => {
+	it("shows the provider as Provimux by default; a name in the file or CLIPROXYAPI_PROVIDER_NAME is kept", () => {
 		const previous = process.env.CLIPROXYAPI_PROVIDER_NAME;
 		delete process.env.CLIPROXYAPI_PROVIDER_NAME;
 		try {
 			expect(DEFAULT_PROVIDER_NAME).toBe("Provimux");
 			const agentDir = tempAgentDir();
-			saveConfigFile(agentDir, { providerName: LEGACY_DEFAULT_PROVIDER_NAME });
 			expect(resolveIdentity(agentDir).providerName).toBe("Provimux");
+			saveConfigFile(agentDir, { providerName: "CLIProxyAPI" });
+			expect(resolveIdentity(agentDir).providerName).toBe("CLIProxyAPI");
 			saveConfigFile(agentDir, { providerName: "CPA" });
 			expect(resolveIdentity(agentDir).providerName).toBe("CPA");
-			process.env.CLIPROXYAPI_PROVIDER_NAME = "CLIProxyAPI";
-			expect(resolveIdentity(agentDir).providerName).toBe("CLIProxyAPI");
+			process.env.CLIPROXYAPI_PROVIDER_NAME = "Acme";
+			expect(resolveIdentity(agentDir).providerName).toBe("Acme");
 		} finally {
 			if (previous === undefined) {
 				delete process.env.CLIPROXYAPI_PROVIDER_NAME;
@@ -624,11 +623,11 @@ describe("config and auth file helpers", () => {
 		];
 		const AUTH_ENTRIES = [undefined, "cliproxyapi", "provimux", "acme"];
 
-		/** The rule: a non-blank CLIPROXYAPI_PROVIDER_ID; else a file value, unless it is the old default; else provimux. */
+		/** The rule: a non-blank CLIPROXYAPI_PROVIDER_ID; else a non-blank file value; else provimux. */
 		function expected(env: string | undefined, file: unknown): string {
 			if (env?.trim()) return env.trim();
 			if (!["absent", "broken", "none"].includes(file as string) && typeof file === "string" && file.trim()) {
-				if (file.trim() !== "cliproxyapi") return file.trim();
+				return file.trim();
 			}
 			return "provimux";
 		}
@@ -645,9 +644,8 @@ describe("config and auth file helpers", () => {
 			}
 		}
 
-		it("is provimux by default; the old default is cliproxyapi", () => {
+		it("is provimux by default", () => {
 			expect(DEFAULT_PROVIDER_ID).toBe("provimux");
-			expect(LEGACY_DEFAULT_PROVIDER_ID).toBe("cliproxyapi");
 		});
 
 		it("every combination of CLIPROXYAPI_PROVIDER_ID, the file's providerId and a stored login", () => {
@@ -677,7 +675,7 @@ describe("config and auth file helpers", () => {
 			expect(cases).toBe(ENV_VALUES.length * FILE_VALUES.length * AUTH_ENTRIES.length);
 		});
 
-		it("the owner's setup: providerId cliproxyapi, apiKey and baseUrl in the file, no login: provimux, from the file", () => {
+		it("the owner's setup: providerId provimux, apiKey and baseUrl in the file, no login: provimux, from the file", () => {
 			const unset = <T>(run: () => T) =>
 				withEnv("CLIPROXYAPI_BASE_URL", undefined, () => withEnv("CLIPROXYAPI_API_KEY", undefined, run));
 			unset(() =>
@@ -685,7 +683,7 @@ describe("config and auth file helpers", () => {
 					const agentDir = tempAgentDir();
 					writeFileSync(
 						join(agentDir, CONFIG_FILE_NAME),
-						JSON.stringify({ baseUrl: "http://127.0.0.1:9", apiKey: "file-key", providerId: "cliproxyapi" }),
+						JSON.stringify({ baseUrl: "http://127.0.0.1:9", apiKey: "file-key", providerId: "provimux" }),
 						"utf8",
 					);
 					const { providerId } = resolveIdentity(agentDir);
@@ -721,13 +719,13 @@ describe("config and auth file helpers", () => {
 			});
 		});
 
-		it("/login's file write keeps the old default meaning the default; another id stays a choice", () => {
+		it("the id and name /login writes to the file are read as written", () => {
 			withEnv("CLIPROXYAPI_PROVIDER_ID", undefined, () => {
 				const agentDir = tempAgentDir();
 				saveConfigFile(agentDir, { providerId: "provimux", providerName: "Provimux" });
 				expect(resolveIdentity(agentDir)).toEqual({ providerId: "provimux", providerName: "Provimux" });
 				saveConfigFile(agentDir, { providerId: "cliproxyapi", providerName: "CLIProxyAPI" });
-				expect(resolveIdentity(agentDir)).toEqual({ providerId: "provimux", providerName: "Provimux" });
+				expect(resolveIdentity(agentDir)).toEqual({ providerId: "cliproxyapi", providerName: "CLIProxyAPI" });
 				saveConfigFile(agentDir, { providerId: "acme" });
 				expect(resolveIdentity(agentDir).providerId).toBe("acme");
 			});
