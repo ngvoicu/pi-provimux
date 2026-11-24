@@ -24,11 +24,7 @@ import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-m
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-	CLIPROXYAPI_CODEX_API,
-	type CliproxyCodexStreams,
-	loadCliproxyCodexStreams,
-} from "../extensions/codex-stream.ts";
+import { loadProvimuxCodexStreams, PROVIMUX_CODEX_API, type ProvimuxCodexStreams } from "../extensions/codex-stream.ts";
 import {
 	ANSWERED_EVENT,
 	answeredOptions,
@@ -138,7 +134,7 @@ function route(req: IncomingMessage, res: ServerResponse) {
 
 let server: Server;
 let baseUrl: string;
-let codex: CliproxyCodexStreams;
+let codex: ProvimuxCodexStreams;
 
 beforeAll(async () => {
 	server = createServer(route);
@@ -157,7 +153,7 @@ beforeAll(async () => {
 	});
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-	codex = await loadCliproxyCodexStreams(["cliproxyapi"]);
+	codex = await loadProvimuxCodexStreams(["provimux"]);
 });
 
 afterAll(async () => {
@@ -198,7 +194,7 @@ async function announcer(lists: boolean) {
 	};
 	const upstreams = new UpstreamsAnnouncer(
 		pi,
-		"cliproxyapi",
+		"provimux",
 		() => ({ baseUrlInput: baseUrl, apiKey: "k" }),
 		async () => list,
 	);
@@ -237,7 +233,7 @@ function model(id: string, api: Api, suffix = ""): Model<Api> {
 		id,
 		name: id,
 		api,
-		provider: "cliproxyapi",
+		provider: "provimux",
 		baseUrl: `${baseUrl}${suffix}`,
 		reasoning: false,
 		input: ["text"],
@@ -257,7 +253,7 @@ async function run(events: AsyncIterable<AssistantMessageEvent>) {
 const claudeLogin = {
 	channel: ANSWERED_EVENT,
 	data: {
-		provider: "cliproxyapi",
+		provider: "provimux",
 		model: "claude-opus-5-5",
 		upstreams: [{ provider: "anthropic", subscription: true }],
 	},
@@ -266,7 +262,7 @@ const claudeLogin = {
 const codexLogin = {
 	channel: ANSWERED_EVENT,
 	data: {
-		provider: "cliproxyapi",
+		provider: "provimux",
 		model: "gpt-6.1-sol",
 		upstreams: [{ provider: "openai-codex", subscription: true }],
 	},
@@ -291,7 +287,7 @@ describe("what answered, over the wire", () => {
 			way: "sse",
 			expected: codexLogin,
 			send: (wiring: SimpleStreamOptions) =>
-				answeredStream(codex.streamSimple)(model("gpt-6.1-sol", CLIPROXYAPI_CODEX_API, "/v1"), context, {
+				answeredStream(codex.streamSimple)(model("gpt-6.1-sol", PROVIMUX_CODEX_API, "/v1"), context, {
 					...wiring,
 					transport: "sse",
 				} as SimpleStreamOptions),
@@ -301,7 +297,7 @@ describe("what answered, over the wire", () => {
 			way: "ws",
 			expected: codexLogin,
 			send: (wiring: SimpleStreamOptions) =>
-				answeredStream(codex.streamSimple)(model("gpt-6.1-sol", CLIPROXYAPI_CODEX_API, "/v1"), context, {
+				answeredStream(codex.streamSimple)(model("gpt-6.1-sol", PROVIMUX_CODEX_API, "/v1"), context, {
 					...wiring,
 					transport: "websocket",
 					sessionId: `ws-${Math.random()}`,

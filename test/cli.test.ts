@@ -396,7 +396,7 @@ beforeEach(() => {
 	writeFileSync(guard, NETWORK_GUARD);
 	writeFileSync(observer, OBSERVER);
 	writeFileSync(
-		join(agentDir, "cliproxyapi.json"),
+		join(agentDir, "provimux.json"),
 		JSON.stringify({ baseUrl: origin, apiKey: "fixture-only", claudeMessages: "auto" }),
 	);
 	models = MODELS.map((m) => ({ ...m, levels: [...m.levels] }));
@@ -433,7 +433,7 @@ async function pi(
 	run = { events: join(root, `${label}.events`), released: join(root, `${label}.released`) };
 	const env: NodeJS.ProcessEnv = {};
 	for (const [name, value] of Object.entries(process.env)) {
-		if (/^(PI_|CLIPROXYAPI_|VITEST|NODE_OPTIONS$)/.test(name)) continue;
+		if (/^(PI_|PROVIMUX_|VITEST|NODE_OPTIONS$)/.test(name)) continue;
 		env[name] = value;
 	}
 	Object.assign(env, {
@@ -441,7 +441,7 @@ async function pi(
 		PI_CODING_AGENT_DIR: agentDir,
 		PI_OFFLINE: "1",
 		PI_SKIP_VERSION_CHECK: "1",
-		CLIPROXYAPI_TRANSPORT: "sse",
+		PROVIMUX_TRANSPORT: "sse",
 		NODE_OPTIONS: `--require=${guard}`,
 		OBSERVED: run.events,
 		RELEASED: run.released,
@@ -581,7 +581,7 @@ describe("pi's CLI with this extension, against a fixture proxy", { timeout: 120
 
 /**
  * The provider id `provimux`, with pi's own CLI: one provider, under the id the extension resolves. The owner's setup
- * holds `providerId: "provimux"` (written by /login), its key and its URL in cliproxyapi.json, and nothing in
+ * holds `providerId: "provimux"` (written by /login), its key and its URL in provimux.json, and nothing in
  * auth.json.
  */
 describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
@@ -589,7 +589,7 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 	const GPT = "gpt-catalog-fixture";
 	const FILE_KEY = "fixture-file-key";
 	const LOGIN_KEY = "fixture-login-key";
-	const CONFIG = () => join(agentDir, "cliproxyapi.json");
+	const CONFIG = () => join(agentDir, "provimux.json");
 	const AUTH = () => join(agentDir, "auth.json");
 	const all = (provider: string) => MODELS.map((m) => `${provider}/${m.slug}`).sort();
 	const listed = (result: Run, command = "c0") =>
@@ -656,17 +656,17 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		expect(existsSync(AUTH()) ? Object.keys(JSON.parse(readFileSync(AUTH(), "utf8"))) : []).toEqual([]);
 	});
 
-	it("CLIPROXYAPI_PROVIDER_ID=acme wins over the file: only acme, and acme/<id> answers", async () => {
+	it("PROVIMUX_PROVIDER_ID=acme wins over the file: only acme, and acme/<id> answers", async () => {
 		ownerShaped();
-		const env = { CLIPROXYAPI_PROVIDER_ID: "acme" };
+		const env = { PROVIMUX_PROVIDER_ID: "acme" };
 		const { list } = await expectOnly("acme", env);
-		captures.push({ name: "CLIPROXYAPI_PROVIDER_ID=acme: --list-models", text: list.stdout });
+		captures.push({ name: "PROVIMUX_PROVIDER_ID=acme: --list-models", text: list.stdout });
 		const sent = await pi(["--no-session", "--model", `acme/${GPT}`, "-p", "say hi"], { env });
 		expect(sent.code, said(sent)).toBe(0);
 		expect(sent.requests.map((r) => [r.model, r.key])).toEqual([[GPT, FILE_KEY]]);
 	});
 
-	it("a fresh /login with no cliproxyapi.json: saved under provimux, and only provimux is shown", async () => {
+	it("a fresh /login with no provimux.json: saved under provimux, and only provimux is shown", async () => {
 		rmSync(CONFIG());
 		const empty = await pi(["--mode", "rpc", "--no-session"], { rpc: [{ type: "get_available_models" }] });
 		expect(listed(empty), said(empty)).toEqual([]);
@@ -687,7 +687,7 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		});
 		expect(Object.keys(JSON.parse(readFileSync(AUTH(), "utf8")))).toEqual(["provimux"]);
 		captures.push({
-			name: "fresh /login: cliproxyapi.json",
+			name: "fresh /login: provimux.json",
 			text: JSON.stringify({ ...config, baseUrl: "<fixture>" }, null, 2),
 		});
 
@@ -775,7 +775,7 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		).toEqual(["api_key"]);
 		const config = readFileSync(CONFIG());
 		for (const [how, env] of [
-			["environment", { CLIPROXYAPI_BASE_URL: originB, CLIPROXYAPI_API_KEY: B_KEY }],
+			["environment", { PROVIMUX_BASE_URL: originB, PROVIMUX_API_KEY: B_KEY }],
 			["file", {}],
 		] as const) {
 			if (how === "file") writeFileSync(CONFIG(), JSON.stringify({ baseUrl: originB, apiKey: B_KEY }));

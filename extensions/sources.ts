@@ -44,13 +44,12 @@ export function parseAccounts(value: unknown): Account[] {
 /**
  * The credentials CLIProxyAPI may answer with: those at the highest priority. It uses the highest priority that is
  * free in every routing mode, and picks among the credentials sharing it (round-robin by default; with no priority
- * set, all share 0). Given a kind, among the credentials of that kind.
+ * set, all share 0).
  */
-export function likelyAccounts(accounts: Account[], kind?: string): Account[] {
-	const candidates = kind ? accounts.filter((account) => account.kind === kind) : accounts;
-	if (candidates.length === 0) return [];
-	const top = Math.max(...candidates.map((account) => account.priority));
-	return candidates.filter((account) => account.priority === top);
+export function likelyAccounts(accounts: Account[]): Account[] {
+	if (accounts.length === 0) return [];
+	const top = Math.max(...accounts.map((account) => account.priority));
+	return accounts.filter((account) => account.priority === top);
 }
 
 /** The service behind a CLIProxyAPI provider, as people call it. */

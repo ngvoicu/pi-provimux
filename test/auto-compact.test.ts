@@ -10,7 +10,7 @@ import {
 	resolveCompactionSessionId,
 	shouldScheduleProactiveCompaction,
 } from "../extensions/auto-compact.ts";
-import type { CliproxyCodexStreamSimple } from "../extensions/codex-stream.ts";
+import type { ProvimuxCodexStreamSimple } from "../extensions/codex-stream.ts";
 
 const CONTEXT_WINDOW = 372000;
 const RESERVE_TOKENS = 65536;
@@ -27,7 +27,7 @@ function assistantMessage(
 				? [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } }]
 				: [{ type: "text", text: "done" }],
 		api: "openai-codex-responses",
-		provider: "cliproxyapi",
+		provider: "provimux",
 		model: "gpt-5.6-sol",
 		usage: {
 			input: 100,
@@ -89,8 +89,8 @@ describe("proactive compaction controller", () => {
 	});
 
 	function setup(enabled = true) {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-auto-compact-agent-"));
-		const cwd = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-auto-compact-cwd-"));
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-provimux-auto-compact-agent-"));
+		const cwd = mkdtempSync(join(tmpdir(), "pi-provimux-auto-compact-cwd-"));
 		tempDirs.push(agentDir, cwd);
 		const settingsPath = join(agentDir, "settings.json");
 		writeFileSync(settingsPath, `${JSON.stringify({ compaction: { enabled, reserveTokens: RESERVE_TOKENS } })}\n`);
@@ -100,12 +100,12 @@ describe("proactive compaction controller", () => {
 			on: (event: string, handler: (event: any, ctx: ExtensionContext) => unknown) => handlers.set(event, handler),
 		} as unknown as ExtensionAPI;
 		const closeWebSocketSessions = vi.fn();
-		const controller = new ProactiveCompactionController(agentDir, "cliproxyapi", closeWebSocketSessions);
+		const controller = new ProactiveCompactionController(agentDir, "provimux", closeWebSocketSessions);
 		controller.register(pi);
 
 		const model = {
 			id: "gpt-5.6-sol",
-			provider: "cliproxyapi",
+			provider: "provimux",
 			api: "openai-codex-responses",
 			contextWindow: CONTEXT_WINDOW,
 		} as Model<Api>;
@@ -113,15 +113,14 @@ describe("proactive compaction controller", () => {
 		const ctx = {
 			cwd,
 			model,
-			sessionId,
 			sessionManager: { getSessionId: () => sessionId },
 			isProjectTrusted: () => false,
 			getContextUsage: () => ({ tokens: THRESHOLD + 1, contextWindow: CONTEXT_WINDOW, percent: 82.4 }),
 		} as unknown as ExtensionContext;
 		handlers.get("session_start")?.({}, ctx);
 
-		const baseResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const baseStream: CliproxyCodexStreamSimple = () => baseResult;
+		const baseResult = {} as ReturnType<ProvimuxCodexStreamSimple>;
+		const baseStream: ProvimuxCodexStreamSimple = () => baseResult;
 		const wrapped = controller.wrapStreamSimple(baseStream);
 		return { ctx, handlers, model, wrapped, baseResult, settingsPath, closeWebSocketSessions, sessionId, controller };
 	}
@@ -197,84 +196,32 @@ describe("proactive compaction controller", () => {
 		expect(wrapped(model, { messages: [] })).toBe(baseResult);
 	});
 
-	it("supports OMP settings managers returned asynchronously", async () => {
-		const manager = {
-			get(key: string) {
-				return key === "compaction.enabled"
-					? true
-					: key === "compaction.reserveTokens"
-						? RESERVE_TOKENS
-						: undefined;
-			},
-			reloadFromDisk: vi.fn(async () => undefined),
-		};
-		vi.spyOn(SettingsManager, "create").mockReturnValue(Promise.resolve(manager) as unknown as SettingsManager);
-
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-omp-agent-"));
-		const cwd = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-omp-cwd-"));
-		tempDirs.push(agentDir, cwd);
-		const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
-		const pi = {
-			on: (event: string, handler: (event: any, ctx: ExtensionContext) => unknown) => handlers.set(event, handler),
-		} as unknown as ExtensionAPI;
-		const controller = new ProactiveCompactionController(agentDir, "cliproxyapi");
-		controller.register(pi);
-
-		const model = {
-			id: "gpt-5.6-sol",
-			provider: "cliproxyapi",
-			api: "openai-codex-responses",
-			contextWindow: CONTEXT_WINDOW,
-		} as Model<Api>;
-		const ctx = {
-			cwd,
-			model,
-			isProjectTrusted: () => false,
-			getContextUsage: () => ({ tokens: THRESHOLD + 1, contextWindow: CONTEXT_WINDOW, percent: 82.4 }),
-		} as unknown as ExtensionContext;
-		const baseResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const baseStream: CliproxyCodexStreamSimple = () => baseResult;
-		const wrapped = controller.wrapStreamSimple(baseStream);
-
-		await handlers.get("session_start")?.({}, ctx);
-		await handlers.get("turn_end")?.({ message: assistantMessage(THRESHOLD + 1), toolResults: [{}] }, ctx);
-
-		expect(manager.reloadFromDisk).toHaveBeenCalledOnce();
-		const proactiveStream = wrapped(model, { messages: [] });
-		const error = await proactiveStream.result();
-		expect(error.stopReason).toBe("error");
-	});
-
-	it("uses the last valid OMP settings when reload and read fail", async () => {
+	it("uses the last valid settings when reload and read fail", async () => {
 		let fail = false;
 		const manager = {
-			get(key: string) {
+			getCompactionSettings() {
 				if (fail) throw new Error("settings read failed");
-				return key === "compaction.enabled"
-					? true
-					: key === "compaction.reserveTokens"
-						? RESERVE_TOKENS
-						: undefined;
+				return { enabled: true, reserveTokens: RESERVE_TOKENS };
 			},
-			async reloadFromDisk() {
+			async reload() {
 				if (fail) throw new Error("settings reload failed");
 			},
 		};
-		vi.spyOn(SettingsManager, "create").mockReturnValue(Promise.resolve(manager) as unknown as SettingsManager);
+		vi.spyOn(SettingsManager, "create").mockReturnValue(manager as unknown as SettingsManager);
 
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-omp-failure-agent-"));
-		const cwd = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-omp-failure-cwd-"));
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-provimux-settings-failure-agent-"));
+		const cwd = mkdtempSync(join(tmpdir(), "pi-provimux-settings-failure-cwd-"));
 		tempDirs.push(agentDir, cwd);
 		const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
 		const pi = {
 			on: (event: string, handler: (event: any, ctx: ExtensionContext) => unknown) => handlers.set(event, handler),
 		} as unknown as ExtensionAPI;
-		const controller = new ProactiveCompactionController(agentDir, "cliproxyapi");
+		const controller = new ProactiveCompactionController(agentDir, "provimux");
 		controller.register(pi);
 
 		const model = {
 			id: "gpt-5.6-sol",
-			provider: "cliproxyapi",
+			provider: "provimux",
 			api: "openai-codex-responses",
 			contextWindow: CONTEXT_WINDOW,
 		} as Model<Api>;
@@ -284,7 +231,7 @@ describe("proactive compaction controller", () => {
 			isProjectTrusted: () => false,
 			getContextUsage: () => ({ tokens: THRESHOLD + 1, contextWindow: CONTEXT_WINDOW, percent: 82.4 }),
 		} as unknown as ExtensionContext;
-		const baseStream: CliproxyCodexStreamSimple = () => ({}) as ReturnType<CliproxyCodexStreamSimple>;
+		const baseStream: ProvimuxCodexStreamSimple = () => ({}) as ReturnType<ProvimuxCodexStreamSimple>;
 		const wrapped = controller.wrapStreamSimple(baseStream);
 
 		await handlers.get("session_start")?.({}, ctx);
@@ -316,48 +263,10 @@ describe("proactive compaction controller", () => {
 		expect(wrapped(model, { messages: [] })).toBe(baseResult);
 	});
 
-	it("does not schedule compaction when settings manager creation promise rejects", async () => {
-		vi.spyOn(SettingsManager, "create").mockReturnValue(
-			Promise.reject(new Error("rejected")) as unknown as SettingsManager,
-		);
-
-		const { ctx, handlers, model, wrapped, baseResult } = setup();
-		await handlers.get("session_start")?.({}, ctx);
-		await handlers.get("turn_end")?.({ message: assistantMessage(THRESHOLD + 1), toolResults: [{}] }, ctx);
-
-		expect(wrapped(model, { messages: [] })).toBe(baseResult);
-	});
-
-	it("proceeds with compaction when settings manager has neither reload method", async () => {
+	it("does not schedule compaction when compaction is disabled", async () => {
 		const manager = {
-			get(key: string) {
-				return key === "compaction.enabled"
-					? true
-					: key === "compaction.reserveTokens"
-						? RESERVE_TOKENS
-						: undefined;
-			},
-		};
-		vi.spyOn(SettingsManager, "create").mockReturnValue(manager as unknown as SettingsManager);
-
-		const { ctx, handlers, model, wrapped } = setup();
-		await handlers.get("session_start")?.({}, ctx);
-		await handlers.get("turn_end")?.({ message: assistantMessage(THRESHOLD + 1), toolResults: [{}] }, ctx);
-
-		const proactiveStream = wrapped(model, { messages: [] });
-		const error = await proactiveStream.result();
-		expect(error.stopReason).toBe("error");
-	});
-
-	it("does not schedule compaction when OMP compaction is disabled", async () => {
-		const manager = {
-			get(key: string) {
-				return key === "compaction.enabled"
-					? false
-					: key === "compaction.reserveTokens"
-						? RESERVE_TOKENS
-						: undefined;
-			},
+			getCompactionSettings: () => ({ enabled: false, reserveTokens: RESERVE_TOKENS }),
+			reload: async () => undefined,
 		};
 		vi.spyOn(SettingsManager, "create").mockReturnValue(manager as unknown as SettingsManager);
 
@@ -368,11 +277,10 @@ describe("proactive compaction controller", () => {
 		expect(wrapped(model, { messages: [] })).toBe(baseResult);
 	});
 
-	it("normalizes invalid compaction reserve tokens in OMP settings", async () => {
+	it("normalizes invalid compaction reserve tokens", async () => {
 		const manager = {
-			get(key: string) {
-				return key === "compaction.enabled" ? true : key === "compaction.reserveTokens" ? -100 : undefined;
-			},
+			getCompactionSettings: () => ({ enabled: true, reserveTokens: -100 }),
+			reload: async () => undefined,
 		};
 		vi.spyOn(SettingsManager, "create").mockReturnValue(manager as unknown as SettingsManager);
 
@@ -386,17 +294,9 @@ describe("proactive compaction controller", () => {
 });
 
 describe("resolveCompactionSessionId", () => {
-	it("prefers sessionManager.getSessionId over a stale sessionId field", () => {
-		expect(
-			resolveCompactionSessionId({
-				sessionId: "stale",
-				sessionManager: { getSessionId: () => "current" },
-			}),
-		).toBe("current");
-	});
-
-	it("falls back to sessionId when sessionManager is unavailable", () => {
-		expect(resolveCompactionSessionId({ sessionId: "fallback" })).toBe("fallback");
+	it("is sessionManager.getSessionId's; none without a session manager or with an empty id", () => {
+		expect(resolveCompactionSessionId({ sessionManager: { getSessionId: () => "current" } })).toBe("current");
+		expect(resolveCompactionSessionId({ sessionManager: { getSessionId: () => "" } })).toBeUndefined();
 		expect(resolveCompactionSessionId({})).toBeUndefined();
 	});
 });

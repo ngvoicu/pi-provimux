@@ -1,5 +1,31 @@
 # Changelog
 
+## 105.0.7
+
+**Every name is `provimux` now, with no fallback to the old `cliproxyapi` ones**, and less code for what no longer
+exists. Do the steps below before the first start of 105.0.7.
+
+- **The settings file is `~/.pi/agent/provimux.json`** (was `cliproxyapi.json`, which is no longer read). Rename it:
+  `mv ~/.pi/agent/cliproxyapi.json ~/.pi/agent/provimux.json`. `/login` writes the new file.
+- **The models cache is `~/.pi/agent/provimux-models.json`** (was `cliproxyapi-models.json`, no longer read). It is
+  built again at the first start; the old file can be deleted.
+- **The environment variables are `PROVIMUX_*`**: `PROVIMUX_API_KEY`, `PROVIMUX_BASE_URL`, `PROVIMUX_PROVIDER_ID`,
+  `PROVIMUX_PROVIDER_NAME`, `PROVIMUX_FAST`, `PROVIMUX_CLAUDE_MESSAGES`, `PROVIMUX_TRANSPORT`,
+  `PROVIMUX_WS_IDLE_TTL_MS`. The `CLIPROXYAPI_*` ones are no longer read.
+- **The Codex-format API id is `provimux-codex-responses`** (was `cliproxyapi-codex-responses`). A session saved
+  before keeps the old id on its earlier answers; when it is resumed pi reads those as another API's, so their
+  reasoning is not sent back and the first request rebuilds the prompt cache. New answers carry the new id.
+- `provimux.example.json` replaces `cliproxyapi.example.json`, without `providerId`/`providerName`. Internal names
+  (global keys, temporary files, a status key) are renamed the same way.
+- **`answered:` in the footer needs Provimux 8.1.1-pmx.1 or newer**, which names the provider with the kind. An answer
+  that gives only the kind now names nobody (`answered: unknown`, `upstreams: []`); the guess from the credential
+  list for it is gone. Plain CLIProxyAPI works as before (the footer shows nothing).
+- **Removed, as unused by pi 1.6.0:** support for Oh My Pi (its plugin paths and key-based settings API, a context's
+  `sessionId`), the `~/.pi/runtime` and `~/.pi/bin/pi` layouts and a flat `dist/openai-codex-responses.js`, and the
+  checks for pi APIs 1.6.0 always has (`getPackageDir`, `closeOpenAICodexWebSocketSessions`, `theme.getColorMode`,
+  `getBuiltinModels`, pi's model resolvers, the registry's `getAvailable` and `hasConfiguredAuth`).
+- The README no longer has "Migration from static models.json".
+
 ## 105.0.6
 
 **Needs pi 1.6.0 or newer** (was 0.99.0), and reads no value of its own older versions.

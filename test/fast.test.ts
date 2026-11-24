@@ -6,8 +6,8 @@ import { type ExtensionAPI, type ExtensionContext, FooterComponent } from "@eare
 import { describe, expect, it, vi } from "vitest";
 import {
 	applyServiceTierPayloadHook,
-	type CliproxyCodexStreamSimple,
-	loadCliproxyCodexStreams,
+	loadProvimuxCodexStreams,
+	type ProvimuxCodexStreamSimple,
 	patchCodexSource,
 	resolveCodexModuleFromNodeEntry,
 	withServiceTier,
@@ -20,12 +20,12 @@ import { PauseController } from "../extensions/pause.ts";
 
 const model = {
 	id: "gpt-5.4",
-	provider: "cliproxyapi",
+	provider: "provimux",
 } as Model<Api>;
 
 describe("Codex protocol module resolution", () => {
 	it("finds pi-ai nested beneath pi's bundled Node package", () => {
-		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-cliproxyapi-codex-resolution-test-")));
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-provimux-codex-resolution-test-")));
 		const cliEntry = join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
 		const codexModule = join(
 			root,
@@ -59,7 +59,7 @@ describe("Codex WebSocket transport patch", () => {
 			new URL("../node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js", import.meta.url),
 			"utf8",
 		);
-		const patched = patchCodexSource(source, ["cliproxyapi"]);
+		const patched = patchCodexSource(source, ["provimux"]);
 
 		// WebSocket retries are still attempted before message stream start
 		expect(patched).toContain("let websocketRetries = 0;");
@@ -73,7 +73,7 @@ describe("Codex WebSocket transport patch", () => {
 		expect(patched).toMatch(/recordWebSocketSseFallback\([^)]*\);\s*break;/);
 		expect(patched).not.toContain("const websocketDisabledForSession = false;");
 		expect(patched).toContain("isWebSocketSseFallbackActive(");
-		expect(patched).toContain('(process.env.CLIPROXYAPI_TRANSPORT || options?.transport || "auto")');
+		expect(patched).toContain('(process.env.PROVIMUX_TRANSPORT || options?.transport || "auto")');
 		expect(patched).toContain("export function closeOpenAICodexWebSocketSessions(sessionId)");
 	});
 
@@ -82,14 +82,14 @@ describe("Codex WebSocket transport patch", () => {
 			new URL("../node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js", import.meta.url),
 			"utf8",
 		);
-		const patched = patchCodexSource(source, ["cliproxyapi"]);
+		const patched = patchCodexSource(source, ["provimux"]);
 
 		expect(patched).not.toContain("const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;");
 		expect(patched).toMatch(/SESSION_WEBSOCKET_CACHE_TTL_MS\s*=.*30\s*\*\s*60\s*\*\s*1000/);
 	});
 
 	it("falls back to SSE fetch when WebSocket connect fails before start (Issue #33)", async () => {
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		const streams = await loadProvimuxCodexStreams(["provimux"]);
 		let fetchCalls = 0;
 		const customFetch = async () => {
 			fetchCalls++;
@@ -98,7 +98,7 @@ describe("Codex WebSocket transport patch", () => {
 
 		const testModel = {
 			id: "gpt-5.4",
-			provider: "cliproxyapi",
+			provider: "provimux",
 			baseUrl: "http://127.0.0.1:19999",
 			input: ["text"],
 		} as unknown as Model<Api>;
@@ -135,7 +135,7 @@ describe("Codex WebSocket transport patch", () => {
 	});
 
 	it("exports closeOpenAICodexWebSocketSessions from the patched module instance", async () => {
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		const streams = await loadProvimuxCodexStreams(["provimux"]);
 		expect(typeof (streams as any).closeOpenAICodexWebSocketSessions).toBe("function");
 		expect(() => (streams as any).closeOpenAICodexWebSocketSessions("missing-session")).not.toThrow();
 	});
@@ -200,7 +200,7 @@ describe("Fast footer model status", () => {
 		footer.refresh(ctx);
 
 		expect(setFooter).not.toHaveBeenCalled();
-		expect(setStatus).toHaveBeenCalledWith("cliproxyapi-fast-refresh", undefined);
+		expect(setStatus).toHaveBeenCalledWith("provimux-fast-refresh", undefined);
 		handlers.get("session_shutdown")?.({}, ctx);
 	});
 
@@ -243,7 +243,7 @@ describe("Fast footer model status", () => {
 			expect(component.render(80)).toEqual(["gpt-5.4 • xhigh • <yellow>fast</yellow>|false"]);
 			expect(displayModel).toEqual({
 				id: "gpt-5.4",
-				provider: "cliproxyapi",
+				provider: "provimux",
 				reasoning: true,
 				contextWindow: 372000,
 			});
@@ -341,7 +341,7 @@ describe("Fast catalog mapping", () => {
 			),
 		);
 
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-fast-test-"));
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-provimux-fast-test-"));
 		try {
 			const loaded = await loadMappedModels("http://127.0.0.1:8317", "test-key", false, agentDir);
 			expect(loaded.fastModelIds).toEqual(["gpt-5.4", "gpt-5.5"]);
@@ -397,7 +397,7 @@ describe("Fast pricing mapping", () => {
 			);
 		});
 
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-fast-test-"));
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-provimux-fast-test-"));
 		try {
 			const standard = await loadMappedModels("http://127.0.0.1:8317", "test-key", false, agentDir);
 			const fast = await loadMappedModels("http://127.0.0.1:8317", "test-key", true, agentDir);
@@ -423,8 +423,8 @@ describe("Fast pricing mapping", () => {
 describe("Fast stream wrapper", () => {
 	it("passes options through unchanged when Fast is not effective", () => {
 		let captured: SimpleStreamOptions | undefined;
-		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const baseStream: CliproxyCodexStreamSimple = (_model, _context, options) => {
+		const streamResult = {} as ReturnType<ProvimuxCodexStreamSimple>;
+		const baseStream: ProvimuxCodexStreamSimple = (_model, _context, options) => {
 			captured = options;
 			return streamResult;
 		};
@@ -438,8 +438,8 @@ describe("Fast stream wrapper", () => {
 	it("preserves stream options and composes the Fast payload hook when enabled", async () => {
 		let captured: SimpleStreamOptions | undefined;
 		let observed: unknown;
-		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
-		const baseStream: CliproxyCodexStreamSimple = (_model, _context, options) => {
+		const streamResult = {} as ReturnType<ProvimuxCodexStreamSimple>;
+		const baseStream: ProvimuxCodexStreamSimple = (_model, _context, options) => {
 			captured = options;
 			return streamResult;
 		};

@@ -80,9 +80,9 @@ It needs pi 1.6.0 or newer.
 
 This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so Provimux appears under **Sign in with an account**.
 
-When `cliproxyapi.json` or `CLIPROXYAPI_API_KEY` already holds a key and no account login is stored, pi also offers **Sign in with an API key**. Do not use it: it stores only the key, in `auth.json`, and it does not survive a restart. The next start says `Provider is not configured: provimux`, and a saved default or a resumed session moves to another provider if you have one. Use **Sign in with an account**, or put `apiKey` and `baseUrl` in `cliproxyapi.json`. If you already used it, remove the `provimux` entry from `auth.json` (`/logout`) and log in with an account.
+When `provimux.json` or `PROVIMUX_API_KEY` already holds a key and no account login is stored, pi also offers **Sign in with an API key**. Do not use it: it stores only the key, in `auth.json`, and it does not survive a restart. The next start says `Provider is not configured: provimux`, and a saved default or a resumed session moves to another provider if you have one. Use **Sign in with an account**, or put `apiKey` and `baseUrl` in `provimux.json`. If you already used it, remove the `provimux` entry from `auth.json` (`/logout`) and log in with an account.
 
-**Which key wins.** The extension reads the address and the key from the `CLIPROXYAPI_*` variables first, then `cliproxyapi.json`, then the login in `auth.json` (see [Resolution order](#environment-overrides)). So a key in `cliproxyapi.json` wins over a key saved by a later `/login` that does not rewrite the file, as the API-key login does not. The account login writes its address and key into `cliproxyapi.json` as well, so after it the two agree. Change the key or the proxy with an account `/login`. If you change them in `cliproxyapi.json` or the environment while an account login is stored, the model list follows the new values but requests still carry the stored login's key: run `/login` again, or remove the `provimux` entry from `auth.json`.
+**Which key wins.** The extension reads the address and the key from the `PROVIMUX_*` variables first, then `provimux.json`, then the login in `auth.json` (see [Resolution order](#environment-overrides)). So a key in `provimux.json` wins over a key saved by a later `/login` that does not rewrite the file, as the API-key login does not. The account login writes its address and key into `provimux.json` as well, so after it the two agree. Change the key or the proxy with an account `/login`. If you change them in `provimux.json` or the environment while an account login is stored, the model list follows the new values but requests still carry the stored login's key: run `/login` again, or remove the `provimux` entry from `auth.json`.
 
 ### Preferred: /login shortcuts
 
@@ -121,10 +121,10 @@ Final login validation calls `{root}/v1/models?client_version=pi` (this always b
 On success:
 
 - models are registered immediately in the current session (0 models is allowed)
-- `baseUrl` / `apiKey` are written to `~/.pi/agent/cliproxyapi.json`
+- `baseUrl` / `apiKey` are written to `~/.pi/agent/provimux.json`
 - pi also stores the returned credential in `~/.pi/agent/auth.json`
 
-Re-run `/login Provimux` or `/login provimux` anytime to reconfigure. The built-in `/logout` command only removes credentials saved in `auth.json`; it does not erase `cliproxyapi.json`. Remove or update that file if you also need to clear the provider configuration.
+Re-run `/login Provimux` or `/login provimux` anytime to reconfigure. The built-in `/logout` command only removes credentials saved in `auth.json`; it does not erase `provimux.json`. Remove or update that file if you also need to clear the provider configuration.
 
 ## Non-interactive configuration
 
@@ -132,7 +132,7 @@ You can still configure without `/login`.
 
 ### Config file
 
-`~/.pi/agent/cliproxyapi.json`:
+`~/.pi/agent/provimux.json`:
 
 ```json
 {
@@ -161,21 +161,21 @@ Optional fields:
 
 | Variable | Overrides |
 | ---------- | ----------- |
-| `CLIPROXYAPI_BASE_URL` | `baseUrl` |
-| `CLIPROXYAPI_API_KEY` | `apiKey` |
-| `CLIPROXYAPI_PROVIDER_ID` | `providerId` |
-| `CLIPROXYAPI_PROVIDER_NAME` | `providerName` |
-| `CLIPROXYAPI_FAST` | `fast` (`true` / `false`, also accepts `1`, `0`, `yes`, `no`, `on`, `off`) |
-| `CLIPROXYAPI_CLAUDE_MESSAGES` | `claudeMessages` (`auto`, or the same values as `CLIPROXYAPI_FAST`) |
+| `PROVIMUX_BASE_URL` | `baseUrl` |
+| `PROVIMUX_API_KEY` | `apiKey` |
+| `PROVIMUX_PROVIDER_ID` | `providerId` |
+| `PROVIMUX_PROVIDER_NAME` | `providerName` |
+| `PROVIMUX_FAST` | `fast` (`true` / `false`, also accepts `1`, `0`, `yes`, `no`, `on`, `off`) |
+| `PROVIMUX_CLAUDE_MESSAGES` | `claudeMessages` (`auto`, or the same values as `PROVIMUX_FAST`) |
 
 Resolution order for connection settings:
 
 1. Environment variables
-2. `cliproxyapi.json`
+2. `provimux.json`
 3. `/login` credentials in `auth.json`
 4. Default baseUrl `http://127.0.0.1:8317`
 
-At startup, `CLIPROXYAPI_FAST` overrides the persisted speed preference: a true value selects Fast, and a false value turns both modes off. The variable does not accept `ultrafast`. If unset, the provider uses `fast` from `cliproxyapi.json`, or defaults to off.
+At startup, `PROVIMUX_FAST` overrides the persisted speed preference: a true value selects Fast, and a false value turns both modes off. The variable does not accept `ultrafast`. If unset, the provider uses `fast` from `provimux.json`, or defaults to off.
 
 ### baseUrl normalization
 
@@ -199,7 +199,7 @@ Both modes are **off by default**. They request faster processing for supported 
 | `/fast` | `fast` | `service_tier: "priority"` |
 | `/ultrafast` | `Ultra Fast` | `service_tier: "ultrafast"` |
 
-The modes are mutually exclusive. Run the active command again to turn it off, or run the other command to switch directly. Each change saves the global preference in `~/.pi/agent/cliproxyapi.json` and refreshes the provider's model pricing. The saved preference is restored at the next startup unless `CLIPROXYAPI_FAST` overrides it.
+The modes are mutually exclusive. Run the active command again to turn it off, or run the other command to switch directly. Each change saves the global preference in `~/.pi/agent/provimux.json` and refreshes the provider's model pricing. The saved preference is restored at the next startup unless `PROVIMUX_FAST` overrides it.
 
 Both modes apply only to models whose CLIProxyAPI catalog entry has a non-empty `service_tiers` array. The provider ignores `additional_speed_tiers`. When a mode is effective, pi appends its yellow label to the bottom-right model status without a separate notification. On unsupported models, the commands still update the global preference and warn when enabling a mode, but the request and model status remain unchanged.
 
@@ -219,19 +219,19 @@ Use `/continue` to clear the pause:
 /continue
 ```
 
-Both commands persist the `pause` boolean in `~/.pi/agent/cliproxyapi.json`. Before every provider request, the extension rereads this setting. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
+Both commands persist the `pause` boolean in `~/.pi/agent/provimux.json`. Before every provider request, the extension rereads this setting. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
 
 ## Model cache
 
 The provider keeps a separate cache file so startup stays fast when CLIProxyAPI is slow or briefly unreachable:
 
-`~/.pi/agent/cliproxyapi-models.json`
+`~/.pi/agent/provimux-models.json`
 
 The cache stores only model metadata and derived endpoint URLs — the model list, Fast-capable IDs, `inferenceBaseUrl`, `modelsUrl`, and a `fetchedAt` timestamp. It **never** stores your API key or other credentials.
 
 | Property | Value |
 |----------|-------|
-| Cache file | `~/.pi/agent/cliproxyapi-models.json` |
+| Cache file | `~/.pi/agent/provimux-models.json` |
 | Remote query timeout | 60 seconds |
 | Scope | tied to the current `baseUrl` (a different base URL ignores the existing cache) |
 
@@ -249,7 +249,7 @@ Use `/provimux-refresh` to force an immediate remote refresh of the model catalo
 - `/provimux-refresh` — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi.
 - `/login Provimux` / `/login provimux` — re-entering credentials always forces a fresh models query and rewrites the cache.
 
-Delete `~/.pi/agent/cliproxyapi-models.json` to clear the cache manually.
+Delete `~/.pi/agent/provimux-models.json` to clear the cache manually.
 
 ## Model mapping
 
@@ -295,7 +295,7 @@ instead of the Codex Responses format every other model uses. This happens autom
   built-in catalog also knows, **and** for which CLIProxyAPI reports an output limit (`max_tokens`). Their compat
   flags and thinking levels come from that catalog. Every other model, Claude models pi doesn't know, and Claude
   models without a reported output limit stay on the Codex format.
-- **Setting:** `claudeMessages` in `cliproxyapi.json` (or `CLIPROXYAPI_CLAUDE_MESSAGES`) is `"auto"` by default.
+- **Setting:** `claudeMessages` in `provimux.json` (or `PROVIMUX_CLAUDE_MESSAGES`) is `"auto"` by default.
   `false` keeps every model on the Codex format; `true` also switches Claude models CLIProxyAPI reports no output
   limit for (they then get pi's 16,384 default, see below).
 - **Why:** Claude's format can carry Anthropic features the Codex format can't. The main one is the **1-hour cache**:
@@ -367,11 +367,13 @@ It only ever shows the route that produced the answer you see.
 - Only the session's own turns count: pi's cache warmer and other extensions' requests, which can run at the same
   time, never change it.
 - `answered: unknown`: the proxy names answers (its model list lists credentials, as Provimux's does; a lookup of the
-  list that fails changes nothing), but not this one (Provimux leaves an answer unnamed when plugin code took part in it; an older Provimux names only the kind).
+  list that fails changes nothing), but not this one (Provimux leaves an answer unnamed when plugin code took part in it).
+- **Needs Provimux 8.1.1-pmx.1 or newer** for the footer: an answer counts as named only with both its kind and its
+  provider (`X-CPA-AUTH-KIND` and `X-CPA-AUTH-PROVIDER`), which Provimux sends from that version on.
 - Nothing from a proxy that names no answer (plain CLIProxyAPI), and nothing while a model of another provider is
   selected or answers, even for a Provimux answer that ends after the switch.
 
-Set `"answered": false` in `~/.pi/agent/cliproxyapi.json` to turn it off (takes effect on the next start or
+Set `"answered": false` in `~/.pi/agent/provimux.json` to turn it off (takes effect on the next start or
 `/reload`).
 
 ## Where each model comes from (for other extensions)
@@ -403,17 +405,14 @@ from providers.dev.
     Devin login serving the same model are told apart. A credential that leads to a service not known is still
     named, so a change of route is seen: by its host for an API key that has one (`api.example.test`), else by its
     provider as the response gives it.
-  - **With only the kind** (an older Provimux that does not name the provider), a guess: the listed credentials of
-    that kind at their highest priority, possibly several; `[]` when none of them is known. The guess needs the
-    credential list: until it has loaded, such an answer is not reported at all, even after earlier answers were
-    named. It still shows that the proxy names answers: while the list is pending it is not reported itself, but the
-    next answer that names nobody is reported as `[]`.
+  - **Needs Provimux 8.1.1-pmx.1 or newer**, which sends the provider with the kind. A kind without a provider names
+    nobody (below).
   - **`upstreams: []`**: answered, by something the proxy would not name. Provimux leaves an answer without the
     three when plugin code took part in its bytes; from a proxy that names answers (it lists its credentials, or
     named an answer before in this session) such an answer is reported as `[]`, so that a listener does not keep the
     last named credential's values. Read it as "route not known". Whether the proxy names answers is known only once
     its credential list has loaded or it has named one: an answer that names nobody while the list is still loading
-    and before anything was named in this session (with a provider, or only a kind) is not reported. A list that could not be read counts as still
+    and before anything was named in this session is not reported. A list that could not be read counts as still
     loading.
   - **Nothing** from plain CLIProxyAPI, which names no answer, nor before an extension asked for the routes.
   - **When**: as soon as the answer's headers (or its `response.created` event) arrive and its stream's first event
@@ -460,14 +459,14 @@ The provider extension also loads `extensions/tps.ts` (so pi lists the package a
 - When the agent settles, the footer keeps the final elapsed time and a notification reports approximate TPS plus token usage (`out` / `in` / cache r/w / total).
 - Subagent and print-mode sessions do not own the timer, clear the parent footer, or emit TPS toasts.
 
-Set `"tps": false` in `~/.pi/agent/cliproxyapi.json` to turn off just this helper (takes effect on the next start or `/reload`).
+Set `"tps": false` in `~/.pi/agent/provimux.json` to turn off just this helper (takes effect on the next start or `/reload`).
 
 ## Failure behavior
 
 - CLIProxyAPI `closed network connection` responses are normalized as transient network errors so pi's agent-level retry policy reconnects and restarts the interrupted assistant turn. Completed conversation and tool results remain available; token streaming does not resume from the exact interruption point.
 - Before setup / without credentials: provider still appears in `/login`; no models are listed yet.
-- After successful `/login`: models are registered; credentials are stored in `auth.json` and mirrored to `cliproxyapi.json`.
-- The built-in `/logout` command removes only the matching `auth.json` credential; environment variables and `cliproxyapi.json` are unchanged.
+- After successful `/login`: models are registered; credentials are stored in `auth.json` and mirrored to `provimux.json`.
+- The built-in `/logout` command removes only the matching `auth.json` credential; environment variables and `provimux.json` are unchanged.
 - If a models request returns **HTTP 401** or CPA is unreachable during startup, an existing matching cache remains in use while the background refresh fails. Only when no cache is available is a warning logged; reconfigure via `/login Provimux` or fix config/env.
 - Login final step validates credentials by requesting models:
   - HTTP 200 (including empty catalog) → credentials are persisted

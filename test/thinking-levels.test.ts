@@ -17,11 +17,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { resolveCliModel, resolveModelScopeWithDiagnostics } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import {
-	CLIPROXYAPI_CODEX_API,
-	type CliproxyCodexStreams,
-	loadCliproxyCodexStreams,
-} from "../extensions/codex-stream.ts";
+import { loadProvimuxCodexStreams, PROVIMUX_CODEX_API, type ProvimuxCodexStreams } from "../extensions/codex-stream.ts";
 import { toPiModel } from "../extensions/lib.ts";
 import {
 	clampThinkingLevel,
@@ -48,7 +44,7 @@ const NEMOTRON = {
 function nemotron(baseUrl = "http://127.0.0.1:1"): Model<Api> {
 	const mapped = toPiModel(NEMOTRON);
 	if (!mapped) throw new Error("not mapped");
-	return { ...mapped, api: CLIPROXYAPI_CODEX_API, provider: "cliproxyapi", baseUrl } as unknown as Model<Api>;
+	return { ...mapped, api: PROVIMUX_CODEX_API, provider: "provimux", baseUrl } as unknown as Model<Api>;
 }
 
 describe("the levels a model has, as pi counts them", () => {
@@ -93,8 +89,8 @@ function literalSuffixModel(): Model<Api> {
 	if (!mapped) throw new Error("not mapped");
 	return {
 		...mapped,
-		api: CLIPROXYAPI_CODEX_API,
-		provider: "cliproxyapi",
+		api: PROVIMUX_CODEX_API,
+		provider: "provimux",
 		baseUrl: "http://127.0.0.1:1",
 	} as Model<Api>;
 }
@@ -113,13 +109,13 @@ describe("the level asked on pi's command line", () => {
 		requestedThinkingLevel(readCommandLine(argv), selected, piReading(), { reason: "startup", continued });
 
 	it("is --thinking's, else the :level of --model, read as pi reads them", async () => {
-		expect(await ask(["-p", "--model", "cliproxyapi/nemotron-3-5-super", "--thinking", "low", "hi"])).toEqual({
+		expect(await ask(["-p", "--model", "provimux/nemotron-3-5-super", "--thinking", "low", "hi"])).toEqual({
 			level: "low",
 			asked: "--thinking low",
 		});
-		expect(await ask(["-p", "--model", "cliproxyapi/nemotron-3-5-super:low", "hi"])).toEqual({
+		expect(await ask(["-p", "--model", "provimux/nemotron-3-5-super:low", "hi"])).toEqual({
 			level: "low",
-			asked: "--model cliproxyapi/nemotron-3-5-super:low",
+			asked: "--model provimux/nemotron-3-5-super:low",
 		});
 		// pi's fuzzy match takes the suffix too, when the full text matches no model.
 		expect((await ask(["--model", "nemotron:minimal"]))?.level).toBe("minimal");
@@ -134,51 +130,42 @@ describe("the level asked on pi's command line", () => {
 
 	it("is none for a model whose literal id ends in :high; the full id is the model, as pi resolves it", async () => {
 		const literal = literalSuffixModel();
-		expect(await ask(["-p", "--model", "cliproxyapi/local-assistant:high", "ok"], literal)).toBeUndefined();
+		expect(await ask(["-p", "--model", "provimux/local-assistant:high", "ok"], literal)).toBeUndefined();
 		expect(await ask(["-p", "--model", "local-assistant:high", "ok"], literal)).toBeUndefined();
-		expect(
-			await ask(["-p", "--provider", "cliproxyapi", "--model", "local-assistant:high"], literal),
-		).toBeUndefined();
+		expect(await ask(["-p", "--provider", "provimux", "--model", "local-assistant:high"], literal)).toBeUndefined();
 		// Only when the full text is no model and the text without the suffix is, the suffix is a level.
-		expect(await ask(["-p", "--model", "cliproxyapi/local-assistant:high:high", "ok"], literal)).toEqual({
+		expect(await ask(["-p", "--model", "provimux/local-assistant:high:high", "ok"], literal)).toEqual({
 			level: "high",
-			asked: "--model cliproxyapi/local-assistant:high:high",
+			asked: "--model provimux/local-assistant:high:high",
 		});
 	});
 
 	it("is the level of the --models pattern that selected the model, in a new session without --model", async () => {
-		expect(await ask(["-p", "--models", "cliproxyapi/nemotron-3-5-super:low", "ok"])).toEqual({
+		expect(await ask(["-p", "--models", "provimux/nemotron-3-5-super:low", "ok"])).toEqual({
 			level: "low",
-			asked: "--models cliproxyapi/nemotron-3-5-super:low",
+			asked: "--models provimux/nemotron-3-5-super:low",
 		});
 		expect(
-			(await ask(["-p", "--models", "cliproxyapi/local-assistant:high,cliproxyapi/nemotron-3-5-super:xhigh"]))
-				?.level,
+			(await ask(["-p", "--models", "provimux/local-assistant:high,provimux/nemotron-3-5-super:xhigh"]))?.level,
 		).toBe("xhigh");
 		// The literal id in a scope is the model at no level.
-		expect(await ask(["-p", "--models", "cliproxyapi/local-assistant:high"], literalSuffixModel())).toBeUndefined();
+		expect(await ask(["-p", "--models", "provimux/local-assistant:high"], literalSuffixModel())).toBeUndefined();
 		// pi keeps a continued session's model and level; --model and --thinking win over the scope.
-		expect(await ask(["-p", "--models", "cliproxyapi/nemotron-3-5-super:low"], nemotron(), true)).toBeUndefined();
+		expect(await ask(["-p", "--models", "provimux/nemotron-3-5-super:low"], nemotron(), true)).toBeUndefined();
 		expect(
-			await ask([
-				"-p",
-				"--model",
-				"cliproxyapi/nemotron-3-5-super",
-				"--models",
-				"cliproxyapi/nemotron-3-5-super:low",
-			]),
+			await ask(["-p", "--model", "provimux/nemotron-3-5-super", "--models", "provimux/nemotron-3-5-super:low"]),
 		).toBeUndefined();
-		expect((await ask(["--models", "cliproxyapi/nemotron-3-5-super:low", "--thinking", "high"]))?.level).toBe("high");
+		expect((await ask(["--models", "provimux/nemotron-3-5-super:low", "--thinking", "high"]))?.level).toBe("high");
 	});
 
 	it("without pi's resolver: the literal reading, the full id first", async () => {
 		const literal = literalModelReading([nemotron(), literalSuffixModel()]);
 		const read = (argv: string[], selected: Model<Api>) =>
 			requestedThinkingLevel(readCommandLine(argv), selected, literal);
-		expect(await read(["--model", "cliproxyapi/local-assistant:high"], literalSuffixModel())).toBeUndefined();
-		expect((await read(["--model", "cliproxyapi/nemotron-3-5-super:low"], nemotron()))?.level).toBe("low");
-		expect((await read(["--models", "cliproxyapi/nemotron-3-5-super:low"], nemotron()))?.asked).toBe(
-			"--models cliproxyapi/nemotron-3-5-super:low",
+		expect(await read(["--model", "provimux/local-assistant:high"], literalSuffixModel())).toBeUndefined();
+		expect((await read(["--model", "provimux/nemotron-3-5-super:low"], nemotron()))?.level).toBe("low");
+		expect((await read(["--models", "provimux/nemotron-3-5-super:low"], nemotron()))?.asked).toBe(
+			"--models provimux/nemotron-3-5-super:low",
 		);
 	});
 });
@@ -190,7 +177,7 @@ describe("a one-shot run (pi -p) with a level the model lacks", () => {
 		const reports: string[] = [];
 		registerThinkingLevelGuard(
 			{ on: (name: string, handler: Handler) => handlers.set(name, handler) } as never,
-			"cliproxyapi",
+			"provimux",
 			argv,
 			(m) => reports.push(m),
 		);
@@ -207,11 +194,11 @@ describe("a one-shot run (pi -p) with a level the model lacks", () => {
 	});
 
 	it("is refused, with the levels it has: nothing is sent and the run exits with 1", async () => {
-		const { input, reports } = setUp(["-p", "--model", "cliproxyapi/nemotron-3-5-super", "--thinking", "low"]);
+		const { input, reports } = setUp(["-p", "--model", "provimux/nemotron-3-5-super", "--thinking", "low"]);
 		expect(await input({ mode: "print", model: nemotron() })).toEqual({ action: "handled" });
 		expect(process.exitCode).toBe(1);
 		expect(reports).toEqual([
-			'[pi-provimux] cliproxyapi/nemotron-3-5-super has no thinking level "low" (asked with --thinking low); its levels: medium, high. Nothing was sent: run again with --thinking set to one of them.',
+			'[pi-provimux] provimux/nemotron-3-5-super has no thinking level "low" (asked with --thinking low); its levels: medium, high. Nothing was sent: run again with --thinking set to one of them.',
 		]);
 		// A second prompt of the same run is refused too, and said once.
 		expect(await input({ mode: "print", model: nemotron() })).toEqual({ action: "handled" });
@@ -219,7 +206,7 @@ describe("a one-shot run (pi -p) with a level the model lacks", () => {
 	});
 
 	it("is refused in JSON mode, and when asked as the :level of --model", async () => {
-		const { input, reports } = setUp(["--mode", "json", "--model", "cliproxyapi/nemotron-3-5-super:minimal"]);
+		const { input, reports } = setUp(["--mode", "json", "--model", "provimux/nemotron-3-5-super:minimal"]);
 		expect(await input({ mode: "json", model: nemotron(), modelRegistry: registry() })).toEqual({
 			action: "handled",
 		});
@@ -228,7 +215,7 @@ describe("a one-shot run (pi -p) with a level the model lacks", () => {
 	});
 
 	it("goes ahead with the model whose literal id ends in :high: no level was asked", async () => {
-		const { input, reports } = setUp(["-p", "--model", "cliproxyapi/local-assistant:high", "ok"]);
+		const { input, reports } = setUp(["-p", "--model", "provimux/local-assistant:high", "ok"]);
 		const ctx = { mode: "print", model: literalSuffixModel(), modelRegistry: registry() };
 		expect(await input(ctx)).toEqual({ action: "continue" });
 		expect(reports).toEqual([]);
@@ -236,7 +223,7 @@ describe("a one-shot run (pi -p) with a level the model lacks", () => {
 	});
 
 	it("is refused when the level came from the --models pattern that selected the model", async () => {
-		const { handlers, input, reports } = setUp(["-p", "--models", "cliproxyapi/nemotron-3-5-super:low", "ok"]);
+		const { handlers, input, reports } = setUp(["-p", "--models", "provimux/nemotron-3-5-super:low", "ok"]);
 		const ctx = {
 			mode: "print",
 			model: nemotron(),
@@ -247,12 +234,12 @@ describe("a one-shot run (pi -p) with a level the model lacks", () => {
 		expect(await input(ctx)).toEqual({ action: "handled" });
 		expect(process.exitCode).toBe(1);
 		expect(reports).toEqual([
-			'[pi-provimux] cliproxyapi/nemotron-3-5-super has no thinking level "low" (asked with --models cliproxyapi/nemotron-3-5-super:low); its levels: medium, high. Nothing was sent: run again with --thinking set to one of them.',
+			'[pi-provimux] provimux/nemotron-3-5-super has no thinking level "low" (asked with --models provimux/nemotron-3-5-super:low); its levels: medium, high. Nothing was sent: run again with --thinking set to one of them.',
 		]);
 	});
 
 	it("goes ahead with --models in a continued session: pi keeps the session's model and level", async () => {
-		const { handlers, input } = setUp(["-p", "-c", "--models", "cliproxyapi/nemotron-3-5-super:low", "ok"]);
+		const { handlers, input } = setUp(["-p", "-c", "--models", "provimux/nemotron-3-5-super:low", "ok"]);
 		const history = [{ type: "model_change" }, { type: "message" }];
 		const ctx = {
 			mode: "print",
@@ -269,7 +256,7 @@ describe("a one-shot run (pi -p) with a level the model lacks", () => {
 			action: "continue",
 		});
 		expect(setUp(["-p", "hi"]).handlers.size).toBe(0);
-		expect(setUp(["-p", "--model", "cliproxyapi/nemotron-3-5-super"]).handlers.size).toBe(0);
+		expect(setUp(["-p", "--model", "provimux/nemotron-3-5-super"]).handlers.size).toBe(0);
 		const other = { ...nemotron(), provider: "openrouter" } as Model<Api>;
 		expect(await setUp(["-p", "--thinking", "low"]).input({ mode: "print", model: other })).toEqual({
 			action: "continue",
@@ -351,7 +338,7 @@ describe("over the wire, a request names a level the model has", () => {
 	const efforts: unknown[] = [];
 	let server: Server;
 	let baseUrl: string;
-	let codex: CliproxyCodexStreams;
+	let codex: ProvimuxCodexStreams;
 
 	const frames = () => {
 		const item = { type: "message", id: "msg_1", role: "assistant", status: "completed" };
@@ -398,7 +385,7 @@ describe("over the wire, a request names a level the model has", () => {
 		});
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
-		codex = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		codex = await loadProvimuxCodexStreams(["provimux"]);
 	});
 
 	afterAll(async () => {

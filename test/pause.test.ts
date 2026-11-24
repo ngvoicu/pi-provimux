@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 function tempAgentDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-pause-test-"));
+	const dir = mkdtempSync(join(tmpdir(), "pi-provimux-pause-test-"));
 	tempDirs.push(dir);
 	return dir;
 }
@@ -57,13 +57,13 @@ describe("PauseController", () => {
 		vi.useFakeTimers();
 		const agentDir = tempAgentDir();
 		const controller = new PauseController(true);
-		writeFileSync(join(agentDir, "cliproxyapi.json"), "{", "utf8");
+		writeFileSync(join(agentDir, "provimux.json"), "{", "utf8");
 
 		const waiting = waitForPauseToEnd(agentDir, controller);
 		await vi.advanceTimersByTimeAsync(PAUSE_POLL_INTERVAL_MS);
 		expect(controller.isEnabled()).toBe(true);
 
-		writeFileSync(join(agentDir, "cliproxyapi.json"), '{"pause":false}\n', "utf8");
+		writeFileSync(join(agentDir, "provimux.json"), '{"pause":false}\n', "utf8");
 		await vi.advanceTimersByTimeAsync(PAUSE_POLL_INTERVAL_MS);
 		await waiting;
 		expect(controller.isEnabled()).toBe(false);
@@ -174,9 +174,9 @@ describe("tps setting", () => {
 	it("defaults to on and honours a persisted boolean", () => {
 		const agentDir = tempAgentDir();
 		expect(resolveTpsDefault(agentDir)).toBe(true);
-		writeFileSync(join(agentDir, "cliproxyapi.json"), '{"tps":false}\n', "utf8");
+		writeFileSync(join(agentDir, "provimux.json"), '{"tps":false}\n', "utf8");
 		expect(resolveTpsDefault(agentDir)).toBe(false);
-		writeFileSync(join(agentDir, "cliproxyapi.json"), '{"tps":"no"}\n', "utf8");
+		writeFileSync(join(agentDir, "provimux.json"), '{"tps":"no"}\n', "utf8");
 		expect(() => resolveTpsDefault(agentDir)).toThrow(/"tps" must be a boolean/);
 	});
 });

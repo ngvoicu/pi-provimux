@@ -16,7 +16,7 @@
  * Uses a patched openai-codex-responses implementation that does not require
  * extracting chatgpt_account_id from the API key (plain CPA keys work).
  *
- * Non-interactive setup still works via env vars or ~/.pi/agent/cliproxyapi.json.
+ * Non-interactive setup still works via env vars or ~/.pi/agent/provimux.json.
  */
 
 import type {
@@ -31,9 +31,9 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { registerAnsweredFooter } from "./answered-footer.ts";
 import { ProactiveCompactionController } from "./auto-compact.ts";
 import {
-	CLIPROXYAPI_CODEX_API,
-	type CliproxyCodexStreamSimple,
-	loadCliproxyCodexStreams,
+	loadProvimuxCodexStreams,
+	PROVIMUX_CODEX_API,
+	type ProvimuxCodexStreamSimple,
 	wrapStreamForServiceTier,
 } from "./codex-stream.ts";
 import { FastModeController, type FastPreference } from "./fast.ts";
@@ -200,14 +200,14 @@ function logInfo(message: string): void {
 	console.info(`[pi-provimux] ${message}`);
 }
 
-const COMPAT_COORDINATOR_KEY = Symbol.for("pi-cliproxyapi-provider.compat-coordinator");
-export const COMPAT_SOURCE_ID = "pi-cliproxyapi-provider-global";
+const COMPAT_COORDINATOR_KEY = Symbol.for("pi-provimux.compat-coordinator");
+export const COMPAT_SOURCE_ID = "pi-provimux-global";
 
 interface CompatRegistrationEntry {
 	instanceId: string;
 	providerId: string;
-	rawStream: CliproxyCodexStreamSimple;
-	rawStreamSimple: CliproxyCodexStreamSimple;
+	rawStream: ProvimuxCodexStreamSimple;
+	rawStreamSimple: ProvimuxCodexStreamSimple;
 }
 
 interface CompatCoordinator {
@@ -274,7 +274,7 @@ function resolveDefaultBaseUrl(agentDir: string, providerId: string): string {
 		logWarn(`failed to read auth.json: ${err.message}`);
 	}
 
-	return firstNonEmpty(process.env.CLIPROXYAPI_BASE_URL, fileBaseUrl, authBaseUrl, DEFAULT_BASE_URL)!;
+	return firstNonEmpty(process.env.PROVIMUX_BASE_URL, fileBaseUrl, authBaseUrl, DEFAULT_BASE_URL)!;
 }
 
 async function promptConnection(
@@ -318,7 +318,7 @@ async function configureAndRegister(options: {
 	baseUrlInput: string;
 	apiKey: string;
 	defaultBaseUrl: string;
-	streamSimple: CliproxyCodexStreamSimple;
+	streamSimple: ProvimuxCodexStreamSimple;
 	fastMode: FastModeController;
 	refreshCoordinator: ModelRefreshCoordinator;
 	onRefreshOutcome?: (loaded: MappedModels) => void;
@@ -392,7 +392,7 @@ function createOAuthHandlers(options: {
 	providerId: string;
 	providerName: string;
 	defaultBaseUrl: string;
-	streamSimple: CliproxyCodexStreamSimple;
+	streamSimple: ProvimuxCodexStreamSimple;
 	fastMode: FastModeController;
 	refreshCoordinator: ModelRefreshCoordinator;
 	onRefreshOutcome?: (loaded: MappedModels) => void;
@@ -500,7 +500,7 @@ function registerProvider(
 		models?: PiProviderModel[];
 		defaultBaseUrl: string;
 		agentDir: string;
-		streamSimple: CliproxyCodexStreamSimple;
+		streamSimple: ProvimuxCodexStreamSimple;
 		fastMode: FastModeController;
 		refreshCoordinator?: ModelRefreshCoordinator;
 		onRefreshOutcome?: (loaded: MappedModels) => void;
@@ -540,7 +540,7 @@ function registerProvider(
 	pi.registerProvider(providerId, {
 		name: providerName,
 		baseUrl: endpoints.inferenceBaseUrl,
-		api: CLIPROXYAPI_CODEX_API,
+		api: PROVIMUX_CODEX_API,
 		streamSimple,
 		// OAuth-only keeps `/login <provider>` on the multi-field account path.
 		// Pass apiKey only for ambient request auth when no /login credential exists
@@ -690,7 +690,7 @@ export function registerFastCommands(options: {
 	pi.registerCommand("ultrafast", createCommand("ultrafast", "Ultra Fast", "ultrafast"));
 }
 
-/** The refresh command. The original extension's name for it, `/cliproxyapi-refresh`, is gone since 105.0.4. */
+/** The refresh command. */
 export const REFRESH_COMMAND = "provimux-refresh";
 
 export function registerRefreshCommand(options: {
@@ -699,7 +699,7 @@ export function registerRefreshCommand(options: {
 	providerId: string;
 	providerName: string;
 	defaultBaseUrl: string;
-	streamSimple: CliproxyCodexStreamSimple;
+	streamSimple: ProvimuxCodexStreamSimple;
 	fastMode: FastModeController;
 	refreshCoordinator?: ModelRefreshCoordinator;
 	onRefresh?: (connection: NonNullable<ReturnType<typeof resolveConnection>>) => Promise<RefreshResult | undefined>;
@@ -790,7 +790,7 @@ export function registerRefreshCommand(options: {
 	});
 }
 
-export { CLIPROXYAPI_CODEX_API } from "./codex-stream.ts";
+export { PROVIMUX_CODEX_API } from "./codex-stream.ts";
 export { resolveEndpoints, toPiModel } from "./lib.ts";
 
 export default async function (pi: ExtensionAPI): Promise<void> {
@@ -833,15 +833,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const modelRefreshCoordinator = new ModelRefreshCoordinator();
 
 	let streamLoadError: string | undefined;
-	let streamSimple: CliproxyCodexStreamSimple = () => {
+	let streamSimple: ProvimuxCodexStreamSimple = () => {
 		const suffix = streamLoadError ? `: ${streamLoadError}` : "";
 		throw new Error(
-			`Codex protocol stream is unavailable for provider: ${identity.providerId} (api: ${CLIPROXYAPI_CODEX_API})${suffix}`,
+			`Codex protocol stream is unavailable for provider: ${identity.providerId} (api: ${PROVIMUX_CODEX_API})${suffix}`,
 		);
 	};
 	try {
 		// pi checks this list against the model being called, and only this provider's models use this stream.
-		const streams = await loadCliproxyCodexStreams([identity.providerId], {
+		const streams = await loadProvimuxCodexStreams([identity.providerId], {
 			resolveServiceTier: (model) =>
 				model.provider === identity.providerId ? fastMode.getServiceTierFor(model.id) : undefined,
 		});
@@ -880,7 +880,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						const active = findActiveCompatEntry(coordinator.stack, model.provider);
 						if (!active) {
 							throw new Error(
-								`No active provider ${method} handler registered for provider: ${model.provider} (api: ${CLIPROXYAPI_CODEX_API})`,
+								`No active provider ${method} handler registered for provider: ${model.provider} (api: ${PROVIMUX_CODEX_API})`,
 							);
 						}
 						return active[method === "stream" ? "rawStream" : "rawStreamSimple"](model, context, options);
@@ -896,10 +896,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			unregisterApiProviders(COMPAT_SOURCE_ID);
 			registerApiProvider(
 				{
-					api: CLIPROXYAPI_CODEX_API,
-					stream: createCompatDispatch("stream") as StreamFunction<typeof CLIPROXYAPI_CODEX_API>,
+					api: PROVIMUX_CODEX_API,
+					stream: createCompatDispatch("stream") as StreamFunction<typeof PROVIMUX_CODEX_API>,
 					streamSimple: createCompatDispatch("streamSimple") as StreamFunction<
-						typeof CLIPROXYAPI_CODEX_API,
+						typeof PROVIMUX_CODEX_API,
 						SimpleStreamOptions
 					>,
 				},
@@ -1175,7 +1175,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		logInfo(
 			`not configured yet. Use /login ${identity.providerName} or /login ${identity.providerId}. ` +
 				`Menu path: /login → Sign in with an account → ${identity.providerName}. ` +
-				`Or set ${CONFIG_FILE_NAME} / CLIPROXYAPI_API_KEY.`,
+				`Or set ${CONFIG_FILE_NAME} / PROVIMUX_API_KEY.`,
 		);
 		return;
 	}
@@ -1188,7 +1188,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			logWarn(`models request unauthorized (${message}). Use /login ${identity.providerName} to reconfigure.`);
 		} else {
 			logWarn(
-				`failed to load models (${message}). Use /login ${identity.providerName} or check ${CONFIG_FILE_NAME} / CLIPROXYAPI_* env vars.`,
+				`failed to load models (${message}). Use /login ${identity.providerName} or check ${CONFIG_FILE_NAME} / PROVIMUX_* env vars.`,
 			);
 		}
 	}

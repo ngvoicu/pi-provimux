@@ -6,7 +6,7 @@ import type { Context, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	computePatchedModuleCachePath,
-	loadCliproxyCodexStreams,
+	loadProvimuxCodexStreams,
 	MID_CONVO_BASELINE_EFFORT,
 	patchCodexSource,
 	reshapeConfigurationUpdates,
@@ -44,15 +44,15 @@ function writeFile(path: string, contents: string): void {
 }
 
 const CODEX_RELATIVE = join("node_modules", "@earendil-works", "pi-ai", "dist", "api", "openai-codex-responses.js");
-const CODEX_FLAT_RELATIVE = join("node_modules", "@earendil-works", "pi-ai", "dist", "openai-codex-responses.js");
 
 function failingResolveSpecifier(): string {
 	throw Object.assign(new Error("Cannot find package '@earendil-works/pi-ai'"), { code: "ERR_MODULE_NOT_FOUND" });
 }
 
-function writeMachOLikeHost(root: string): string {
-	const entryPath = join(root, "omp-darwin-arm64");
-	writeFile(entryPath, "\x00Mach-O");
+/** A host whose argv[1] is no Node entry (a native binary). */
+function writeNativeHost(root: string): string {
+	const entryPath = join(root, "pi-native");
+	writeFile(entryPath, "\x00native");
 	return entryPath;
 }
 
@@ -70,9 +70,9 @@ function writePartialJsonPackage(nodeModulesDir: string): string {
 	return join(packageDir, "index.js");
 }
 
-function writeOmpPluginsCodexTree(home: string): { codexPath: string; jsonParsePath: string; partialJsonPath: string } {
-	const pluginsNodeModules = join(home, ".omp", "plugins", "node_modules");
-	const codexPath = join(home, ".omp", "plugins", CODEX_RELATIVE);
+function writeAgentNpmCodexTree(home: string): { codexPath: string; jsonParsePath: string; partialJsonPath: string } {
+	const pluginsNodeModules = join(home, ".pi", "agent", "npm", "node_modules");
+	const codexPath = join(home, ".pi", "agent", "npm", CODEX_RELATIVE);
 	const jsonParsePath = join(dirname(dirname(codexPath)), "utils", "json-parse.js");
 	writeFile(
 		codexPath,
@@ -87,11 +87,9 @@ function writeOmpPluginsCodexTree(home: string): { codexPath: string; jsonParseP
 }
 
 describe("wellKnownCodexModuleCandidates", () => {
-	it("lists HOME/.omp, HOME/.pi, and global package roots without host-specific paths", () => {
+	it("lists HOME/.pi and global package roots without host-specific paths", () => {
 		const candidates = wellKnownCodexModuleCandidates("/home/user");
 		expect(candidates).toEqual([
-			join("/home/user", ".omp", "plugins", CODEX_RELATIVE),
-			join("/home/user", ".omp", "plugins", "node_modules", "@earendil-works", "pi-coding-agent", CODEX_RELATIVE),
 			join("/home/user", ".pi", "agent", "npm", CODEX_RELATIVE),
 			join(
 				"/home/user",
@@ -102,18 +100,6 @@ describe("wellKnownCodexModuleCandidates", () => {
 				"@earendil-works",
 				"pi-coding-agent",
 				CODEX_RELATIVE,
-			),
-			join("/home/user", ".pi", "runtime", CODEX_RELATIVE),
-			join("/home/user", ".pi", "runtime", CODEX_FLAT_RELATIVE),
-			join("/home/user", ".pi", "runtime", "node_modules", "@earendil-works", "pi-coding-agent", CODEX_RELATIVE),
-			join(
-				"/home/user",
-				".pi",
-				"runtime",
-				"node_modules",
-				"@earendil-works",
-				"pi-coding-agent",
-				CODEX_FLAT_RELATIVE,
 			),
 			join("/home/user", ".bun", "install", "global", CODEX_RELATIVE),
 			join(
@@ -201,31 +187,15 @@ describe("resolveOriginalCodexModulePath", () => {
 		expect(resolved.path).toBe(hostCodex);
 	});
 
-	it("prefers import.meta.resolve over a HOME/.omp candidate when nodeEntry is not a Node host", () => {
+	it("prefers import.meta.resolve over a HOME/.pi/agent/npm candidate when nodeEntry is not a Node host", () => {
 		const home = tempDir("pi-cpa-home-shadow-");
-		writeOmpPluginsCodexTree(home);
+		writeAgentNpmCodexTree(home);
 
 		const resolved = resolveOriginalCodexModulePath({ homeDirectory: home, nodeEntry: undefined });
-		expect(resolved.path).not.toBe(join(home, ".omp", "plugins", CODEX_RELATIVE));
+		expect(resolved.path).not.toBe(join(home, ".pi", "agent", "npm", CODEX_RELATIVE));
 		expect(resolved.path).toMatch(
 			/[\\/]node_modules[\\/]@earendil-works[\\/]pi-ai[\\/]dist[\\/]api[\\/]openai-codex-responses\.js$/,
 		);
-	});
-
-	it("resolves a HOME/.omp/plugins candidate when import.meta.resolve fails and argv is a Mach-O host", () => {
-		const home = tempDir("pi-cpa-omp-home-");
-		const hostDir = tempDir("pi-cpa-omp-host-");
-		const { codexPath } = writeOmpPluginsCodexTree(home);
-		const nodeEntry = writeMachOLikeHost(hostDir);
-
-		const resolved = resolveOriginalCodexModulePath({
-			resolveSpecifier: failingResolveSpecifier,
-			nodeEntry,
-			homeDirectory: home,
-		});
-
-		expect(resolved.path).toBe(codexPath);
-		expect(resolved.dir).toBe(dirname(codexPath));
 	});
 
 	it("resolves a nested HOME/.pi/agent/npm candidate for the bundled pi host", () => {
@@ -245,7 +215,7 @@ describe("resolveOriginalCodexModulePath", () => {
 
 		const resolved = resolveOriginalCodexModulePath({
 			resolveSpecifier: failingResolveSpecifier,
-			nodeEntry: writeMachOLikeHost(hostDir),
+			nodeEntry: writeNativeHost(hostDir),
 			homeDirectory: home,
 		});
 
@@ -277,59 +247,34 @@ describe("resolveOriginalCodexModulePath", () => {
 		expect(resolveCodexModuleFromNodeEntry(wrapper)).toBe(codexModule);
 	});
 
-	it("resolves HOME/.pi/runtime flat dist/openai-codex-responses.js when subagent starts outside runtime tree", () => {
-		const home = tempDir("pi-cpa-runtime-home-");
-		const subagentRunner = join(home, ".pi", "agent", "npm", "node_modules", "pi-subagents", "dist", "runner.js");
-		const runtimeCodex = join(
-			home,
-			".pi",
-			"runtime",
-			"node_modules",
-			"@earendil-works",
-			"pi-ai",
-			"dist",
-			"openai-codex-responses.js",
-		);
-		writeFile(subagentRunner, "export {}\n");
-		writeFile(runtimeCodex, "export {}\n");
-
-		const resolved = resolveOriginalCodexModulePath({
-			resolveSpecifier: failingResolveSpecifier,
-			nodeEntry: subagentRunner,
-			homeDirectory: home,
-		});
-
-		expect(resolved.path).toBe(runtimeCodex);
-		expect(resolved.dir).toBe(dirname(runtimeCodex));
-	});
-
-	it("resolves multi-argument join(homedir(), '.pi', 'runtime', ...) and USERPROFILE wrapper scripts with flat dist layout", () => {
+	it("resolves multi-argument join(homedir(), '.pi', 'wrapped', ...) and USERPROFILE wrapper scripts", () => {
 		const home = tempDir("pi-cpa-home-join-");
 		const userProfile = tempDir("pi-cpa-userprofile-join-");
-		const runtimeCli = join(
+		const wrappedCli = join(
 			home,
 			".pi",
-			"runtime",
+			"wrapped",
 			"node_modules",
 			"@earendil-works",
 			"pi-coding-agent",
 			"dist",
 			"cli.js",
 		);
-		const runtimeCodex = join(
+		const wrappedCodex = join(
 			home,
 			".pi",
-			"runtime",
+			"wrapped",
 			"node_modules",
 			"@earendil-works",
 			"pi-ai",
 			"dist",
+			"api",
 			"openai-codex-responses.js",
 		);
 		const profileCli = join(
 			userProfile,
 			".pi",
-			"runtime",
+			"wrapped",
 			"node_modules",
 			"@earendil-works",
 			"pi-coding-agent",
@@ -339,31 +284,32 @@ describe("resolveOriginalCodexModulePath", () => {
 		const profileCodex = join(
 			userProfile,
 			".pi",
-			"runtime",
+			"wrapped",
 			"node_modules",
 			"@earendil-works",
 			"pi-ai",
 			"dist",
+			"api",
 			"openai-codex-responses.js",
 		);
 		const homedirWrapper = join(home, "bin", "pi-homedir");
 		const envHomeWrapper = join(home, "bin", "pi-env-home");
 		const userProfileWrapper = join(home, "bin", "pi-userprofile");
-		writeFile(runtimeCli, "export {}\n");
-		writeFile(runtimeCodex, "export {}\n");
+		writeFile(wrappedCli, "export {}\n");
+		writeFile(wrappedCodex, "export {}\n");
 		writeFile(profileCli, "export {}\n");
 		writeFile(profileCodex, "export {}\n");
 		writeFile(
 			homedirWrapper,
-			`import { homedir } from "node:os";\nimport { join } from "node:path";\nconst entry = join(homedir(), ".pi", "runtime", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");\nawait import(entry);\n`,
+			`import { homedir } from "node:os";\nimport { join } from "node:path";\nconst entry = join(homedir(), ".pi", "wrapped", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");\nawait import(entry);\n`,
 		);
 		writeFile(
 			envHomeWrapper,
-			`import { join } from "node:path";\nconst entry = join(process.env.HOME, ".pi", "runtime", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");\nawait import(entry);\n`,
+			`import { join } from "node:path";\nconst entry = join(process.env.HOME, ".pi", "wrapped", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");\nawait import(entry);\n`,
 		);
 		writeFile(
 			userProfileWrapper,
-			`import { join } from "node:path";\nconst entry = join(process.env.USERPROFILE, ".pi", "runtime", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");\nawait import(entry);\n`,
+			`import { join } from "node:path";\nconst entry = join(process.env.USERPROFILE, ".pi", "wrapped", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");\nawait import(entry);\n`,
 		);
 
 		const prevHome = process.env.HOME;
@@ -371,11 +317,11 @@ describe("resolveOriginalCodexModulePath", () => {
 		try {
 			process.env.HOME = home;
 			process.env.USERPROFILE = home;
-			expect(resolveCodexModuleFromNodeEntry(homedirWrapper)).toBe(runtimeCodex);
+			expect(resolveCodexModuleFromNodeEntry(homedirWrapper)).toBe(wrappedCodex);
 
 			process.env.HOME = home;
 			process.env.USERPROFILE = userProfile;
-			expect(resolveCodexModuleFromNodeEntry(envHomeWrapper)).toBe(runtimeCodex);
+			expect(resolveCodexModuleFromNodeEntry(envHomeWrapper)).toBe(wrappedCodex);
 			expect(resolveCodexModuleFromNodeEntry(userProfileWrapper)).toBe(profileCodex);
 		} finally {
 			if (prevHome === undefined) {
@@ -391,7 +337,7 @@ describe("resolveOriginalCodexModulePath", () => {
 		}
 	});
 
-	it("resolves physical pi-ai module when Pi >=1.5 aliases @earendil-works/pi-ai to pi-ai-extension-view.js", () => {
+	it("resolves physical pi-ai module when pi aliases @earendil-works/pi-ai to pi-ai-extension-view.js", () => {
 		const hostRoot = tempDir("pi-cpa-pi15-root-");
 		const runnerRoot = tempDir("pi-cpa-pi15-runner-");
 		const extensionView = join(
@@ -478,7 +424,7 @@ describe("writePatchedModuleCache", () => {
 	it("rewrites a bare partial-json import so a tmpdir cache can load it", async () => {
 		const home = tempDir("pi-cpa-bare-home-");
 		const cacheDir = tempDir("pi-cpa-bare-cache-");
-		const { codexPath, partialJsonPath } = writeOmpPluginsCodexTree(home);
+		const { codexPath, partialJsonPath } = writeAgentNpmCodexTree(home);
 		const cachePath = join(cacheDir, "patched-bare.mjs");
 
 		writePatchedModuleCache(
@@ -495,15 +441,15 @@ describe("writePatchedModuleCache", () => {
 		expect(loaded.parsed).toEqual({ ok: true, text: "x" });
 	});
 
-	it("resolves partial-json after locating openai-codex-responses via HOME/.omp and writing the cache outside that tree", async () => {
+	it("resolves partial-json after locating openai-codex-responses via HOME/.pi/agent/npm and writing the cache outside that tree", async () => {
 		const home = tempDir("pi-cpa-graph-home-");
 		const hostDir = tempDir("pi-cpa-graph-host-");
 		const cacheDir = tempDir("pi-cpa-graph-cache-");
-		const { codexPath, jsonParsePath } = writeOmpPluginsCodexTree(home);
+		const { codexPath, jsonParsePath } = writeAgentNpmCodexTree(home);
 
 		const resolved = resolveOriginalCodexModulePath({
 			resolveSpecifier: failingResolveSpecifier,
-			nodeEntry: writeMachOLikeHost(hostDir),
+			nodeEntry: writeNativeHost(hostDir),
 			homeDirectory: home,
 		});
 		expect(resolved.path).toBe(codexPath);
@@ -524,7 +470,7 @@ describe("writePatchedModuleCache", () => {
 	it("preserves shared module identity so session-resources cleanup reaches patched streams", async () => {
 		const home = tempDir("pi-cpa-shared-home-");
 		const cacheDir = tempDir("pi-cpa-shared-cache-");
-		const codexPath = join(home, ".omp", "plugins", CODEX_RELATIVE);
+		const codexPath = join(home, ".pi", "agent", "npm", CODEX_RELATIVE);
 		const sessionResourcesPath = join(dirname(dirname(codexPath)), "session-resources.js");
 
 		writeFile(
@@ -569,8 +515,8 @@ export function registerHook(fn) { registerCleanup(fn); }
 	it("isolates cache keys across different installation paths using production hashing", async () => {
 		const homeA = tempDir("pi-cpa-inst-a-");
 		const homeB = tempDir("pi-cpa-inst-b-");
-		const { codexPath: codexPathA } = writeOmpPluginsCodexTree(homeA);
-		const { codexPath: codexPathB } = writeOmpPluginsCodexTree(homeB);
+		const { codexPath: codexPathA } = writeAgentNpmCodexTree(homeA);
+		const { codexPath: codexPathB } = writeAgentNpmCodexTree(homeB);
 
 		// Same content, different locations
 		expect(readFileSync(codexPathA, "utf8")).toBe(readFileSync(codexPathB, "utf8"));
@@ -610,16 +556,16 @@ describe("patchCodexSource", () => {
 	}
 
 	it("keeps pi's own configuration_update wiring and adds none of its own", () => {
-		const patched = patchCodexSource(installedSource(), ["cliproxyapi"]);
+		const patched = patchCodexSource(installedSource(), ["provimux"]);
 		expect(patched).toContain("const configurationUpdateEffort = getConfigurationUpdateEffort(");
 		expect(patched).not.toContain("cpaGetConfigurationUpdateEffort");
 		expect(patched).not.toContain("CPA_CONFIGURATION_UPDATE_REQUEST_EFFORT");
 	});
 
 	it("adds the provider ids to CODEX_TOOL_CALL_PROVIDERS", () => {
-		const patched = patchCodexSource(installedSource(), ["cliproxyapi-getConfigurationUpdateEffort"]);
+		const patched = patchCodexSource(installedSource(), ["provimux-getConfigurationUpdateEffort"]);
 		expect(patched).toMatch(
-			/const CODEX_TOOL_CALL_PROVIDERS = new Set\(\[[^\]]*"cliproxyapi-getConfigurationUpdateEffort"\]\);/,
+			/const CODEX_TOOL_CALL_PROVIDERS = new Set\(\[[^\]]*"provimux-getConfigurationUpdateEffort"\]\);/,
 		);
 	});
 });
@@ -680,8 +626,8 @@ function midConvoModel(supportsMidConvoEffort: boolean): any {
 	return {
 		id: "gpt-6-sol",
 		name: "GPT-6 Sol",
-		api: "cliproxyapi-codex-responses",
-		provider: "cliproxyapi",
+		api: "provimux-codex-responses",
+		provider: "provimux",
 		baseUrl: "http://127.0.0.1:8317",
 		reasoning: true,
 		input: ["text"],
@@ -1065,7 +1011,7 @@ describe("GPT Responses prompt caching", () => {
 		{ id: "gpt-6-sol", prompt: " \n\t" },
 		{ id: "custom-gpt-6-sol", prompt: systemPrompt },
 	])("serializes the base prompt for $id", async ({ id, prompt }) => {
-		const streams = await loadCliproxyCodexStreams();
+		const streams = await loadProvimuxCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const result = await streams
 			.streamSimple(
@@ -1092,7 +1038,7 @@ describe("GPT Responses prompt caching", () => {
 	});
 
 	it.each(["priority", "ultrafast"] as const)("applies %s before the caller's SSE payload hook", async (tier) => {
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"], { resolveServiceTier: () => tier });
+		const streams = await loadProvimuxCodexStreams(["provimux"], { resolveServiceTier: () => tier });
 		const captured: CapturedRequest[] = [];
 		const leading = [developerItem("first rule"), developerItem("second rule")];
 		const update = developerItem("mid-session rule");
@@ -1133,7 +1079,7 @@ describe("GPT Responses prompt caching", () => {
 	});
 
 	it("honours a hook that deletes instructions before an existing transcript developer message", async () => {
-		const streams = await loadCliproxyCodexStreams();
+		const streams = await loadProvimuxCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const extra = "Keep answers concise.";
 		const result = await streams
@@ -1169,7 +1115,7 @@ describe("GPT Responses prompt caching", () => {
 	});
 
 	it("sends only a hook's replacement when it removes instructions and supplies its own developer message", async () => {
-		const streams = await loadCliproxyCodexStreams();
+		const streams = await loadProvimuxCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const replacement = developerItem("Replacement prompt.");
 		const result = await streams
@@ -1199,7 +1145,7 @@ describe("GPT Responses prompt caching", () => {
 	});
 
 	it("still moves the base prompt when a hook rewrites the body but leaves instructions as built", async () => {
-		const streams = await loadCliproxyCodexStreams();
+		const streams = await loadProvimuxCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const result = await streams
 			.streamSimple(
@@ -1248,7 +1194,7 @@ describe("GPT Responses prompt caching", () => {
 			expected: [implicitDeveloper, piBase],
 		},
 	])("sends what an in-place hook left when $name", async ({ remove, prefix, expected }) => {
-		const streams = await loadCliproxyCodexStreams();
+		const streams = await loadProvimuxCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const result = await streams
 			.rawStreamSimple(
@@ -1273,7 +1219,7 @@ describe("GPT Responses prompt caching", () => {
 	});
 
 	it("keeps text input supplied by a raw stream payload hook", async () => {
-		const streams = await loadCliproxyCodexStreams();
+		const streams = await loadProvimuxCodexStreams();
 		const captured: CapturedRequest[] = [];
 		const result = await streams
 			.rawStream(
@@ -1298,7 +1244,7 @@ describe("GPT Responses prompt caching", () => {
 
 describe("mid-convo effort streams", () => {
 	it("promotes the first effort to the request level and keeps later changes before their user message", async () => {
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		const streams = await loadProvimuxCodexStreams(["provimux"]);
 		const captured: CapturedRequest[] = [];
 		const fetchImpl = cannedSseFetch(captured);
 		const model = midConvoModel(true);
@@ -1377,7 +1323,7 @@ describe("mid-convo effort streams", () => {
 	it("a resumed conversation whose first effort the catalog no longer has: moved as pi moves it, never sent", async () => {
 		// The review's case: the first turn ran at low; a catalog refresh then took low away from the model, and the
 		// conversation resumes with medium. pi recovers low from the history as the request-level effort.
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		const streams = await loadProvimuxCodexStreams(["provimux"]);
 		const captured: CapturedRequest[] = [];
 		const fetchImpl = cannedSseFetch(captured);
 		const before = midConvoModel(true);
@@ -1411,7 +1357,7 @@ describe("mid-convo effort streams", () => {
 	});
 
 	it("keeps request-level effort for models without the compat flag", async () => {
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		const streams = await loadProvimuxCodexStreams(["provimux"]);
 		const captured: CapturedRequest[] = [];
 		const result = await streams
 			.streamSimple(midConvoModel(false), { messages: [systemMessage(), userMessage("question")] }, {
@@ -1431,7 +1377,7 @@ describe("mid-convo effort streams", () => {
 	});
 
 	it("keeps request-level effort when thinking is off", async () => {
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		const streams = await loadProvimuxCodexStreams(["provimux"]);
 		const captured: CapturedRequest[] = [];
 		const result = await streams
 			.streamSimple(midConvoModel(true), { messages: [systemMessage(), userMessage("question")] }, {
@@ -1452,7 +1398,7 @@ describe("mid-convo effort streams", () => {
 	});
 
 	it("does not emit an update for a raw none effort when off is unsupported", async () => {
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		const streams = await loadProvimuxCodexStreams(["provimux"]);
 		const captured: CapturedRequest[] = [];
 		const model = midConvoModel(true);
 		model.thinkingLevelMap = { off: null, low: "low", medium: "medium", high: "high" };
@@ -1474,7 +1420,7 @@ describe("mid-convo effort streams", () => {
 	});
 
 	it("carries a raw none effort through a nonidentity off mapping", async () => {
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		const streams = await loadProvimuxCodexStreams(["provimux"]);
 		const captured: CapturedRequest[] = [];
 		const model = midConvoModel(true);
 		model.thinkingLevelMap = { off: "low", low: "low", medium: "medium", high: "high" };
@@ -1552,11 +1498,11 @@ describe("mid-convo effort streams", () => {
 		}
 
 		const originalWebSocket = globalThis.WebSocket;
-		const originalTransport = process.env.CLIPROXYAPI_TRANSPORT;
+		const originalTransport = process.env.PROVIMUX_TRANSPORT;
 		(globalThis as any).WebSocket = FakeWebSocket;
-		process.env.CLIPROXYAPI_TRANSPORT = "websocket-cached";
+		process.env.PROVIMUX_TRANSPORT = "websocket-cached";
 		try {
-			const streams = await loadCliproxyCodexStreams(["cliproxyapi"], { resolveServiceTier: () => "ultrafast" });
+			const streams = await loadProvimuxCodexStreams(["provimux"], { resolveServiceTier: () => "ultrafast" });
 			try {
 				const model = midConvoModel(true);
 				const sessionId = `ws-mid-convo-${Date.now()}`;
@@ -1615,19 +1561,19 @@ describe("mid-convo effort streams", () => {
 		} finally {
 			(globalThis as any).WebSocket = originalWebSocket;
 			if (originalTransport === undefined) {
-				delete process.env.CLIPROXYAPI_TRANSPORT;
+				delete process.env.PROVIMUX_TRANSPORT;
 			} else {
-				process.env.CLIPROXYAPI_TRANSPORT = originalTransport;
+				process.env.PROVIMUX_TRANSPORT = originalTransport;
 			}
 		}
 	});
 });
 
-describe("loadCliproxyCodexStreams", () => {
+describe("loadProvimuxCodexStreams", () => {
 	it("still loads the patched module from the installed package graph", async () => {
-		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
+		const streams = await loadProvimuxCodexStreams(["provimux"]);
 		expect(typeof streams.streamSimple).toBe("function");
 		expect(typeof streams.stream).toBe("function");
-		expect(streams.api).toBe("cliproxyapi-codex-responses");
+		expect(streams.api).toBe("provimux-codex-responses");
 	});
 });

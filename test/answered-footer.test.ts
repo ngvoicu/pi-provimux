@@ -54,9 +54,9 @@ describe("the footer's words for what answered", () => {
 		expect(answeredStatus({ kind: "magic", provider: "claude", host: undefined }, true)).toBe("answered: unknown");
 	});
 
-	it("only the kind (an older Provimux): unknown", () => {
-		expect(answeredStatus({ kind: "oauth", provider: undefined, host: undefined }, false)).toBe("answered: unknown");
-		expect(answeredStatus({ kind: "apikey", provider: 42, host: undefined }, false)).toBe("answered: unknown");
+	it("a kind without a provider names nobody", () => {
+		expect(answeredStatus({ kind: "oauth", provider: undefined, host: undefined }, true)).toBe("answered: unknown");
+		expect(answeredStatus({ kind: "apikey", provider: 42, host: undefined }, false)).toBeUndefined();
 	});
 });
 
@@ -196,11 +196,11 @@ describe("answered setting", () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-provimux-answered-"));
 		tempDirs.push(agentDir);
 		expect(resolveAnsweredDefault(agentDir)).toBe(true);
-		writeFileSync(join(agentDir, "cliproxyapi.json"), '{"answered":false}\n', "utf8");
+		writeFileSync(join(agentDir, "provimux.json"), '{"answered":false}\n', "utf8");
 		expect(resolveAnsweredDefault(agentDir)).toBe(false);
-		writeFileSync(join(agentDir, "cliproxyapi.json"), '{"answered":true}\n', "utf8");
+		writeFileSync(join(agentDir, "provimux.json"), '{"answered":true}\n', "utf8");
 		expect(resolveAnsweredDefault(agentDir)).toBe(true);
-		writeFileSync(join(agentDir, "cliproxyapi.json"), '{"answered":"no"}\n', "utf8");
+		writeFileSync(join(agentDir, "provimux.json"), '{"answered":"no"}\n', "utf8");
 		expect(() => resolveAnsweredDefault(agentDir)).toThrow(/"answered" must be a boolean/);
 	});
 });

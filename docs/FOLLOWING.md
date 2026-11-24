@@ -148,10 +148,26 @@ owner before it does. If the original is silent that long: `gh workflow enable f
 **Where the fork's code differs from the original's on purpose.** A release of the original that touches these
 lines stops in a conflict, and the resolution keeps the fork's side:
 
-- **The provider id.** `extensions/lib.ts`: the original has `DEFAULT_PROVIDER_ID = "cliproxyapi"`; the fork has
-  `"provimux"` (and `DEFAULT_PROVIDER_NAME = "Provimux"`). `resolveIdentity` is the original's: a value in
-  `cliproxyapi.json` or `CLIPROXYAPI_PROVIDER_ID` is used as written. `extensions/index.ts`: the original passes
-  `[identity.providerId, "cliproxyapi"]` to `loadCliproxyCodexStreams`; the fork passes `[identity.providerId]`.
+- **No `cliproxyapi` name.** The original's names are `cliproxyapi` throughout; the fork's are `provimux`, with no
+  fallback to the old ones (the owner's decision of 2026-11-24):
+
+  | The original | The fork |
+  |---|---|
+  | provider id `cliproxyapi`, name `CLIProxyAPI` (`DEFAULT_PROVIDER_ID`/`_NAME`, `lib.ts`) | `provimux`, `Provimux` |
+  | settings `cliproxyapi.json`, models cache `cliproxyapi-models.json` | `provimux.json`, `provimux-models.json` |
+  | `CLIPROXYAPI_*` environment variables | `PROVIMUX_*` |
+  | API id `cliproxyapi-codex-responses`, `CLIPROXYAPI_CODEX_API` | `provimux-codex-responses`, `PROVIMUX_CODEX_API` |
+  | `CliproxyCodexStream*`, `CliproxyConfigFile`, `loadCliproxyCodexStreams` | `ProvimuxCodexStream*`, `ProvimuxConfigFile`, `loadProvimuxCodexStreams` |
+  | global keys and temp names `pi-cliproxyapi-provider…`, status key `cliproxyapi-fast-refresh` | `pi-provimux…`, `provimux-fast-refresh` |
+  | `cliproxyapi.example.json` | `provimux.example.json`, without `providerId`/`providerName` |
+
+  `extensions/index.ts`: the original passes `[identity.providerId, "cliproxyapi"]` to the Codex stream loader; the
+  fork passes `[identity.providerId]`. `resolveIdentity` is the original's: a value in the settings file or the
+  environment is used as written. A release of the original that brings a new `cliproxyapi` name (an identifier, a
+  variable, a file name, a provider id) is renamed in the resolution; a clean merge can still bring one in, and no
+  guard looks for it: after a merge, `grep -rnE 'cliproxyapi|CLIPROXYAPI|Cliproxy' extensions test` should show nothing.
+  `.github/follow/paths.txt` keeps the original's `cliproxyapi.example.json`: it lists the original's paths, and a
+  change the original makes there conflicts with the rename.
 - **No code for pi before 1.6.0.** `extensions/codex-stream.ts`: the original carries a mid-conversation effort patch
   for pi-ai 1.3 to 1.5 (`MID_CONVO_RESOLVER_SNIPPET`, `patchMidConvoEffort`, `sharedSupportsConfigurationUpdate`,
   `hasNativeMidConvoEffort`), the classic-context path for pi before 0.86 (`adaptTranscriptContext`,
@@ -159,18 +175,20 @@ lines stops in a conflict, and the resolution keeps the fork's side:
   fork has none of them. pi 1.6.0 does that work itself; the fork keeps only what still acts on 1.6.0 (the
   configuration_update placement, the default GPT base prompt, a hook's `instructions`). A resolution does not bring
   them back.
-- **No reader of the fork's own older values.** A `cliproxyapi.json` value is read as written, and
-  `claudeMessagesMode` reads only `"on"` and `"auto"` (anything else is `"off"`).
+- **No reader of the fork's own older values.** A settings value is read as written, no old file name or variable
+  is read, and `claudeMessagesMode` reads only `"on"` and `"auto"` (anything else is `"off"`).
+- **No other host and no install layout pi 1.6.0 does not have.** The original's support for Oh My Pi (the
+  `.omp/plugins` module paths, its key-based settings API in `auto-compact.ts`, a context's `sessionId`) and for
+  `~/.pi/runtime`, `~/.pi/bin/pi` and a flat `dist/openai-codex-responses.js` is gone from the fork.
+- **Provimux 8.1.1-pmx.1 or newer names what answered.** An answer that gives the kind without the provider names
+  nobody; the original's guess from the credential list for such an answer is gone.
 - **No guard for an API pi 1.6.0 has.** `getPackageDir`, `closeOpenAICodexWebSocketSessions` (`codex-stream.ts`),
   `theme.getColorMode` (`fast-footer.ts`), `getBuiltinModels` (`lib.ts`, `upstreams.ts`), pi's model resolvers and
   the registry's `getAvailable`/`hasConfiguredAuth` (`thinking-levels.ts`) are called without a `typeof` or `?.`
   check.
-- **`cliproxyapi.example.json`** has no `providerId`/`providerName`: the defaults, `provimux`/`Provimux`.
 
-A clean merge can still bring in a new literal `"cliproxyapi"` used as a provider id (a comparison, a default). No
-guard looks for one. After a merge, `grep -n '"cliproxyapi' extensions/*.ts` should show only
-`loadCliproxyCodexStreams`' default argument (used only by tests). The CLI test (`test/cli.test.ts`, "the provider
-id, in pi's CLI") fails if the models stop showing under `provimux` or the owner-shaped setup stops answering.
+The CLI test (`test/cli.test.ts`, "the provider id, in pi's CLI") fails if the models stop showing under `provimux`
+or the owner-shaped setup stops answering.
 
 ### 2.4 The run: `follow.yml`
 
@@ -267,7 +285,7 @@ after. A checker that fails to run is an error, never a pass.
 
 1. **Paths.** Every path the original changed between the old base and `B`, and every path `M` changes on `main`,
    must be **exactly** a line of `.github/follow/paths.txt`: today's files under `extensions/` and `test/`, one by
-   one, and `README.md`, `package.json`, `package-lock.json`, `cliproxyapi.example.json`. No wildcards: a new file
+   one, and `README.md`, `package.json`, `package-lock.json`, and the original's `cliproxyapi.example.json`. No wildcards: a new file
    of the original stops the run until the owner adds it. Refused whatever the list says, at any depth: `.npmrc`,
    `.npmignore`, `.gitattributes`, `.gitignore`, `.gitmodules` and other package or git configuration;
    `tsconfig*.json`, `biome.json`, `vitest.config.*` and other check configuration; anything under `.github/`,
@@ -487,7 +505,7 @@ it). After `npm ci`, a second container gets that archive read-only, and `.githu
 mounted read-only) extracts the tarball as npm installs it (npm's own `node-tar` in the container, pacote's options,
 as in 2.1) into a consumer folder of its own (`node_modules/pi-provimux`, nothing else of the tree), links
 in only the package's `peerDependencies` from the tree's `node_modules` (what pi provides at run time), clears
-`HOME`, pi's agent folder and the `CLIPROXYAPI_*` variables, and has **pi's own loader**
+`HOME`, pi's agent folder and the `PROVIMUX_*` variables, and has **pi's own loader**
 (`discoverAndLoadExtensions` of `@earendil-works/pi-coding-agent`) load the package. Every registered extension must
 load with no error, or the job fails and nothing lands or is published. A file the extension imports that the
 tarball lacks fails here however the import is written (a template literal included); a comment naming a file

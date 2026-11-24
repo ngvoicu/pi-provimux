@@ -36,19 +36,19 @@ const CATALOG = buildClaudeFormatCatalog([
 
 const tempDirs: string[] = [];
 function agentDir(config?: object): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-cliproxy-cm-"));
+	const dir = mkdtempSync(join(tmpdir(), "pi-provimux-cm-"));
 	tempDirs.push(dir);
-	if (config) writeFileSync(join(dir, "cliproxyapi.json"), JSON.stringify(config));
+	if (config) writeFileSync(join(dir, "provimux.json"), JSON.stringify(config));
 	return dir;
 }
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	vi.restoreAllMocks();
-	delete process.env.CLIPROXYAPI_CLAUDE_MESSAGES;
+	delete process.env.PROVIMUX_CLAUDE_MESSAGES;
 });
 
 describe("resolveClaudeMessagesDefault", () => {
-	it("defaults to auto and reads cliproxyapi.json", () => {
+	it("defaults to auto and reads provimux.json", () => {
 		expect(resolveClaudeMessagesDefault(agentDir())).toBe("auto");
 		expect(resolveClaudeMessagesDefault(agentDir({ claudeMessages: "auto" }))).toBe("auto");
 		expect(resolveClaudeMessagesDefault(agentDir({ claudeMessages: true }))).toBe("on");
@@ -56,15 +56,15 @@ describe("resolveClaudeMessagesDefault", () => {
 	});
 
 	it("lets the environment win and rejects bad values", () => {
-		process.env.CLIPROXYAPI_CLAUDE_MESSAGES = "off";
+		process.env.PROVIMUX_CLAUDE_MESSAGES = "off";
 		expect(resolveClaudeMessagesDefault(agentDir({ claudeMessages: true }))).toBe("off");
-		process.env.CLIPROXYAPI_CLAUDE_MESSAGES = "1";
+		process.env.PROVIMUX_CLAUDE_MESSAGES = "1";
 		expect(resolveClaudeMessagesDefault(agentDir({ claudeMessages: false }))).toBe("on");
-		process.env.CLIPROXYAPI_CLAUDE_MESSAGES = "Auto";
+		process.env.PROVIMUX_CLAUDE_MESSAGES = "Auto";
 		expect(resolveClaudeMessagesDefault(agentDir({ claudeMessages: false }))).toBe("auto");
-		process.env.CLIPROXYAPI_CLAUDE_MESSAGES = "maybe";
-		expect(() => resolveClaudeMessagesDefault(agentDir())).toThrow(/CLIPROXYAPI_CLAUDE_MESSAGES/);
-		delete process.env.CLIPROXYAPI_CLAUDE_MESSAGES;
+		process.env.PROVIMUX_CLAUDE_MESSAGES = "maybe";
+		expect(() => resolveClaudeMessagesDefault(agentDir())).toThrow(/PROVIMUX_CLAUDE_MESSAGES/);
+		delete process.env.PROVIMUX_CLAUDE_MESSAGES;
 		expect(() => resolveClaudeMessagesDefault(agentDir({ claudeMessages: "yes" }))).toThrow(/claudeMessages/);
 	});
 });

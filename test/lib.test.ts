@@ -49,7 +49,7 @@ afterEach(() => {
 });
 
 function tempAgentDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-test-"));
+	const dir = mkdtempSync(join(tmpdir(), "pi-provimux-test-"));
 	tempDirs.push(dir);
 	return dir;
 }
@@ -496,7 +496,7 @@ describe("config and auth file helpers", () => {
 		writeFileSync(
 			join(agentDir, AUTH_FILE_NAME),
 			JSON.stringify({
-				cliproxyapi: {
+				provimux: {
 					type: "oauth",
 					access: "sk-test",
 					refresh: encodeRefreshMeta("http://127.0.0.1:8317"),
@@ -505,7 +505,7 @@ describe("config and auth file helpers", () => {
 			"utf8",
 		);
 
-		expect(loadAuthConnection(agentDir, "cliproxyapi")).toEqual({
+		expect(loadAuthConnection(agentDir, "provimux")).toEqual({
 			apiKey: "sk-test",
 			baseUrl: "http://127.0.0.1:8317",
 		});
@@ -516,7 +516,7 @@ describe("config and auth file helpers", () => {
 		writeFileSync(
 			join(agentDir, AUTH_FILE_NAME),
 			JSON.stringify({
-				cliproxyapi: {
+				provimux: {
 					type: "api_key",
 					key: "plain-key",
 				},
@@ -524,7 +524,7 @@ describe("config and auth file helpers", () => {
 			"utf8",
 		);
 
-		expect(loadAuthConnection(agentDir, "cliproxyapi")).toEqual({
+		expect(loadAuthConnection(agentDir, "provimux")).toEqual({
 			apiKey: "plain-key",
 		});
 	});
@@ -542,23 +542,23 @@ describe("config and auth file helpers", () => {
 	it("resolves Fast default from config with env precedence", () => {
 		const agentDir = tempAgentDir();
 		saveConfigFile(agentDir, { fast: true });
-		const previous = process.env.CLIPROXYAPI_FAST;
+		const previous = process.env.PROVIMUX_FAST;
 		try {
-			delete process.env.CLIPROXYAPI_FAST;
+			delete process.env.PROVIMUX_FAST;
 			expect(resolveFastDefault(agentDir)).toBe(true);
 			saveConfigFile(agentDir, { fast: "ultrafast" });
 			expect(resolveFastDefault(agentDir)).toBe("ultrafast");
-			process.env.CLIPROXYAPI_FAST = "on";
+			process.env.PROVIMUX_FAST = "on";
 			expect(resolveFastDefault(agentDir)).toBe(true);
-			process.env.CLIPROXYAPI_FAST = "off";
+			process.env.PROVIMUX_FAST = "off";
 			expect(resolveFastDefault(agentDir)).toBe(false);
-			process.env.CLIPROXYAPI_FAST = "ultrafast";
-			expect(() => resolveFastDefault(agentDir)).toThrow(/CLIPROXYAPI_FAST/);
+			process.env.PROVIMUX_FAST = "ultrafast";
+			expect(() => resolveFastDefault(agentDir)).toThrow(/PROVIMUX_FAST/);
 		} finally {
 			if (previous === undefined) {
-				delete process.env.CLIPROXYAPI_FAST;
+				delete process.env.PROVIMUX_FAST;
 			} else {
-				process.env.CLIPROXYAPI_FAST = previous;
+				process.env.PROVIMUX_FAST = previous;
 			}
 		}
 	});
@@ -573,9 +573,9 @@ describe("config and auth file helpers", () => {
 		expect(DEFAULT_BASE_URL).toBe("http://127.0.0.1:8317");
 	});
 
-	it("shows the provider as Provimux by default; a name in the file or CLIPROXYAPI_PROVIDER_NAME is kept", () => {
-		const previous = process.env.CLIPROXYAPI_PROVIDER_NAME;
-		delete process.env.CLIPROXYAPI_PROVIDER_NAME;
+	it("shows the provider as Provimux by default; a name in the file or PROVIMUX_PROVIDER_NAME is kept", () => {
+		const previous = process.env.PROVIMUX_PROVIDER_NAME;
+		delete process.env.PROVIMUX_PROVIDER_NAME;
 		try {
 			expect(DEFAULT_PROVIDER_NAME).toBe("Provimux");
 			const agentDir = tempAgentDir();
@@ -584,46 +584,36 @@ describe("config and auth file helpers", () => {
 			expect(resolveIdentity(agentDir).providerName).toBe("CLIProxyAPI");
 			saveConfigFile(agentDir, { providerName: "CPA" });
 			expect(resolveIdentity(agentDir).providerName).toBe("CPA");
-			process.env.CLIPROXYAPI_PROVIDER_NAME = "Acme";
+			process.env.PROVIMUX_PROVIDER_NAME = "Acme";
 			expect(resolveIdentity(agentDir).providerName).toBe("Acme");
 		} finally {
 			if (previous === undefined) {
-				delete process.env.CLIPROXYAPI_PROVIDER_NAME;
+				delete process.env.PROVIMUX_PROVIDER_NAME;
 			} else {
-				process.env.CLIPROXYAPI_PROVIDER_NAME = previous;
+				process.env.PROVIMUX_PROVIDER_NAME = previous;
 			}
 		}
 	});
 
 	describe("the provider id", () => {
-		const ENV_VALUES: Array<string | undefined> = [
-			undefined,
-			"",
-			"   ",
-			"cliproxyapi",
-			" cliproxyapi ",
-			"provimux",
-			"acme",
-			" acme ",
-		];
-		/** `absent`: no cliproxyapi.json; `broken`: not JSON; `none`: a file without providerId; anything else: the value. */
+		const ENV_VALUES: Array<string | undefined> = [undefined, "", "   ", "provimux", " provimux ", "acme", " acme "];
+		/** `absent`: no provimux.json; `broken`: not JSON; `none`: a file without providerId; anything else: the value. */
 		const FILE_VALUES: unknown[] = [
 			"absent",
 			"broken",
 			"none",
 			"",
 			"  ",
-			"cliproxyapi",
-			" cliproxyapi ",
-			"CLIProxyAPI",
 			"provimux",
+			" provimux ",
+			"Acme",
 			"acme",
 			123,
 			null,
 		];
-		const AUTH_ENTRIES = [undefined, "cliproxyapi", "provimux", "acme"];
+		const AUTH_ENTRIES = [undefined, "provimux", "acme"];
 
-		/** The rule: a non-blank CLIPROXYAPI_PROVIDER_ID; else a non-blank file value; else provimux. */
+		/** The rule: a non-blank PROVIMUX_PROVIDER_ID; else a non-blank file value; else provimux. */
 		function expected(env: string | undefined, file: unknown): string {
 			if (env?.trim()) return env.trim();
 			if (!["absent", "broken", "none"].includes(file as string) && typeof file === "string" && file.trim()) {
@@ -648,7 +638,7 @@ describe("config and auth file helpers", () => {
 			expect(DEFAULT_PROVIDER_ID).toBe("provimux");
 		});
 
-		it("every combination of CLIPROXYAPI_PROVIDER_ID, the file's providerId and a stored login", () => {
+		it("every combination of PROVIMUX_PROVIDER_ID, the file's providerId and a stored login", () => {
 			let cases = 0;
 			for (const env of ENV_VALUES) {
 				for (const file of FILE_VALUES) {
@@ -666,7 +656,7 @@ describe("config and auth file helpers", () => {
 								"utf8",
 							);
 						}
-						const identity = withEnv("CLIPROXYAPI_PROVIDER_ID", env, () => resolveIdentity(agentDir));
+						const identity = withEnv("PROVIMUX_PROVIDER_ID", env, () => resolveIdentity(agentDir));
 						expect(identity.providerId, JSON.stringify({ env, file, authEntry })).toBe(expected(env, file));
 						cases++;
 					}
@@ -677,9 +667,9 @@ describe("config and auth file helpers", () => {
 
 		it("the owner's setup: providerId provimux, apiKey and baseUrl in the file, no login: provimux, from the file", () => {
 			const unset = <T>(run: () => T) =>
-				withEnv("CLIPROXYAPI_BASE_URL", undefined, () => withEnv("CLIPROXYAPI_API_KEY", undefined, run));
+				withEnv("PROVIMUX_BASE_URL", undefined, () => withEnv("PROVIMUX_API_KEY", undefined, run));
 			unset(() =>
-				withEnv("CLIPROXYAPI_PROVIDER_ID", undefined, () => {
+				withEnv("PROVIMUX_PROVIDER_ID", undefined, () => {
 					const agentDir = tempAgentDir();
 					writeFileSync(
 						join(agentDir, CONFIG_FILE_NAME),
@@ -696,7 +686,7 @@ describe("config and auth file helpers", () => {
 			);
 		});
 
-		it("a login stored only under another id is not read for provimux; CLIPROXYAPI_PROVIDER_ID naming it reads it", () => {
+		it("a login stored only under another id is not read for provimux; PROVIMUX_PROVIDER_ID naming it reads it", () => {
 			const agentDir = tempAgentDir();
 			writeFileSync(
 				join(agentDir, AUTH_FILE_NAME),
@@ -705,13 +695,13 @@ describe("config and auth file helpers", () => {
 				}),
 				"utf8",
 			);
-			withEnv("CLIPROXYAPI_API_KEY", undefined, () => {
-				withEnv("CLIPROXYAPI_PROVIDER_ID", undefined, () => {
+			withEnv("PROVIMUX_API_KEY", undefined, () => {
+				withEnv("PROVIMUX_PROVIDER_ID", undefined, () => {
 					const { providerId } = resolveIdentity(agentDir);
 					expect(providerId).toBe("provimux");
 					expect(resolveConnection(agentDir, providerId)).toBeNull();
 				});
-				withEnv("CLIPROXYAPI_PROVIDER_ID", "acme", () => {
+				withEnv("PROVIMUX_PROVIDER_ID", "acme", () => {
 					const { providerId } = resolveIdentity(agentDir);
 					expect(providerId).toBe("acme");
 					expect(resolveConnection(agentDir, providerId)).toMatchObject({ apiKey: "acme-key" });
@@ -720,12 +710,12 @@ describe("config and auth file helpers", () => {
 		});
 
 		it("the id and name /login writes to the file are read as written", () => {
-			withEnv("CLIPROXYAPI_PROVIDER_ID", undefined, () => {
+			withEnv("PROVIMUX_PROVIDER_ID", undefined, () => {
 				const agentDir = tempAgentDir();
 				saveConfigFile(agentDir, { providerId: "provimux", providerName: "Provimux" });
 				expect(resolveIdentity(agentDir)).toEqual({ providerId: "provimux", providerName: "Provimux" });
-				saveConfigFile(agentDir, { providerId: "cliproxyapi", providerName: "CLIProxyAPI" });
-				expect(resolveIdentity(agentDir)).toEqual({ providerId: "cliproxyapi", providerName: "CLIProxyAPI" });
+				saveConfigFile(agentDir, { providerId: "provimux", providerName: "CLIProxyAPI" });
+				expect(resolveIdentity(agentDir)).toEqual({ providerId: "provimux", providerName: "CLIProxyAPI" });
 				saveConfigFile(agentDir, { providerId: "acme" });
 				expect(resolveIdentity(agentDir).providerId).toBe("acme");
 			});
@@ -748,19 +738,15 @@ describe("config and auth file helpers", () => {
 	});
 
 	it("checks if a model is referenced as default", () => {
-		expect(isModelReferencedAsDefault(undefined, "model-a", "cliproxyapi")).toBe(false);
+		expect(isModelReferencedAsDefault(undefined, "model-a", "provimux")).toBe(false);
 		expect(
-			isModelReferencedAsDefault(
-				{ defaultModel: "model-a", defaultProvider: "cliproxyapi" },
-				"model-a",
-				"cliproxyapi",
-			),
+			isModelReferencedAsDefault({ defaultModel: "model-a", defaultProvider: "provimux" }, "model-a", "provimux"),
 		).toBe(true);
 		expect(
-			isModelReferencedAsDefault({ defaultModel: "model-a", defaultProvider: "google" }, "model-a", "cliproxyapi"),
+			isModelReferencedAsDefault({ defaultModel: "model-a", defaultProvider: "google" }, "model-a", "provimux"),
 		).toBe(false);
-		expect(isModelReferencedAsDefault({ defaultModel: "cliproxyapi/model-a" }, "model-a", "cliproxyapi")).toBe(true);
-		expect(isModelReferencedAsDefault({ defaultModel: "cliproxyapi:model-a" }, "model-a", "cliproxyapi")).toBe(true);
-		expect(isModelReferencedAsDefault({ defaultModel: "other/model-a" }, "model-a", "cliproxyapi")).toBe(false);
+		expect(isModelReferencedAsDefault({ defaultModel: "provimux/model-a" }, "model-a", "provimux")).toBe(true);
+		expect(isModelReferencedAsDefault({ defaultModel: "provimux:model-a" }, "model-a", "provimux")).toBe(true);
+		expect(isModelReferencedAsDefault({ defaultModel: "other/model-a" }, "model-a", "provimux")).toBe(false);
 	});
 });

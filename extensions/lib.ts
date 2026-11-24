@@ -27,8 +27,8 @@ export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
 export const DEFAULT_PROVIDER_ID = "provimux";
 export const DEFAULT_PROVIDER_NAME = "Provimux";
 export const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
-export const CONFIG_FILE_NAME = "cliproxyapi.json";
-export const MODELS_CACHE_FILE_NAME = "cliproxyapi-models.json";
+export const CONFIG_FILE_NAME = "provimux.json";
+export const MODELS_CACHE_FILE_NAME = "provimux-models.json";
 export const AUTH_FILE_NAME = "auth.json";
 export const CLIENT_VERSION = "pi";
 export const MODELS_REQUEST_TIMEOUT_MS = 60_000;
@@ -43,7 +43,7 @@ export const DEFAULT_CONTEXT_WINDOW = 128000;
 
 const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 
-export interface CliproxyConfigFile {
+export interface ProvimuxConfigFile {
 	baseUrl?: string;
 	apiKey?: string;
 	providerId?: string;
@@ -287,7 +287,7 @@ export function decodeRefreshMeta(refresh: string | undefined): OAuthRefreshMeta
 	return null;
 }
 
-export function loadConfigFile(agentDir: string): CliproxyConfigFile {
+export function loadConfigFile(agentDir: string): ProvimuxConfigFile {
 	const configPath = join(agentDir, CONFIG_FILE_NAME);
 	try {
 		const raw = readFileSync(configPath, "utf8");
@@ -295,7 +295,7 @@ export function loadConfigFile(agentDir: string): CliproxyConfigFile {
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
 			throw new Error(`${CONFIG_FILE_NAME} must contain a JSON object`);
 		}
-		return parsed as CliproxyConfigFile;
+		return parsed as ProvimuxConfigFile;
 	} catch (error) {
 		const err = error as NodeJS.ErrnoException;
 		if (err.code !== "ENOENT") {
@@ -352,12 +352,12 @@ export function isModelReferencedAsDefault(
 }
 
 /** Merge the config update and return the previous values for callers that need to roll back. */
-export function saveConfigFile(agentDir: string, config: CliproxyConfigFile): CliproxyConfigFile {
+export function saveConfigFile(agentDir: string, config: ProvimuxConfigFile): ProvimuxConfigFile {
 	const configPath = join(agentDir, CONFIG_FILE_NAME);
 	mkdirSync(dirname(configPath), { recursive: true });
 
 	const existing = loadConfigFile(agentDir);
-	const next: CliproxyConfigFile = {
+	const next: ProvimuxConfigFile = {
 		...existing,
 		...config,
 	};
@@ -408,7 +408,7 @@ export function loadAuthConnection(agentDir: string, providerId: string): { base
 }
 
 export function resolveIdentity(agentDir: string): ResolvedIdentity {
-	let file: CliproxyConfigFile = {};
+	let file: ProvimuxConfigFile = {};
 	try {
 		file = loadConfigFile(agentDir);
 	} catch {
@@ -416,8 +416,8 @@ export function resolveIdentity(agentDir: string): ResolvedIdentity {
 	}
 
 	return {
-		providerId: firstNonEmpty(process.env.CLIPROXYAPI_PROVIDER_ID, file.providerId, DEFAULT_PROVIDER_ID)!,
-		providerName: firstNonEmpty(process.env.CLIPROXYAPI_PROVIDER_NAME, file.providerName, DEFAULT_PROVIDER_NAME)!,
+		providerId: firstNonEmpty(process.env.PROVIMUX_PROVIDER_ID, file.providerId, DEFAULT_PROVIDER_ID)!,
+		providerName: firstNonEmpty(process.env.PROVIMUX_PROVIDER_NAME, file.providerName, DEFAULT_PROVIDER_NAME)!,
 	};
 }
 
@@ -440,11 +440,11 @@ export function parseBooleanSetting(value: string): boolean | undefined {
 
 /** Resolve the speed preference from the boolean env override, then config, then false. */
 export function resolveFastDefault(agentDir: string): FastPreference {
-	const envValue = firstNonEmpty(process.env.CLIPROXYAPI_FAST);
+	const envValue = firstNonEmpty(process.env.PROVIMUX_FAST);
 	if (envValue !== undefined) {
 		const parsed = parseBooleanSetting(envValue);
 		if (parsed === undefined) {
-			throw new Error(`CLIPROXYAPI_FAST must be one of: true, false, 1, 0, yes, no, on, off`);
+			throw new Error(`PROVIMUX_FAST must be one of: true, false, 1, 0, yes, no, on, off`);
 		}
 		return parsed;
 	}
@@ -459,14 +459,14 @@ export function resolveFastDefault(agentDir: string): FastPreference {
 	return file.fast;
 }
 
-/** Resolve the Claude Messages mode from env, then cliproxyapi.json, then "auto". */
+/** Resolve the Claude Messages mode from env, then provimux.json, then "auto". */
 export function resolveClaudeMessagesDefault(agentDir: string): ClaudeMessagesMode {
-	const envValue = firstNonEmpty(process.env.CLIPROXYAPI_CLAUDE_MESSAGES);
+	const envValue = firstNonEmpty(process.env.PROVIMUX_CLAUDE_MESSAGES);
 	if (envValue !== undefined) {
 		if (envValue.trim().toLowerCase() === "auto") return "auto";
 		const parsed = parseBooleanSetting(envValue);
 		if (parsed === undefined) {
-			throw new Error("CLIPROXYAPI_CLAUDE_MESSAGES must be one of: auto, true, false, 1, 0, yes, no, on, off");
+			throw new Error("PROVIMUX_CLAUDE_MESSAGES must be one of: auto, true, false, 1, 0, yes, no, on, off");
 		}
 		return parsed ? "on" : "off";
 	}
@@ -480,7 +480,7 @@ export function resolveClaudeMessagesDefault(agentDir: string): ClaudeMessagesMo
 	return file.claudeMessages ? "on" : "off";
 }
 
-/** Resolve whether the TUI elapsed/TPS helper runs, from cliproxyapi.json, defaulting to true. */
+/** Resolve whether the TUI elapsed/TPS helper runs, from provimux.json, defaulting to true. */
 export function resolveTpsDefault(agentDir: string): boolean {
 	const file = loadConfigFile(agentDir);
 	if (file.tps === undefined) {
@@ -492,7 +492,7 @@ export function resolveTpsDefault(agentDir: string): boolean {
 	return file.tps;
 }
 
-/** Resolve whether the footer says which route answered, from cliproxyapi.json, defaulting to true. */
+/** Resolve whether the footer says which route answered, from provimux.json, defaulting to true. */
 export function resolveAnsweredDefault(agentDir: string): boolean {
 	const file = loadConfigFile(agentDir);
 	if (file.answered === undefined) {
@@ -504,7 +504,7 @@ export function resolveAnsweredDefault(agentDir: string): boolean {
 	return file.answered;
 }
 
-/** Resolve the request pause preference from cliproxyapi.json, defaulting to false. */
+/** Resolve the request pause preference from provimux.json, defaulting to false. */
 export function resolvePauseDefault(agentDir: string): boolean {
 	const file = loadConfigFile(agentDir);
 	if (file.pause === undefined) {
@@ -518,10 +518,10 @@ export function resolvePauseDefault(agentDir: string): boolean {
 
 /**
  * Resolve connection settings.
- * Priority: env > cliproxyapi.json > auth.json (/login) > default baseUrl
+ * Priority: env > provimux.json > auth.json (/login) > default baseUrl
  */
 export function resolveConnection(agentDir: string, providerId: string): ResolvedConnection | null {
-	let file: CliproxyConfigFile = {};
+	let file: ProvimuxConfigFile = {};
 	try {
 		file = loadConfigFile(agentDir);
 	} catch {
@@ -535,8 +535,8 @@ export function resolveConnection(agentDir: string, providerId: string): Resolve
 		auth = null;
 	}
 
-	const baseUrlInput = firstNonEmpty(process.env.CLIPROXYAPI_BASE_URL, file.baseUrl, auth?.baseUrl, DEFAULT_BASE_URL)!;
-	const apiKey = firstNonEmpty(process.env.CLIPROXYAPI_API_KEY, file.apiKey, auth?.apiKey);
+	const baseUrlInput = firstNonEmpty(process.env.PROVIMUX_BASE_URL, file.baseUrl, auth?.baseUrl, DEFAULT_BASE_URL)!;
+	const apiKey = firstNonEmpty(process.env.PROVIMUX_API_KEY, file.apiKey, auth?.apiKey);
 	if (!apiKey) {
 		return null;
 	}
@@ -924,7 +924,7 @@ function getModelsDevCachePath(agentDir?: string): string {
 	if (agentDir?.trim()) {
 		return join(agentDir, "tmp", "models-dev-cache.json");
 	}
-	return join(tmpdir(), "pi-cliproxyapi-models-dev-cache.json");
+	return join(tmpdir(), "pi-provimux-models-dev-cache.json");
 }
 
 function readModelsDevCacheFile(cachePath: string): ModelsDevCacheFile | null {

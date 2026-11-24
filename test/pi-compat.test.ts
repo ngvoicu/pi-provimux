@@ -14,26 +14,26 @@ import { getApiProvider, stream, streamSimple, unregisterApiProviders } from "@e
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PROACTIVE_COMPACTION_ERROR_PREFIX } from "../extensions/auto-compact.ts";
-import type { CliproxyCodexStreamSimple } from "../extensions/codex-stream.ts";
+import type { ProvimuxCodexStreamSimple } from "../extensions/codex-stream.ts";
 import * as codexStream from "../extensions/codex-stream.ts";
 import providerExtension, { COMPAT_SOURCE_ID, resetCompatCoordinator } from "../extensions/index.ts";
 import { AUTH_FILE_NAME } from "../extensions/lib.ts";
 
-const CLIPROXYAPI_ENV_NAMES = [
-	"CLIPROXYAPI_API_KEY",
-	"CLIPROXYAPI_BASE_URL",
-	"CLIPROXYAPI_FAST",
-	"CLIPROXYAPI_PROVIDER_ID",
-	"CLIPROXYAPI_PROVIDER_NAME",
-	"CLIPROXYAPI_TRANSPORT",
+const PROVIMUX_ENV_NAMES = [
+	"PROVIMUX_API_KEY",
+	"PROVIMUX_BASE_URL",
+	"PROVIMUX_FAST",
+	"PROVIMUX_PROVIDER_ID",
+	"PROVIMUX_PROVIDER_NAME",
+	"PROVIMUX_TRANSPORT",
 ] as const;
 
 async function withTempAgentDir(run: (agentDir: string) => Promise<void>): Promise<void> {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-extension-test-"));
+	const agentDir = mkdtempSync(join(tmpdir(), "pi-provimux-extension-test-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const previousEnv = new Map(CLIPROXYAPI_ENV_NAMES.map((name) => [name, process.env[name]]));
+	const previousEnv = new Map(PROVIMUX_ENV_NAMES.map((name) => [name, process.env[name]]));
 	process.env.PI_CODING_AGENT_DIR = agentDir;
-	for (const name of CLIPROXYAPI_ENV_NAMES) delete process.env[name];
+	for (const name of PROVIMUX_ENV_NAMES) delete process.env[name];
 
 	try {
 		await run(agentDir);
@@ -95,7 +95,7 @@ describe("pi 0.82.0 compatibility", () => {
 		unregisterApiProviders(COMPAT_SOURCE_ID);
 	});
 
-	it("registers oauth login and both speed commands without a dedicated /cliproxyapi command", async () => {
+	it("registers oauth login and both speed commands, and no provider command", async () => {
 		await withTempAgentDir(async () => {
 			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
 			const { pi } = createPiMock(commands);
@@ -116,8 +116,6 @@ describe("pi 0.82.0 compatibility", () => {
 				expect(commands.has("pause")).toBe(true);
 				expect(commands.has("continue")).toBe(true);
 				expect(commands.has("provimux-refresh")).toBe(true);
-				expect(commands.has("cliproxyapi-refresh")).toBe(false);
-				expect(commands.has("cliproxyapi")).toBe(false);
 				expect(pi.unregisterProvider).toHaveBeenCalledWith("provimux");
 				expect(pi.registerProvider).toHaveBeenCalledWith(
 					"provimux",
@@ -142,7 +140,7 @@ describe("pi 0.82.0 compatibility", () => {
 	] as const)("applies Fast pricing and sends the foreground tier after /%s", async (name, tier) => {
 		await withTempAgentDir(async (agentDir) => {
 			writeFileSync(
-				join(agentDir, "cliproxyapi.json"),
+				join(agentDir, "provimux.json"),
 				JSON.stringify({ baseUrl: "http://127.0.0.1:8317", apiKey: "stored-key" }),
 				"utf8",
 			);
@@ -264,7 +262,7 @@ describe("pi 0.82.0 compatibility", () => {
 		});
 	});
 
-	it("loads configured models without registering /cliproxyapi", async () => {
+	it("loads configured models", async () => {
 		await withTempAgentDir(async (agentDir) => {
 			writeFileSync(
 				join(agentDir, AUTH_FILE_NAME),
@@ -279,7 +277,7 @@ describe("pi 0.82.0 compatibility", () => {
 				"utf8",
 			);
 			writeFileSync(
-				join(agentDir, "cliproxyapi.json"),
+				join(agentDir, "provimux.json"),
 				JSON.stringify({ baseUrl: "http://127.0.0.1:8317", apiKey: "stored-key" }),
 				"utf8",
 			);
@@ -302,8 +300,6 @@ describe("pi 0.82.0 compatibility", () => {
 				expect(commands.has("pause")).toBe(true);
 				expect(commands.has("continue")).toBe(true);
 				expect(commands.has("provimux-refresh")).toBe(true);
-				expect(commands.has("cliproxyapi-refresh")).toBe(false);
-				expect(commands.has("cliproxyapi")).toBe(false);
 				expect(pi.registerProvider).toHaveBeenCalledWith(
 					"provimux",
 					expect.objectContaining({
@@ -316,29 +312,29 @@ describe("pi 0.82.0 compatibility", () => {
 		});
 	});
 
-	it("registers and unregisters cliproxyapi-codex-responses with the pi-ai compat dispatcher", async () => {
+	it("registers and unregisters provimux-codex-responses with the pi-ai compat dispatcher", async () => {
 		await withTempAgentDir(async () => {
 			const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
 			const { pi, handlers } = createPiMock(commands);
 
 			await providerExtension(pi);
 
-			const provider = getApiProvider("cliproxyapi-codex-responses" as Api);
+			const provider = getApiProvider("provimux-codex-responses" as Api);
 			expect(provider).toBeDefined();
 
 			const testModel = {
 				id: "gpt-5.6-terra",
 				provider: "provimux",
-				api: "cliproxyapi-codex-responses" as Api,
+				api: "provimux-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			} as Model<Api>;
 
 			expect(() => streamSimple(testModel, { messages: [] })).not.toThrow(
-				/No API provider registered for api: cliproxyapi-codex-responses/,
+				/No API provider registered for api: provimux-codex-responses/,
 			);
 			expect(() => stream(testModel, { messages: [] })).not.toThrow(
-				/No API provider registered for api: cliproxyapi-codex-responses/,
+				/No API provider registered for api: provimux-codex-responses/,
 			);
 
 			const shutdownHandlers = handlers.get("session_shutdown") ?? [];
@@ -346,14 +342,14 @@ describe("pi 0.82.0 compatibility", () => {
 				handler({}, {} as ExtensionContext);
 			}
 
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeUndefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeUndefined();
 		});
 	});
 
 	it("keeps compat dispatcher isolated from foreground proactive compaction state", async () => {
 		await withTempAgentDir(async (agentDir) => {
 			writeFileSync(
-				join(agentDir, "cliproxyapi.json"),
+				join(agentDir, "provimux.json"),
 				JSON.stringify({ baseUrl: "http://127.0.0.1:8317", apiKey: "stored-key" }),
 				"utf8",
 			);
@@ -370,7 +366,7 @@ describe("pi 0.82.0 compatibility", () => {
 			const testModel = {
 				id: "gpt-5.6-terra",
 				provider: "provimux",
-				api: "cliproxyapi-codex-responses" as Api,
+				api: "provimux-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				contextWindow: 372000,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -411,7 +407,7 @@ describe("pi 0.82.0 compatibility", () => {
 
 			// Foreground provider's streamSimple produces the proactive compaction overflow stream
 			const foregroundConfig = (pi.registerProvider as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] as {
-				streamSimple: CliproxyCodexStreamSimple;
+				streamSimple: ProvimuxCodexStreamSimple;
 			};
 			const foregroundStream = foregroundConfig.streamSimple(testModel, { messages: [] }, { apiKey: "test-key" });
 			const foregroundMessage = await foregroundStream.result();
@@ -420,7 +416,7 @@ describe("pi 0.82.0 compatibility", () => {
 			for (const handler of handlers.get("session_shutdown") ?? []) {
 				handler({}, {} as ExtensionContext);
 			}
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeUndefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeUndefined();
 		});
 	});
 
@@ -430,13 +426,13 @@ describe("pi 0.82.0 compatibility", () => {
 			const mock1 = createPiMock(commands1);
 			await providerExtension(mock1.pi);
 
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeDefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeDefined();
 
 			const commands2 = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
 			const mock2 = createPiMock(commands2);
 			await providerExtension(mock2.pi);
 
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeDefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeDefined();
 
 			// Instance 1 shuts down, but Instance 2 is still active
 			for (const handler of mock1.handlers.get("session_shutdown") ?? []) {
@@ -444,18 +440,18 @@ describe("pi 0.82.0 compatibility", () => {
 			}
 
 			// Compat provider must still remain registered for Instance 2
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeDefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeDefined();
 
 			const testModel = {
 				id: "gpt-5.6-terra",
 				provider: "provimux",
-				api: "cliproxyapi-codex-responses" as Api,
+				api: "provimux-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			} as Model<Api>;
 
 			expect(() => streamSimple(testModel, { messages: [] })).not.toThrow(
-				/No API provider registered for api: cliproxyapi-codex-responses/,
+				/No API provider registered for api: provimux-codex-responses/,
 			);
 
 			// Instance 2 shuts down -> all instances are gone, provider is cleanly unregistered
@@ -463,7 +459,7 @@ describe("pi 0.82.0 compatibility", () => {
 				handler({}, {} as ExtensionContext);
 			}
 
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeUndefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeUndefined();
 		});
 	});
 
@@ -477,7 +473,7 @@ describe("pi 0.82.0 compatibility", () => {
 			const mock2 = createPiMock(commands2);
 			await providerExtension(mock2.pi);
 
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeDefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeDefined();
 
 			// Newer instance (Instance 2) shuts down first
 			for (const handler of mock2.handlers.get("session_shutdown") ?? []) {
@@ -485,18 +481,18 @@ describe("pi 0.82.0 compatibility", () => {
 			}
 
 			// Compat provider must still remain registered because Instance 1 is still active
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeDefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeDefined();
 
 			const testModel = {
 				id: "gpt-5.6-terra",
 				provider: "provimux",
-				api: "cliproxyapi-codex-responses" as Api,
+				api: "provimux-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			} as Model<Api>;
 
 			expect(() => streamSimple(testModel, { messages: [] })).not.toThrow(
-				/No API provider registered for api: cliproxyapi-codex-responses/,
+				/No API provider registered for api: provimux-codex-responses/,
 			);
 
 			// Instance 1 shuts down -> now all instances are gone, cleanly unregisters
@@ -504,7 +500,7 @@ describe("pi 0.82.0 compatibility", () => {
 				handler({}, {} as ExtensionContext);
 			}
 
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeUndefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeUndefined();
 		});
 	});
 
@@ -515,17 +511,17 @@ describe("pi 0.82.0 compatibility", () => {
 			await providerExtension(mock1.pi);
 
 			// Second instance with a custom provider ID
-			process.env.CLIPROXYAPI_PROVIDER_ID = "cliproxyapi-custom";
+			process.env.PROVIMUX_PROVIDER_ID = "acme-custom";
 			const commands2 = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
 			const mock2 = createPiMock(commands2);
 			await providerExtension(mock2.pi);
 
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeDefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeDefined();
 
 			const modelCustom = {
 				id: "gpt-5.6-terra",
-				provider: "cliproxyapi-custom",
-				api: "cliproxyapi-codex-responses" as Api,
+				provider: "acme-custom",
+				api: "provimux-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			} as Model<Api>;
@@ -533,7 +529,7 @@ describe("pi 0.82.0 compatibility", () => {
 			const modelDefault = {
 				id: "gpt-5.6-terra",
 				provider: "provimux",
-				api: "cliproxyapi-codex-responses" as Api,
+				api: "provimux-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			} as Model<Api>;
@@ -548,18 +544,18 @@ describe("pi 0.82.0 compatibility", () => {
 
 			// Custom provider calls now fail with provider-specific error
 			expect(() => streamSimple(modelCustom, { messages: [] }, { apiKey: "stored-key" })).toThrow(
-				/No active provider streamSimple handler registered for provider: cliproxyapi-custom/,
+				/No active provider streamSimple handler registered for provider: acme-custom/,
 			);
 
 			// Default provider still active
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeDefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeDefined();
 			expect(() => streamSimple(modelDefault, { messages: [] }, { apiKey: "stored-key" })).not.toThrow();
 
 			// Unknown provider throws immediately
 			const modelUnknown = {
 				id: "gpt-5.6-terra",
 				provider: "unknown-provider",
-				api: "cliproxyapi-codex-responses" as Api,
+				api: "provimux-codex-responses" as Api,
 				baseUrl: "http://127.0.0.1:8317",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			} as Model<Api>;
@@ -572,7 +568,7 @@ describe("pi 0.82.0 compatibility", () => {
 				handler({}, {} as ExtensionContext);
 			}
 
-			expect(getApiProvider("cliproxyapi-codex-responses" as Api)).toBeUndefined();
+			expect(getApiProvider("provimux-codex-responses" as Api)).toBeUndefined();
 		});
 	});
 
@@ -582,9 +578,9 @@ describe("pi 0.82.0 compatibility", () => {
 			const { pi, handlers } = createPiMock(commands);
 
 			const closeWebSocketSessionsMock = vi.fn();
-			const originalLoadCliproxyCodexStreams = codexStream.loadCliproxyCodexStreams;
-			const spy = vi.spyOn(codexStream, "loadCliproxyCodexStreams").mockImplementation(async (...args) => {
-				const real = await originalLoadCliproxyCodexStreams(...args);
+			const originalLoadProvimuxCodexStreams = codexStream.loadProvimuxCodexStreams;
+			const spy = vi.spyOn(codexStream, "loadProvimuxCodexStreams").mockImplementation(async (...args) => {
+				const real = await originalLoadProvimuxCodexStreams(...args);
 				return {
 					...real,
 					closeOpenAICodexWebSocketSessions: closeWebSocketSessionsMock,

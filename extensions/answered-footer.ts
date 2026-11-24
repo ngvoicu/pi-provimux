@@ -12,8 +12,8 @@
  * - Only an answer: a turn that completed (`stop`, or `toolUse`) with something in it. A failed, aborted or empty turn
  *   leaves the footer as it was, whatever its attempt said.
  * - The answer names a credential: `answered: <service> <sub|api>`, in the words of the model names (`sourceLabel`).
- * - It names nobody, from a proxy that names answers (its model list lists credentials, or it named an answer before
- *   in this session), or gives only the kind: `answered: unknown`.
+ * - It names nobody (no provider), from a proxy that names answers (its model list lists credentials, or it named an
+ *   answer before in this session): `answered: unknown`. Provimux names every answer it can from 8.1.1-pmx.1 on.
  * - It names nobody, from a proxy that names no answer (plain CLIProxyAPI): nothing.
  * - Another provider's model (selected, or answering a turn): nothing; a turn of this provider that ends after another
  *   provider's model was selected leaves it so.
@@ -34,10 +34,8 @@ const text = (value: unknown) => (typeof value === "string" && value.trim() ? va
  */
 export function answeredStatus(said: Statement, namesAnswers: boolean): string | undefined {
 	const kind = text(said.kind)?.toLowerCase();
-	if (kind !== "oauth" && kind !== "apikey") return namesAnswers ? "answered: unknown" : undefined;
 	const provider = text(said.provider);
-	// Only the kind (an older Provimux): which service is not said.
-	if (!provider) return "answered: unknown";
+	if ((kind !== "oauth" && kind !== "apikey") || !provider) return namesAnswers ? "answered: unknown" : undefined;
 	const host = text(said.host);
 	return `answered: ${answerLabel({ provider, kind, ...(host ? { host } : {}) })}`;
 }

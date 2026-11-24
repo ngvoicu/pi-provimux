@@ -21,13 +21,13 @@ import {
 	saveModelsCache,
 } from "../extensions/lib.ts";
 
-const CLIPROXYAPI_ENV_NAMES = [
-	"CLIPROXYAPI_API_KEY",
-	"CLIPROXYAPI_BASE_URL",
-	"CLIPROXYAPI_FAST",
-	"CLIPROXYAPI_PROVIDER_ID",
-	"CLIPROXYAPI_PROVIDER_NAME",
-	"CLIPROXYAPI_CLAUDE_MESSAGES",
+const PROVIMUX_ENV_NAMES = [
+	"PROVIMUX_API_KEY",
+	"PROVIMUX_BASE_URL",
+	"PROVIMUX_FAST",
+	"PROVIMUX_PROVIDER_ID",
+	"PROVIMUX_PROVIDER_NAME",
+	"PROVIMUX_CLAUDE_MESSAGES",
 ] as const;
 
 function createModel(id: string): PiProviderModel {
@@ -67,7 +67,7 @@ function createMappedModels(
 const tempPaths: string[] = [];
 
 function tempAgentDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-cache-test-"));
+	const dir = mkdtempSync(join(tmpdir(), "pi-provimux-cache-test-"));
 	tempPaths.push(dir);
 	return dir;
 }
@@ -99,9 +99,9 @@ async function waitForAsyncRefresh(): Promise<void> {
 async function withTempAgentDir(run: (agentDir: string) => Promise<void>): Promise<void> {
 	const agentDir = tempAgentDir();
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const previousEnv = new Map(CLIPROXYAPI_ENV_NAMES.map((name) => [name, process.env[name]]));
+	const previousEnv = new Map(PROVIMUX_ENV_NAMES.map((name) => [name, process.env[name]]));
 	process.env.PI_CODING_AGENT_DIR = agentDir;
-	for (const name of CLIPROXYAPI_ENV_NAMES) delete process.env[name];
+	for (const name of PROVIMUX_ENV_NAMES) delete process.env[name];
 
 	try {
 		await run(agentDir);
@@ -1186,7 +1186,7 @@ describe("provider startup cache behavior", () => {
 				JSON.stringify({ defaultModel: "provimux/gemini-3.8-flash-high" }),
 				"utf8",
 			);
-			process.env.CLIPROXYAPI_FAST = "true";
+			process.env.PROVIMUX_FAST = "true";
 
 			// Existing disk cache was generated with fastMode: false
 			const cached = createMappedModels({
@@ -1234,7 +1234,7 @@ describe("provider startup cache behavior", () => {
 				expect(restored).toBeDefined();
 				expect(restored?.stale).toBe(false);
 			} finally {
-				delete process.env.CLIPROXYAPI_FAST;
+				delete process.env.PROVIMUX_FAST;
 				vi.useRealTimers();
 				fetchMock.mockRestore();
 			}
@@ -1254,11 +1254,10 @@ describe("/provimux-refresh command", () => {
 		});
 	});
 
-	it("is the only refresh command: /cliproxyapi-refresh, the original extension's name, is gone", async () => {
+	it("is the only refresh command: /provimux-refresh", async () => {
 		await withTempAgentDir(async () => {
 			const { pi, commands } = createPiMock();
 			await providerExtension(pi);
-			expect(commands.has("cliproxyapi-refresh")).toBe(false);
 			expect([...commands.keys()].filter((name) => name.endsWith("-refresh"))).toEqual(["provimux-refresh"]);
 			const notify = vi.fn();
 			const ctx = { ui: { notify } } as unknown as ExtensionCommandContext;
@@ -1370,7 +1369,7 @@ describe("/provimux-refresh command", () => {
 		vi.useFakeTimers();
 		await withTempAgentDir(async (agentDir) => {
 			// Counts model-list requests; the default Claude Messages mode would add the owner list.
-			process.env.CLIPROXYAPI_CLAUDE_MESSAGES = "off";
+			process.env.PROVIMUX_CLAUDE_MESSAGES = "off";
 			const cached = createMappedModels({
 				models: [createModel("gemini-3.8-flash-high"), createModel("gpt-4o")],
 			});

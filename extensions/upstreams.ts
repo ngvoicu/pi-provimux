@@ -16,8 +16,8 @@
  *   answer when those fail.
  * - `model-upstreams:answered`: `{ provider, model, upstreams }`, once per answer, while the request is out. Over HTTP
  *   and SSE only the response headers (`X-CPA-AUTH-*`) count; over the Codex WebSocket, which has no headers per turn,
- *   only the `cpa_auth_*` fields the proxy puts on response.created. When the answer gives the provider: the credential
- *   it names, from the response alone; the kind alone: a guess from the credential list. An answer that names nobody,
+ *   only the `cpa_auth_*` fields the proxy puts on response.created. When the answer gives the kind and the provider
+ *   (Provimux 8.1.1-pmx.1 or newer): the credential it names, from the response alone. An answer that names nobody,
  *   from a proxy that names answers (one that lists its credentials, or named an answer before): `upstreams: []`,
  *   answered by something the proxy would not name. A proxy that names no answer (plain CLIProxyAPI): nothing.
  *
@@ -224,17 +224,6 @@ export function statedUpstream(modelId: string, stated: StatedCredential, catalo
 	if (known) return known;
 	const provider = stated.kind === "apikey" && account.host ? account.host : stated.provider;
 	return { provider, subscription: stated.kind !== "apikey" };
-}
-
-/** What answered a request to a model, from the kind of credential CLIProxyAPI names; undefined when not known. */
-export function answeredUpstreams(
-	modelId: string,
-	kind: string,
-	listed: ModelAccounts,
-	catalog?: Catalog,
-): Upstream[] | undefined {
-	const upstreams = upstreamsOf(likelyAccounts(own(listed.accounts, modelId) ?? [], kind), modelId, catalog);
-	return upstreams.length > 0 ? upstreams : undefined;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -626,21 +615,16 @@ export class UpstreamsAnnouncer {
 		const provider = text(providerValue);
 		const host = text(hostValue);
 		let upstreams: Upstream[] | undefined;
-		if (kind !== "oauth" && kind !== "apikey") {
+		if ((kind !== "oauth" && kind !== "apikey") || !provider) {
 			// Named nobody: from a proxy that names answers, one it would not name (plugin code took part); said as
 			// `[]`, so that nobody keeps the last credential's values. From plain CLIProxyAPI: nothing, as ever.
 			if (!this.wanted || !this.namesAnswers()) return;
 			upstreams = [];
-		} else if (provider) {
+		} else {
 			// Named: from the response alone, without waiting for the credential list; only once an extension asked.
 			this.namedBefore = true;
 			if (!this.wanted) return;
 			upstreams = [statedUpstream(modelId, { provider, kind, ...(host ? { host } : {}) }, this.catalog)];
-		} else {
-			// Kind only (an older Provimux): a guess from the list, once it came.
-			this.namedBefore = true;
-			if (!this.listed) return;
-			upstreams = answeredUpstreams(modelId, kind, this.listed, this.catalog) ?? [];
 		}
 		if (upstreams) this.emit(ANSWERED_EVENT, { provider: this.providerId, model: modelId, upstreams });
 	}

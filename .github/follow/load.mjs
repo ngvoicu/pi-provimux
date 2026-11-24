@@ -10,7 +10,7 @@
 //                               registers must load with no error. A file the tarball lacks fails here, whatever
 //                               the source says or how it names the file.
 // Exit 0 loaded, 4 the package does not load, 1 the check itself could not run (pi is not installed).
-// The consumer's HOME and pi's agent folder are new and empty, and the CLIPROXYAPI_* variables are cleared: the
+// The consumer's HOME and pi's agent folder are new and empty, and the PROVIMUX_* variables are cleared: the
 // extension loads unconfigured.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -76,7 +76,7 @@ if (!existsSync(join(consumer, "node_modules", PI))) fail(`${PI} is not in ${nod
 
 process.env.HOME = home;
 process.env.PI_CODING_AGENT_DIR = agent;
-for (const k of Object.keys(process.env)) if (k.startsWith("CLIPROXYAPI")) delete process.env[k];
+for (const k of Object.keys(process.env)) if (k.startsWith("PROVIMUX_")) delete process.env[k];
 
 // pi's loader, resolved from the consumer as an installed package would resolve it.
 const entry = join(consumer, "load-pi.mjs");

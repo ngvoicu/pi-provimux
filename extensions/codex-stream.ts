@@ -5,7 +5,7 @@
  * - extractAccountId never throws; plain API keys are allowed
  * - chatgpt-account-id header is omitted when account id is unavailable
  * - provider id(s) are added to CODEX_TOOL_CALL_PROVIDERS for tool-call id handling
- * - model/message api id uses cliproxyapi-codex-responses
+ * - model/message api id uses provimux-codex-responses
  * - a GPT request's base prompt is its first developer input item, also when a hook set `instructions`
  * - configuration_update items are moved to the documented mid-conversation placement
  *
@@ -25,9 +25,9 @@ import { getPackageDir } from "@earendil-works/pi-coding-agent";
 import type { FastServiceTier } from "./fast.ts";
 import { withSupportedEfforts, withSupportedLevel } from "./thinking-levels.ts";
 
-export const CLIPROXYAPI_CODEX_API = "cliproxyapi-codex-responses" as const;
+export const PROVIMUX_CODEX_API = "provimux-codex-responses" as const;
 
-export type CliproxyCodexStreamSimple = (
+export type ProvimuxCodexStreamSimple = (
 	model: Model<Api>,
 	context: Context,
 	options?: SimpleStreamOptions,
@@ -35,16 +35,16 @@ export type CliproxyCodexStreamSimple = (
 
 export type CloseCodexWebSocketSessions = (sessionId?: string) => void;
 
-export type CliproxyCodexStreams = {
-	streamSimple: CliproxyCodexStreamSimple;
-	stream: CliproxyCodexStreamSimple;
-	rawStreamSimple: CliproxyCodexStreamSimple;
-	rawStream: CliproxyCodexStreamSimple;
-	api: typeof CLIPROXYAPI_CODEX_API;
+export type ProvimuxCodexStreams = {
+	streamSimple: ProvimuxCodexStreamSimple;
+	stream: ProvimuxCodexStreamSimple;
+	rawStreamSimple: ProvimuxCodexStreamSimple;
+	rawStream: ProvimuxCodexStreamSimple;
+	api: typeof PROVIMUX_CODEX_API;
 	closeOpenAICodexWebSocketSessions: CloseCodexWebSocketSessions;
 };
 
-export interface CliproxyCodexStreamOptions {
+export interface ProvimuxCodexStreamOptions {
 	resolveServiceTier?: (model: Model<Api>) => FastServiceTier | undefined;
 }
 
@@ -135,9 +135,9 @@ export async function applyServiceTierPayloadHook(
 }
 
 export function wrapStreamForServiceTier(
-	stream: CliproxyCodexStreamSimple,
+	stream: ProvimuxCodexStreamSimple,
 	resolveServiceTier?: (model: Model<Api>, options?: SimpleStreamOptions) => FastServiceTier | undefined,
-): CliproxyCodexStreamSimple {
+): ProvimuxCodexStreamSimple {
 	return (model, context, streamOptions) => {
 		const tier = resolveServiceTier?.(model, streamOptions);
 		if (!tier) return stream(model, context, streamOptions);
@@ -413,37 +413,16 @@ const CODEX_MODULE_RELATIVE = join(
 	"openai-codex-responses.js",
 );
 
-const CODEX_MODULE_FLAT_RELATIVE = join(
-	"node_modules",
-	"@earendil-works",
-	"pi-ai",
-	"dist",
-	"openai-codex-responses.js",
-);
-
-const CODEX_DIST_SUBPATHS = [
-	join("dist", "api", "openai-codex-responses.js"),
-	join("dist", "openai-codex-responses.js"),
-] as const;
+const CODEX_DIST_SUBPATH = join("dist", "api", "openai-codex-responses.js");
 
 /**
  * Well-known filesystem locations for openai-codex-responses.js on bundled hosts.
  *
- * @param homeDirectory - User home used as the root for `.omp` and `.pi` plugin trees
+ * @param homeDirectory - User home used as the root for the `.pi` and per-user global package trees
  * @returns Candidate absolute paths in probe order
  */
 export function wellKnownCodexModuleCandidates(homeDirectory: string): string[] {
 	return [
-		join(homeDirectory, ".omp", "plugins", CODEX_MODULE_RELATIVE),
-		join(
-			homeDirectory,
-			".omp",
-			"plugins",
-			"node_modules",
-			"@earendil-works",
-			"pi-coding-agent",
-			CODEX_MODULE_RELATIVE,
-		),
 		join(homeDirectory, ".pi", "agent", "npm", CODEX_MODULE_RELATIVE),
 		join(
 			homeDirectory,
@@ -454,26 +433,6 @@ export function wellKnownCodexModuleCandidates(homeDirectory: string): string[] 
 			"@earendil-works",
 			"pi-coding-agent",
 			CODEX_MODULE_RELATIVE,
-		),
-		join(homeDirectory, ".pi", "runtime", CODEX_MODULE_RELATIVE),
-		join(homeDirectory, ".pi", "runtime", CODEX_MODULE_FLAT_RELATIVE),
-		join(
-			homeDirectory,
-			".pi",
-			"runtime",
-			"node_modules",
-			"@earendil-works",
-			"pi-coding-agent",
-			CODEX_MODULE_RELATIVE,
-		),
-		join(
-			homeDirectory,
-			".pi",
-			"runtime",
-			"node_modules",
-			"@earendil-works",
-			"pi-coding-agent",
-			CODEX_MODULE_FLAT_RELATIVE,
 		),
 		join(homeDirectory, ".bun", "install", "global", CODEX_MODULE_RELATIVE),
 		join(
@@ -594,7 +553,7 @@ function patchWebSocketTransport(source: string): string {
 	return source
 		.replace(
 			transportDefinition,
-			'const transport = (process.env.CLIPROXYAPI_TRANSPORT || options?.transport || "auto");\n            options = options ? { ...options, transport } : { transport };',
+			'const transport = (process.env.PROVIMUX_TRANSPORT || options?.transport || "auto");\n            options = options ? { ...options, transport } : { transport };',
 		)
 		.replace(
 			retryVariables,
@@ -632,7 +591,7 @@ function patchWebSocketTransport(source: string): string {
 		)
 		.replace(
 			idleTtlDefinition,
-			'const SESSION_WEBSOCKET_CACHE_TTL_MS = (() => { const raw = Number.parseInt(process.env.CLIPROXYAPI_WS_IDLE_TTL_MS || "", 10); return Number.isFinite(raw) && raw > 0 && raw <= 2147483647 ? raw : 30 * 60 * 1000; })();',
+			'const SESSION_WEBSOCKET_CACHE_TTL_MS = (() => { const raw = Number.parseInt(process.env.PROVIMUX_WS_IDLE_TTL_MS || "", 10); return Number.isFinite(raw) && raw > 0 && raw <= 2147483647 ? raw : 30 * 60 * 1000; })();',
 		);
 }
 
@@ -667,7 +626,7 @@ export function patchCodexSource(source: string, providerIds: string[]): string 
 	);
 
 	// Keep assistant message api metadata aligned with the registered custom api id.
-	src = src.replaceAll(`api: "openai-codex-responses"`, `api: ${JSON.stringify(CLIPROXYAPI_CODEX_API)}`);
+	src = src.replaceAll(`api: "openai-codex-responses"`, `api: ${JSON.stringify(PROVIMUX_CODEX_API)}`);
 
 	// CLIProxyAPI prefers a persistent WebSocket transport. Reconnect before the
 	// response starts, and gracefully fall back to SSE if retries are exhausted.
@@ -693,23 +652,21 @@ export function resolveCodexModuleFromNodeEntry(entryPath: string): string | und
 			const real = realpathSync(current);
 			const require = createRequire(pathToFileURL(real));
 			for (const nodeModulesDir of require.resolve.paths("@earendil-works/pi-ai") ?? []) {
-				for (const distSubpath of CODEX_DIST_SUBPATHS) {
-					const directCandidate = join(nodeModulesDir, "@earendil-works", "pi-ai", distSubpath);
-					if (existsSync(directCandidate)) {
-						return directCandidate;
-					}
-					const nestedCandidate = join(
-						nodeModulesDir,
-						"@earendil-works",
-						"pi-coding-agent",
-						"node_modules",
-						"@earendil-works",
-						"pi-ai",
-						distSubpath,
-					);
-					if (existsSync(nestedCandidate)) {
-						return nestedCandidate;
-					}
+				const directCandidate = join(nodeModulesDir, "@earendil-works", "pi-ai", CODEX_DIST_SUBPATH);
+				if (existsSync(directCandidate)) {
+					return directCandidate;
+				}
+				const nestedCandidate = join(
+					nodeModulesDir,
+					"@earendil-works",
+					"pi-coding-agent",
+					"node_modules",
+					"@earendil-works",
+					"pi-ai",
+					CODEX_DIST_SUBPATH,
+				);
+				if (existsSync(nestedCandidate)) {
+					return nestedCandidate;
 				}
 			}
 
@@ -781,9 +738,7 @@ function resolveManagedInstallCandidates(homeDirectory: string): string[] {
 			const releaseDir = join(installDir, "releases", currentVersion);
 			candidates.push(
 				join(releaseDir, CODEX_MODULE_RELATIVE),
-				join(releaseDir, CODEX_MODULE_FLAT_RELATIVE),
 				join(releaseDir, "node_modules", "@earendil-works", "pi-coding-agent", CODEX_MODULE_RELATIVE),
-				join(releaseDir, "node_modules", "@earendil-works", "pi-coding-agent", CODEX_MODULE_FLAT_RELATIVE),
 			);
 		} catch {
 			// Ignore unreadable managed install state.
@@ -792,19 +747,10 @@ function resolveManagedInstallCandidates(homeDirectory: string): string[] {
 	return candidates;
 }
 
-function expandCodexCandidateVariants(candidate: string): string[] {
-	const apiSuffix = join("dist", "api", "openai-codex-responses.js");
-	if (candidate.endsWith(apiSuffix)) {
-		const flatCandidate = `${candidate.slice(0, -apiSuffix.length)}${join("dist", "openai-codex-responses.js")}`;
-		return [candidate, flatCandidate];
-	}
-	return [candidate];
-}
-
 export function computePatchedModuleCachePath(
 	originalPath: string,
 	patchedSource: string,
-	cacheDir: string = join(tmpdir(), "pi-cliproxyapi-provider"),
+	cacheDir: string = join(tmpdir(), "pi-provimux"),
 ): string {
 	const hash = createHash("sha1")
 		.update("resolved-imports-v2\n")
@@ -850,7 +796,6 @@ export function resolveOriginalCodexModulePath(options: ResolveOriginalCodexModu
 	// pi bundled Node CLI exposes pi-ai as a virtual module to
 	// extensions. Resolve its physical nested dependency from the CLI entry first so
 	// the extension shares the exact same module instances (e.g. session resources) with the host.
-	// Oh My Pi Mach-O hosts do not have a Node entry at argv[1]; skip quietly.
 	if (nodeEntry) {
 		const bundledHostModule = resolveCodexModuleFromNodeEntry(nodeEntry);
 		if (bundledHostModule && existsSync(bundledHostModule)) {
@@ -876,10 +821,7 @@ export function resolveOriginalCodexModulePath(options: ResolveOriginalCodexModu
 
 	if (!("nodeEntry" in options) && homeDirectory) {
 		const wellKnownEntries = [
-			join(homeDirectory, ".pi", "bin", "pi"),
 			join(homeDirectory, ".pi", "agent", "bin", "pi"),
-			join(homeDirectory, ".pi", "runtime", "bin", "pi"),
-			join(homeDirectory, ".pi", "runtime", "node_modules", ".bin", "pi"),
 			join(homeDirectory, ".bun", "bin", "pi"),
 			join(homeDirectory, ".local", "bin", "pi"),
 			join(homeDirectory, ".npm-global", "bin", "pi"),
@@ -906,14 +848,11 @@ export function resolveOriginalCodexModulePath(options: ResolveOriginalCodexModu
 	try {
 		const main = fileURLToPath(resolveSpecifier("@earendil-works/pi-ai"));
 		const distDir = dirname(main);
-		const directCandidates = [
-			join(distDir, "api/openai-codex-responses.js"),
-			join(distDir, "openai-codex-responses.js"),
-		];
-		candidates.push(...directCandidates);
-		// Pi >=1.5 maps @earendil-works/pi-ai to pi-coding-agent's extension view
+		const directCandidate = join(distDir, "api", "openai-codex-responses.js");
+		candidates.push(directCandidate);
+		// pi maps @earendil-works/pi-ai to pi-coding-agent's extension view
 		// rather than pi-ai/dist. Resolve the physical pi-ai module from that host entry.
-		if (!directCandidates.some((candidate) => existsSync(candidate))) {
+		if (!existsSync(directCandidate)) {
 			const hostModule = resolveCodexModuleFromNodeEntry(main);
 			if (hostModule) {
 				candidates.push(hostModule);
@@ -940,21 +879,19 @@ export function resolveOriginalCodexModulePath(options: ResolveOriginalCodexModu
 		candidates.push(...wellKnownCodexModuleCandidates(homeDirectory));
 	}
 
-	for (const candidate of candidates) {
-		for (const path of expandCodexCandidateVariants(candidate)) {
-			if (path && existsSync(path)) {
-				return { path, dir: dirname(path) };
-			}
+	for (const path of candidates) {
+		if (path && existsSync(path)) {
+			return { path, dir: dirname(path) };
 		}
 	}
 
 	throw new Error(`Cannot resolve openai-codex-responses.js (tried: ${candidates.join(", ") || "none"})`);
 }
 
-export async function loadCliproxyCodexStreams(
-	providerIds: string[] = ["cliproxyapi"],
-	options: CliproxyCodexStreamOptions = {},
-): Promise<CliproxyCodexStreams> {
+export async function loadProvimuxCodexStreams(
+	providerIds: string[] = ["provimux"],
+	options: ProvimuxCodexStreamOptions = {},
+): Promise<ProvimuxCodexStreams> {
 	const { path: originalPath } = resolveOriginalCodexModulePath();
 	const originalSource = readFileSync(originalPath, "utf8");
 
@@ -968,8 +905,8 @@ export async function loadCliproxyCodexStreams(
 	}
 
 	const mod = (await import(pathToFileURL(outPath).href)) as {
-		streamSimple: CliproxyCodexStreamSimple;
-		stream: CliproxyCodexStreamSimple;
+		streamSimple: ProvimuxCodexStreamSimple;
+		stream: ProvimuxCodexStreamSimple;
 		closeOpenAICodexWebSocketSessions: CloseCodexWebSocketSessions;
 	};
 
@@ -1007,11 +944,11 @@ export async function loadCliproxyCodexStreams(
 	});
 
 	// A level the model lacks never reaches the proxy, which would pick a variant of its own: it is moved first.
-	const adaptedStreamSimple: CliproxyCodexStreamSimple = (model, context, streamOptions) => {
+	const adaptedStreamSimple: ProvimuxCodexStreamSimple = (model, context, streamOptions) => {
 		const levelled = withSupportedLevel(model, streamOptions);
 		return mod.streamSimple(model, ensureTranscriptContext(context), adaptOptions(model, levelled));
 	};
-	const adaptedStream: CliproxyCodexStreamSimple = (model, context, streamOptions) => {
+	const adaptedStream: ProvimuxCodexStreamSimple = (model, context, streamOptions) => {
 		const levelled = withSupportedLevel(model, streamOptions);
 		return mod.stream(model, ensureTranscriptContext(context), adaptOptions(model, levelled));
 	};
@@ -1020,7 +957,7 @@ export async function loadCliproxyCodexStreams(
 	const stream = wrapStreamForServiceTier(adaptedStream, options.resolveServiceTier);
 
 	return {
-		api: CLIPROXYAPI_CODEX_API,
+		api: PROVIMUX_CODEX_API,
 		streamSimple,
 		stream,
 		rawStreamSimple: adaptedStreamSimple,

@@ -23,7 +23,7 @@ function createCommandHarness(
 		}),
 	} as unknown as ExtensionAPI;
 
-	registerFastCommands({ pi, agentDir, providerId: "cliproxyapi", fastMode, onStatusChange, onModeChange });
+	registerFastCommands({ pi, agentDir, providerId: "provimux", fastMode, onStatusChange, onModeChange });
 
 	const ctx = {
 		model: currentModel,
@@ -44,13 +44,13 @@ function createCommandHarness(
 
 const supportedModel = {
 	id: "gpt-5.6-sol",
-	provider: "cliproxyapi",
+	provider: "provimux",
 } as Model<Api>;
 
 const tempPaths: string[] = [];
 
 function tempAgentDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-fast-command-test-"));
+	const dir = mkdtempSync(join(tmpdir(), "pi-provimux-fast-command-test-"));
 	tempPaths.push(dir);
 	return dir;
 }
@@ -114,9 +114,9 @@ describe("speed commands", () => {
 
 		await harness.command(name).handler("", harness.ctx);
 
-		const previousFastEnv = process.env.CLIPROXYAPI_FAST;
+		const previousFastEnv = process.env.PROVIMUX_FAST;
 		try {
-			delete process.env.CLIPROXYAPI_FAST;
+			delete process.env.PROVIMUX_FAST;
 			const restoredPreference = resolveFastDefault(agentDir);
 			expect(restoredPreference).toBe(preference);
 			const restartedMode = new FastModeController(restoredPreference);
@@ -125,9 +125,9 @@ describe("speed commands", () => {
 			expect(restartedMode.getServiceTierFor("unsupported-model")).toBeUndefined();
 		} finally {
 			if (previousFastEnv === undefined) {
-				delete process.env.CLIPROXYAPI_FAST;
+				delete process.env.PROVIMUX_FAST;
 			} else {
-				process.env.CLIPROXYAPI_FAST = previousFastEnv;
+				process.env.PROVIMUX_FAST = previousFastEnv;
 			}
 		}
 	});
@@ -264,7 +264,7 @@ describe("speed commands", () => {
 		const config = { baseUrl: "http://localhost:8317", pause: true };
 		saveConfigFile(agentDir, config);
 
-		vi.stubEnv("CLIPROXYAPI_FAST", "on");
+		vi.stubEnv("PROVIMUX_FAST", "on");
 		try {
 			const fastMode = new FastModeController(resolveFastDefault(agentDir));
 			fastMode.setSupportedModelIds([supportedModel.id]);
@@ -278,7 +278,7 @@ describe("speed commands", () => {
 			expect(harness.notify).toHaveBeenCalledWith("Failed to refresh model pricing: refresh failed", "warning");
 			expect(fastMode.getServiceTierFor(supportedModel.id)).toBe("priority");
 			expect(loadConfigFile(agentDir)).toStrictEqual(config);
-			vi.stubEnv("CLIPROXYAPI_FAST", undefined);
+			vi.stubEnv("PROVIMUX_FAST", undefined);
 			expect(resolveFastDefault(agentDir)).toBe(false);
 		} finally {
 			vi.unstubAllEnvs();

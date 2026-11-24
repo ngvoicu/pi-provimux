@@ -455,7 +455,7 @@ interface StartOptions {
 	seedCache?: boolean;
 	/** Called once the cache is seeded, before pi starts (and its background refresh asks for the credentials). */
 	afterSeed?: () => void;
-	/** The footer switch in cliproxyapi.json; absent: not set. */
+	/** The footer switch in provimux.json; absent: not set. */
 	answered?: boolean;
 }
 
@@ -482,10 +482,9 @@ async function startPi(options: StartOptions = {}): Promise<Harness> {
 	mkdirSync(cwd, { recursive: true });
 	setEnv("PI_CODING_AGENT_DIR", agentDir);
 	setEnv("PI_OFFLINE", "1");
-	for (const name of ["CLIPROXYAPI_API_KEY", "CLIPROXYAPI_BASE_URL", "CLIPROXYAPI_PROVIDER_ID"])
-		setEnv(name, undefined);
+	for (const name of ["PROVIMUX_API_KEY", "PROVIMUX_BASE_URL", "PROVIMUX_PROVIDER_ID"]) setEnv(name, undefined);
 	writeFileSync(
-		join(agentDir, "cliproxyapi.json"),
+		join(agentDir, "provimux.json"),
 		JSON.stringify({
 			baseUrl,
 			apiKey: "sk-fixture",
@@ -1069,7 +1068,7 @@ describe("the footer says which route answered the session's turn", { timeout: 2
 		});
 	});
 
-	it('"answered": false in cliproxyapi.json turns it off; the routes are still told', async () => {
+	it('"answered": false in provimux.json turns it off; the routes are still told', async () => {
 		const pi = await startPi({ answered: false });
 		try {
 			await turn(pi, CLAUDE, "off", { headers: login("claude") });

@@ -12,11 +12,11 @@ const TRANSIENT_STREAM_ERRORS = [
 /** The errors pi's own isRetryableAssistantError retries: the extension leaves their message as pi has it. */
 const RETRIED_BY_PI = new Set([TRANSIENT_STREAM_ERRORS[1]]);
 
-function assistantError(errorMessage: string, provider = "cliproxyapi"): AssistantMessage {
+function assistantError(errorMessage: string, provider = "provimux"): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [],
-		api: "cliproxyapi-codex-responses",
+		api: "provimux-codex-responses",
 		provider,
 		model: "gpt-5.6-sol",
 		usage: {
@@ -65,7 +65,7 @@ describe("transient network error normalization", () => {
 				if (event === "message_end") handler = candidate;
 			},
 		} as unknown as ExtensionAPI;
-		registerTransientNetworkErrorRetry(pi, "cliproxyapi");
+		registerTransientNetworkErrorRetry(pi, "provimux");
 		if (!handler) throw new Error("message_end handler was not registered");
 
 		const matching = assistantError(TRANSIENT_STREAM_ERRORS[0]);
