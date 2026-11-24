@@ -121,8 +121,8 @@ const sameModel = (a: ModelRef | undefined, b: ModelRef | undefined) =>
 	!!a && !!b && a.provider === b.provider && a.id === b.id;
 
 /**
- * Without pi's resolver (a pi that does not export it): the full text first, as a model id or `provider/id`; only when
- * that is no model and the text without a `:level` suffix is, the suffix is a level.
+ * Without pi's resolver (no model registry, or the resolver failed): the full text first, as a model id or
+ * `provider/id`; only when that is no model and the text without a `:level` suffix is, the suffix is a level.
  */
 export function literalModelReading(models: readonly ModelRef[]): ModelReading {
 	const find = (text: string, provider: string | undefined) => {
@@ -152,18 +152,18 @@ export function literalModelReading(models: readonly ModelRef[]): ModelReading {
 /** The session's models, as `ctx.modelRegistry` gives them. */
 export interface RegistryLike {
 	getAll(): readonly ModelRef[];
-	getAvailable?(): readonly ModelRef[] | Promise<readonly ModelRef[]>;
-	hasConfiguredAuth?(model: ModelRef): boolean;
+	getAvailable(): readonly ModelRef[] | Promise<readonly ModelRef[]>;
+	hasConfiguredAuth(model: ModelRef): boolean;
 }
 
-/** pi's own resolver functions (`resolveCliModel`, `resolveModelScopeWithDiagnostics`), when this pi exports them. */
+/** pi's own resolver functions (`resolveCliModel`, `resolveModelScopeWithDiagnostics`). */
 export interface PiResolvers {
-	resolveCliModel?: (options: { cliProvider?: string; cliModel?: string; modelRuntime: never }) => {
+	resolveCliModel: (options: { cliProvider?: string; cliModel?: string; modelRuntime: never }) => {
 		model?: ModelRef;
 		thinkingLevel?: string;
 		error?: string;
 	};
-	resolveModelScopeWithDiagnostics?: (
+	resolveModelScopeWithDiagnostics: (
 		patterns: string[],
 		modelRuntime: never,
 	) => Promise<{ scopedModels: Array<{ model: ModelRef; thinkingLevel?: string }> }>;
@@ -174,23 +174,20 @@ export interface PiResolvers {
  * a `:level` suffix taken only when the full text is no model), else `literalModelReading`.
  */
 export function piModelReading(registry: RegistryLike, resolvers: PiResolvers): ModelReading {
-	const literal = literalModelReading(registry.getAll());
 	const models = () => [...registry.getAll()];
 	const hasConfiguredAuth = (provider: string) => {
 		const model = registry.getAll().find((m) => m.provider === provider);
-		return !!model && (registry.hasConfiguredAuth?.(model) ?? true);
+		return !!model && registry.hasConfiguredAuth(model);
 	};
 	const { resolveCliModel, resolveModelScopeWithDiagnostics } = resolvers;
 	return {
 		model: (text, provider) => {
-			if (typeof resolveCliModel !== "function") return literal.model(text, provider);
 			const runtime = { getModels: models, hasConfiguredAuth };
 			const resolved = resolveCliModel({ cliProvider: provider, cliModel: text, modelRuntime: runtime as never });
 			return resolved.model ? { model: resolved.model, thinkingLevel: resolved.thinkingLevel } : undefined;
 		},
 		scope: async (patterns) => {
-			if (typeof resolveModelScopeWithDiagnostics !== "function") return literal.scope(patterns);
-			const available = async () => [...((await registry.getAvailable?.()) ?? registry.getAll())];
+			const available = async () => [...(await registry.getAvailable())];
 			const runtime = { getAvailable: available };
 			return (await resolveModelScopeWithDiagnostics(patterns, runtime as never)).scopedModels;
 		},
@@ -251,7 +248,7 @@ export interface InputGuardContext {
 	mode?: string;
 	model?: LevelModel;
 	modelRegistry?: RegistryLike;
-	sessionManager?: { getBranch?(): ReadonlyArray<{ type?: string }> };
+	sessionManager?: { getBranch(): ReadonlyArray<{ type?: string }> };
 }
 
 interface InputGuardApi {
@@ -262,17 +259,13 @@ interface InputGuardApi {
 /** Entries that make a session one pi continues (`buildSessionContext` has messages). */
 const CONTEXT_ENTRIES = new Set(["message", "custom_message", "compaction", "branch_summary"]);
 
-/** pi's own resolvers, from the pi that loaded the extension; none on a pi that does not export them. */
+/** pi's own resolvers, from the pi that loaded the extension. */
 async function loadPiResolvers(): Promise<PiResolvers> {
-	try {
-		const module = (await import("@earendil-works/pi-coding-agent")) as unknown as PiResolvers;
-		return {
-			resolveCliModel: module.resolveCliModel,
-			resolveModelScopeWithDiagnostics: module.resolveModelScopeWithDiagnostics,
-		};
-	} catch {
-		return {};
-	}
+	const module = (await import("@earendil-works/pi-coding-agent")) as unknown as PiResolvers;
+	return {
+		resolveCliModel: module.resolveCliModel,
+		resolveModelScopeWithDiagnostics: module.resolveModelScopeWithDiagnostics,
+	};
 }
 
 /**
@@ -294,7 +287,7 @@ export function registerThinkingLevelGuard(
 		if (start) return;
 		let continued = false;
 		try {
-			continued = !!ctx.sessionManager?.getBranch?.().some((entry) => CONTEXT_ENTRIES.has(entry.type ?? ""));
+			continued = !!ctx.sessionManager?.getBranch().some((entry) => CONTEXT_ENTRIES.has(entry.type ?? ""));
 		} catch {
 			// No branch to read: a new session.
 		}

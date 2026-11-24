@@ -12,7 +12,7 @@
  * port. The owner's proxy (8317) and its neighbour (8787) are refused at the socket.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -619,8 +619,8 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		const rows = listRows(list);
 		expect(rows, said(list)).toHaveLength(MODELS.length);
 		expect(rows.map((row) => row.split(/\s+/).slice(0, 2).join("/")).sort()).toEqual(all(provider));
-		const other = provider === "provimux" ? "cliproxyapi" : "provimux";
-		expect(list.stdout).not.toMatch(new RegExp(`^${other}\\s`, "m"));
+		for (const other of ["provimux", "acme"].filter((id) => id !== provider))
+			expect(list.stdout).not.toMatch(new RegExp(`^${other}\\s`, "m"));
 
 		for (const start of ["cold", "warm"]) {
 			const rpc = await pi(["--mode", "rpc", "--no-session"], { env, rpc: [{ type: "get_available_models" }] });
@@ -650,25 +650,18 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		expect(picked.code, said(picked)).toBe(0);
 		expect(picked.requests.map((r) => r.key)).toEqual([FILE_KEY]);
 
-		// The old name is gone: refused, nothing sent.
-		const old = await pi(["--no-session", "--model", `cliproxyapi/${GPT}`, "-p", "say hi"]);
-		expect(old.code, said(old)).not.toBe(0);
-		expect(old.stderr).toContain("not found");
-		expect(old.requests).toEqual([]);
-		captures.push({ name: "owner: --model cliproxyapi/<id>", text: said(old) });
-
 		// Nothing was rewritten, and no login appeared.
 		expect(readFileSync(CONFIG()).equals(before)).toBe(true);
 		// pi creates an empty auth.json itself; nothing is stored in it.
 		expect(existsSync(AUTH()) ? Object.keys(JSON.parse(readFileSync(AUTH(), "utf8"))) : []).toEqual([]);
 	});
 
-	it("CLIPROXYAPI_PROVIDER_ID=cliproxyapi keeps the old id: only cliproxyapi, and cliproxyapi/<id> answers", async () => {
+	it("CLIPROXYAPI_PROVIDER_ID=acme wins over the file: only acme, and acme/<id> answers", async () => {
 		ownerShaped();
-		const env = { CLIPROXYAPI_PROVIDER_ID: "cliproxyapi" };
-		const { list } = await expectOnly("cliproxyapi", env);
-		captures.push({ name: "CLIPROXYAPI_PROVIDER_ID=cliproxyapi: --list-models", text: list.stdout });
-		const sent = await pi(["--no-session", "--model", `cliproxyapi/${GPT}`, "-p", "say hi"], { env });
+		const env = { CLIPROXYAPI_PROVIDER_ID: "acme" };
+		const { list } = await expectOnly("acme", env);
+		captures.push({ name: "CLIPROXYAPI_PROVIDER_ID=acme: --list-models", text: list.stdout });
+		const sent = await pi(["--no-session", "--model", `acme/${GPT}`, "-p", "say hi"], { env });
 		expect(sent.code, said(sent)).toBe(0);
 		expect(sent.requests.map((r) => [r.model, r.key])).toEqual([[GPT, FILE_KEY]]);
 	});
@@ -702,68 +695,6 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		const sent = await pi(["--no-session", "--model", `provimux/${OPUS}`, "-p", "say hi"]);
 		expect(sent.code, said(sent)).toBe(0);
 		expect(sent.requests.map((r) => [r.model, r.key])).toEqual([[OPUS, LOGIN_KEY]]);
-	});
-
-	it("a session recorded on cliproxyapi/<id>: resumed, pi says it could not restore the model", async () => {
-		ownerShaped();
-		const file = join(root, "old-session.jsonl");
-		const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 };
-		const entries = [
-			{
-				type: "session",
-				version: 3,
-				id: "11111111-1111-4111-8111-111111111111",
-				timestamp: "2026-11-01T10:00:00.000Z",
-				cwd: realpathSync(project),
-			},
-			{
-				type: "model_change",
-				id: "a0000001",
-				parentId: null,
-				timestamp: "2026-11-01T10:00:00.500Z",
-				provider: "cliproxyapi",
-				modelId: OPUS,
-			},
-			{
-				type: "message",
-				id: "a0000002",
-				parentId: "a0000001",
-				timestamp: "2026-11-01T10:00:01.000Z",
-				message: { role: "user", content: "Hello", timestamp: 1793527201000 },
-			},
-			{
-				type: "message",
-				id: "a0000003",
-				parentId: "a0000002",
-				timestamp: "2026-11-01T10:00:02.000Z",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "Hi!" }],
-					api: "anthropic-messages",
-					provider: "cliproxyapi",
-					model: OPUS,
-					usage: { ...usage, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-					stopReason: "stop",
-					timestamp: 1793527202000,
-				},
-			},
-		];
-		writeFileSync(file, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
-		// pi does not find cliproxyapi/<id> and goes on with the model it would start with (here the only provider's
-		// first), and says so on stderr.
-		const resumed = await pi(["--session", file, "-p", "say hi"]);
-		expect(resumed.code, said(resumed)).toBe(0);
-		captures.push({ name: "old session resumed with -p: stderr", text: resumed.stderr });
-		expect(resumed.requests.map((r) => r.key)).toEqual([FILE_KEY]);
-		const restored = /Could not restore model cliproxyapi\/claude-opus-5-5\. Using (\S+)/.exec(resumed.stderr);
-		expect(restored?.[1], said(resumed)).toMatch(/^provimux\//);
-		const answer = readFileSync(file, "utf8")
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => JSON.parse(line))
-			.filter((e) => e.type === "message" && e.message.role === "assistant")
-			.at(-1);
-		expect(answer?.message.provider).toBe("provimux");
 	});
 
 	for (const method of ["oauth"]) {
@@ -864,25 +795,20 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		}
 	});
 
-	it("the README's steps for an existing setup: settings, --provider, models.json under provimux", async () => {
+	it("settings, --provider, models.json under provimux", async () => {
 		ownerShaped();
 		const env = { OTHER_URL: `${origin}/other/v1` };
-		// settings.json moved to the new id: a default (provider and model apart), and a scope.
+		// settings.json: a default (provider and model apart), and a scope.
 		writeFileSync(
 			join(agentDir, "settings.json"),
 			JSON.stringify({ defaultProvider: "provimux", defaultModel: GPT, enabledModels: [`provimux/${GPT}`] }),
 		);
-		// models.json: the block under the old id applies to nothing; renamed to provimux, it applies.
+		// models.json: a block under provimux applies to its models.
 		const overrides = { modelOverrides: { [GPT]: { headers: { "X-Fixture-Tenant": "t1" }, contextWindow: 99000 } } };
-		writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: { cliproxyapi: overrides } }));
-		const old = await pi(["--no-session", "-p", "say hi"], { env });
-		expect(old.code, said(old)).toBe(0);
-		expect(old.stderr).not.toContain("No models match pattern");
-		expect(old.requests.map((r) => [r.model, r.key, r.tenant])).toEqual([[GPT, FILE_KEY, undefined]]);
-
 		writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: { provimux: overrides } }));
 		const moved = await pi(["--no-session", "-p", "say hi"], { env });
 		expect(moved.code, said(moved)).toBe(0);
+		expect(moved.stderr).not.toContain("No models match pattern");
 		expect(moved.requests.map((r) => [r.model, r.key, r.tenant])).toEqual([[GPT, FILE_KEY, "t1"]]);
 		const list = await pi(["--list-models"]);
 		expect(
@@ -897,32 +823,6 @@ describe("the provider id, in pi's CLI", { timeout: 300_000 }, () => {
 		const both = await pi(["--no-session", "--provider", "provimux", "--model", OPUS, "-p", "say hi"], { env });
 		expect(both.code, said(both)).toBe(0);
 		expect(both.requests.map((r) => r.model)).toEqual([OPUS]);
-	});
-
-	it("a key stored only in auth.json under cliproxyapi is not used: no models until one /login provimux", async () => {
-		rmSync(CONFIG());
-		writeFileSync(
-			AUTH(),
-			JSON.stringify({
-				cliproxyapi: {
-					type: "oauth",
-					access: "fixture-old-login",
-					refresh: JSON.stringify({ baseUrl: origin }),
-					expires: Date.now() + 60_000_000,
-				},
-			}),
-		);
-		const before = await pi(["--mode", "rpc", "--no-session"], { rpc: [{ type: "get_available_models" }] });
-		expect(listed(before), said(before)).toEqual([]);
-		const login = await pi(["--no-session", "-p", "/observe-login provimux"], {
-			env: { LOGIN_URL: origin, LOGIN_KEY },
-		});
-		expect(picker(login), said(login)).toEqual([all("provimux")]);
-		const sent = await pi(["--no-session", "--model", `provimux/${GPT}`, "-p", "say hi"]);
-		expect(
-			sent.requests.map((r) => [r.model, r.key]),
-			said(sent),
-		).toEqual([[GPT, LOGIN_KEY]]);
 	});
 });
 

@@ -282,7 +282,7 @@ export function decodeRefreshMeta(refresh: string | undefined): OAuthRefreshMeta
 			return { baseUrl: parsed.baseUrl.trim() };
 		}
 	} catch {
-		// Older / non-JSON refresh tokens are ignored.
+		// A refresh value that is not this extension's JSON is ignored.
 	}
 	return null;
 }
@@ -1079,11 +1079,8 @@ export function findClaudeFormatEntry(modelId: string, catalog: ClaudeFormatCata
 export async function loadBuiltinClaudeFormatCatalog(): Promise<ClaudeFormatCatalog> {
 	try {
 		const builtins = (await import("@earendil-works/pi-ai/providers/all")) as {
-			getBuiltinModels?: (provider: string) => BuiltinAnthropicModel[];
+			getBuiltinModels: (provider: string) => BuiltinAnthropicModel[];
 		};
-		if (typeof builtins.getBuiltinModels !== "function") {
-			return buildClaudeFormatCatalog([]);
-		}
 		return buildClaudeFormatCatalog(builtins.getBuiltinModels("anthropic") ?? []);
 	} catch {
 		return buildClaudeFormatCatalog([]);

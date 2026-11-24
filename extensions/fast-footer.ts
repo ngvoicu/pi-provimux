@@ -60,9 +60,9 @@ export function formatFastModelStatus(
 }
 
 /** Colorize status labels in orange (distinct from yellow warning/fast). */
-export function formatOrangeLabel(theme: { getColorMode?: () => string } | undefined, text: string): string {
+export function formatOrangeLabel(theme: { getColorMode: () => string } | undefined, text: string): string {
 	if (!theme) return text;
-	const ansi = theme.getColorMode?.() === "truecolor" ? ORANGE_TRUECOLOR : ORANGE_256;
+	const ansi = theme.getColorMode() === "truecolor" ? ORANGE_TRUECOLOR : ORANGE_256;
 	return `${ansi}${text}${FG_RESET}`;
 }
 

@@ -862,13 +862,11 @@ export function resolveOriginalCodexModulePath(options: ResolveOriginalCodexModu
 	// if nodeEntry wasn't explicitly provided in options (e.g. inside subagent runners).
 	if (!("nodeEntry" in options) && !("resolveSpecifier" in options)) {
 		try {
-			if (typeof getPackageDir === "function") {
-				const packageDir = getPackageDir();
-				if (packageDir) {
-					const bundledHostModule = resolveCodexModuleFromNodeEntry(join(packageDir, "package.json"));
-					if (bundledHostModule && existsSync(bundledHostModule)) {
-						return { path: bundledHostModule, dir: dirname(bundledHostModule) };
-					}
+			const packageDir = getPackageDir();
+			if (packageDir) {
+				const bundledHostModule = resolveCodexModuleFromNodeEntry(join(packageDir, "package.json"));
+				if (bundledHostModule && existsSync(bundledHostModule)) {
+					return { path: bundledHostModule, dir: dirname(bundledHostModule) };
 				}
 			}
 		} catch {
@@ -972,23 +970,22 @@ export async function loadCliproxyCodexStreams(
 	const mod = (await import(pathToFileURL(outPath).href)) as {
 		streamSimple: CliproxyCodexStreamSimple;
 		stream: CliproxyCodexStreamSimple;
-		closeOpenAICodexWebSocketSessions?: CloseCodexWebSocketSessions;
+		closeOpenAICodexWebSocketSessions: CloseCodexWebSocketSessions;
 	};
 
-	if (typeof mod.streamSimple !== "function" || typeof mod.stream !== "function") {
-		throw new Error("patched openai-codex-responses module missing streamSimple/stream exports");
+	if (
+		typeof mod.streamSimple !== "function" ||
+		typeof mod.stream !== "function" ||
+		typeof mod.closeOpenAICodexWebSocketSessions !== "function"
+	) {
+		throw new Error(
+			"patched openai-codex-responses module missing streamSimple/stream/closeOpenAICodexWebSocketSessions exports",
+		);
 	}
 
 	// Must come from the patched module: its WebSocket cache is a separate Map
 	// from the stock @earendil-works/pi-ai openai-codex-responses instance.
-	const closeOpenAICodexWebSocketSessions =
-		typeof mod.closeOpenAICodexWebSocketSessions === "function"
-			? mod.closeOpenAICodexWebSocketSessions
-			: () => {
-					console.warn(
-						"[pi-provimux] patched openai-codex-responses module is missing closeOpenAICodexWebSocketSessions export",
-					);
-				};
+	const closeOpenAICodexWebSocketSessions = mod.closeOpenAICodexWebSocketSessions;
 
 	const adaptOptions = (model: Model<Api>, streamOptions?: SimpleStreamOptions): SimpleStreamOptions => ({
 		...streamOptions,

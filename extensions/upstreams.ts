@@ -575,9 +575,8 @@ export class UpstreamsAnnouncer {
 
 	private loadBuiltin(): Promise<void> {
 		this.builtinLoading ??= import("@earendil-works/pi-ai/providers/all")
-			.then((module: { getBuiltinModels?: unknown }) => {
-				if (typeof module.getBuiltinModels === "function")
-					this.builtin = module.getBuiltinModels as (provider: string) => Array<{ id: string }>;
+			.then((module: { getBuiltinModels: unknown }) => {
+				this.builtin = module.getBuiltinModels as (provider: string) => Array<{ id: string }>;
 			})
 			.catch(() => {});
 		return this.builtinLoading;

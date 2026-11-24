@@ -161,6 +161,11 @@ lines stops in a conflict, and the resolution keeps the fork's side:
   them back.
 - **No reader of the fork's own older values.** A `cliproxyapi.json` value is read as written, and
   `claudeMessagesMode` reads only `"on"` and `"auto"` (anything else is `"off"`).
+- **No guard for an API pi 1.6.0 has.** `getPackageDir`, `closeOpenAICodexWebSocketSessions` (`codex-stream.ts`),
+  `theme.getColorMode` (`fast-footer.ts`), `getBuiltinModels` (`lib.ts`, `upstreams.ts`), pi's model resolvers and
+  the registry's `getAvailable`/`hasConfiguredAuth` (`thinking-levels.ts`) are called without a `typeof` or `?.`
+  check.
+- **`cliproxyapi.example.json`** has no `providerId`/`providerName`: the defaults, `provimux`/`Provimux`.
 
 A clean merge can still bring in a new literal `"cliproxyapi"` used as a provider id (a comparison, a default). No
 guard looks for one. After a merge, `grep -n '"cliproxyapi' extensions/*.ts` should show only

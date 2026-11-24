@@ -696,12 +696,12 @@ describe("config and auth file helpers", () => {
 			);
 		});
 
-		it("a login stored only under cliproxyapi is not read for provimux; CLIPROXYAPI_PROVIDER_ID=cliproxyapi reads it", () => {
+		it("a login stored only under another id is not read for provimux; CLIPROXYAPI_PROVIDER_ID naming it reads it", () => {
 			const agentDir = tempAgentDir();
 			writeFileSync(
 				join(agentDir, AUTH_FILE_NAME),
 				JSON.stringify({
-					cliproxyapi: { type: "oauth", access: "old-key", refresh: encodeRefreshMeta("http://127.0.0.1:9") },
+					acme: { type: "oauth", access: "acme-key", refresh: encodeRefreshMeta("http://127.0.0.1:9") },
 				}),
 				"utf8",
 			);
@@ -711,10 +711,10 @@ describe("config and auth file helpers", () => {
 					expect(providerId).toBe("provimux");
 					expect(resolveConnection(agentDir, providerId)).toBeNull();
 				});
-				withEnv("CLIPROXYAPI_PROVIDER_ID", "cliproxyapi", () => {
+				withEnv("CLIPROXYAPI_PROVIDER_ID", "acme", () => {
 					const { providerId } = resolveIdentity(agentDir);
-					expect(providerId).toBe("cliproxyapi");
-					expect(resolveConnection(agentDir, providerId)).toMatchObject({ apiKey: "old-key" });
+					expect(providerId).toBe("acme");
+					expect(resolveConnection(agentDir, providerId)).toMatchObject({ apiKey: "acme-key" });
 				});
 			});
 		});
