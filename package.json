@@ -1,7 +1,7 @@
 {
 	"name": "pi-provimux",
 	"version": "105.0.7",
-	"description": "Provimux's pi extension: registers the models of Provimux or CLIProxyAPI in pi, plus TUI elapsed/TPS status",
+	"description": "Provimux's Pi extension: registers the models of Provimux or CLIProxyAPI in Pi, plus TUI elapsed/TPS status",
 	"type": "module",
 	"keywords": [
 		"pi-package",

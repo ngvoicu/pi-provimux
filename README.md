@@ -1,19 +1,19 @@
 # pi-provimux
 
-**Provimux's extension for [pi](https://pi.dev).** It adds [Provimux](https://github.com/ngvoicu/provimux) as a
-provider in pi, and works the same with plain [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
+**Provimux's extension for [Pi](https://pi.dev).** It adds [Provimux](https://github.com/ngvoicu/provimux) as a
+provider in Pi, and works the same with plain [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
-Every model your Provimux or CLIProxyAPI serves appears in pi's `/model`, under the provider `provimux`. With
+Every model your Provimux or CLIProxyAPI serves appears in Pi's `/model`, under the provider `provimux`. With
 Provimux's [Serve only my names](https://github.com/ngvoicu/provimux/blob/main/.github/README.md#serve-only-my-names)
-on (Provimux v8.1.3-pmx.2 or newer), `/model` shows only the names you chose, once the list is read again (when pi
+on (Provimux v8.1.3-pmx.2 or newer), `/model` shows only the names you chose, once the list is read again (when Pi
 starts, or with `/provimux-refresh`). With Provimux, each model's name also says which accounts serve it (a
-subscription login or an API key, and whose), and other pi extensions learn which one answered. With CLIProxyAPI, those parts stay quiet and everything else works.
+subscription login or an API key, and whose), and other Pi extensions learn which one answered. With CLIProxyAPI, those parts stay quiet and everything else works.
 
 ```bash
 pi install npm:pi-provimux
 ```
 
-Then, in pi:
+Then, in Pi:
 
 ```text
 /login Provimux
@@ -31,25 +31,25 @@ From the original extension:
 - **Your models in pi.** It reads the model list from `{root}/v1/models?client_version=pi` and registers each model
   with its context window, reasoning levels and, when [models.dev](https://models.dev) knows it, its price.
 - **Setup by `/login`.** `/login Provimux` asks for the address and the key, checks them, and saves them.
-- **A model cache**, so pi starts at once when the server is slow; `/provimux-refresh` reloads the list.
+- **A model cache**, so Pi starts at once when the server is slow; `/provimux-refresh` reloads the list.
 - **`/fast` and `/ultrafast`**: faster service tiers on the models that offer them.
 - **`/pause` and `/continue`**: hold every request to the provider until you continue.
 - **GPT prompt caching kept**: a `gpt-` request always starts with its base prompt as a developer message, so the
   prompt cache keeps being read.
-- **Thinking level changes that keep the cache**, for models that support them: pi's own, placed as OpenAI documents.
-- **Elapsed time and tokens per second** in pi's footer.
+- **Thinking level changes that keep the cache**, for models that support them: Pi's own, placed as OpenAI documents.
+- **Elapsed time and tokens per second** in Pi's footer.
 - **A fresh Codex WebSocket after compaction**, so the server's context matches the compacted one.
 
 Added in pi-provimux:
 
 - **[Claude Messages format](#claude-messages-format).** Claude models go to `/v1/messages` in Claude's own format,
-  automatically where safe. With pi's long cache retention, that brings Anthropic's 1-hour prompt cache.
+  automatically where safe. With Pi's long cache retention, that brings Anthropic's 1-hour prompt cache.
 - **[Where each model comes from, in its name](#where-each-model-comes-from-in-its-name).** With Provimux, a model's
   name ends with what serves it: `Claude Opus 5.5 · Anthropic sub, fallback api`.
 - **[Where each model comes from, for other extensions](#where-each-model-comes-from-for-other-extensions).** Over
-  pi's event bus, which accounts may serve each model and, with Provimux, which one answered each response, also over
+  Pi's event bus, which accounts may serve each model and, with Provimux, which one answered each response, also over
   the Codex WebSocket. [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) uses it.
-- **One package in pi's list.** The footer helper loads from the provider, so `pi list` shows a single extension.
+- **One package in Pi's list.** The footer helper loads from the provider, so `pi list` shows a single extension.
 
 ## Install
 
@@ -76,13 +76,13 @@ follows the original's releases: once a day old, one that merges cleanly and pas
 and released, with no person in between: this is switched on. [docs/FOLLOWING.md](docs/FOLLOWING.md) says how, and
 what that accepts.
 
-It needs pi 1.6.0 or newer.
+It needs Pi 1.6.0 or newer.
 
 ## Login-style setup (recommended)
 
-This plugin needs both **baseUrl** and **apiKey**. pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so Provimux appears under **Sign in with an account**.
+This plugin needs both **baseUrl** and **apiKey**. Pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so Provimux appears under **Sign in with an account**.
 
-When `provimux.json` or `PROVIMUX_API_KEY` already holds a key and no account login is stored, pi also offers **Sign in with an API key**. Do not use it: it stores only the key, in `auth.json`, and it does not survive a restart. The next start says `Provider is not configured: provimux`, and a saved default or a resumed session moves to another provider if you have one. Use **Sign in with an account**, or put `apiKey` and `baseUrl` in `provimux.json`. If you already used it, remove the `provimux` entry from `auth.json` (`/logout`) and log in with an account.
+When `provimux.json` or `PROVIMUX_API_KEY` already holds a key and no account login is stored, Pi also offers **Sign in with an API key**. Do not use it: it stores only the key, in `auth.json`, and it does not survive a restart. The next start says `Provider is not configured: provimux`, and a saved default or a resumed session moves to another provider if you have one. Use **Sign in with an account**, or put `apiKey` and `baseUrl` in `provimux.json`. If you already used it, remove the `provimux` entry from `auth.json` (`/logout`) and log in with an account.
 
 **Which key wins.** The extension reads the address and the key from the `PROVIMUX_*` variables first, then `provimux.json`, then the login in `auth.json` (see [Resolution order](#environment-overrides)). So a key in `provimux.json` wins over a key saved by a later `/login` that does not rewrite the file, as the API-key login does not. The account login writes its address and key into `provimux.json` as well, so after it the two agree. Change the key or the proxy with an account `/login`. If you change them in `provimux.json` or the environment while an account login is stored, the model list follows the new values but requests still carry the stored login's key: run `/login` again, or remove the `provimux` entry from `auth.json`.
 
@@ -98,7 +98,7 @@ or, by the provider id:
 /login provimux
 ```
 
-(pi ignores case, so both name the same provider.) These shortcuts jump straight into the multi-field baseUrl + API key prompts, unless pi also offers the API-key method (above): then it asks which one first, and you choose **Sign in with an account**.
+(Pi ignores case, so both name the same provider.) These shortcuts jump straight into the multi-field baseUrl + API key prompts, unless Pi also offers the API-key method (above): then it asks which one first, and you choose **Sign in with an account**.
 
 ### Menu path
 
@@ -124,7 +124,7 @@ On success:
 
 - models are registered immediately in the current session (0 models is allowed)
 - `baseUrl` / `apiKey` are written to `~/.pi/agent/provimux.json`
-- pi also stores the returned credential in `~/.pi/agent/auth.json`
+- Pi also stores the returned credential in `~/.pi/agent/auth.json`
 
 Re-run `/login Provimux` or `/login provimux` anytime to reconfigure. The built-in `/logout` command only removes credentials saved in `auth.json`; it does not erase `provimux.json`. Remove or update that file if you also need to clear the provider configuration.
 
@@ -190,7 +190,7 @@ Preferred form is **host:port only**:
 | `http://127.0.0.1:8317/v1` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 | `127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 
-pi then sends inference traffic to `{inference}/codex/responses`.
+Pi then sends inference traffic to `{inference}/codex/responses`.
 
 ## Fast and Ultra Fast modes
 
@@ -203,9 +203,9 @@ Both modes are **off by default**. They request faster processing for supported 
 
 The modes are mutually exclusive. Run the active command again to turn it off, or run the other command to switch directly. Each change saves the global preference in `~/.pi/agent/provimux.json` and refreshes the provider's model pricing. The saved preference is restored at the next startup unless `PROVIMUX_FAST` overrides it.
 
-Both modes apply only to models whose CLIProxyAPI catalog entry has a non-empty `service_tiers` array. The provider ignores `additional_speed_tiers`. When a mode is effective, pi appends its yellow label to the bottom-right model status without a separate notification. On unsupported models, the commands still update the global preference and warn when enabling a mode, but the request and model status remain unchanged.
+Both modes apply only to models whose CLIProxyAPI catalog entry has a non-empty `service_tiers` array. The provider ignores `additional_speed_tiers`. When a mode is effective, Pi appends its yellow label to the bottom-right model status without a separate notification. On unsupported models, the commands still update the global preference and warn when enabling a mode, but the request and model status remain unchanged.
 
-Both modes are independent of pi's reasoning level and use `experimental.modes.fast.cost` from `models.dev` when available. Otherwise, the registered model uses the standard price; the plugin does not guess prices from `-pro` or `-fast` model IDs.
+Both modes are independent of Pi's reasoning level and use `experimental.modes.fast.cost` from `models.dev` when available. Otherwise, the registered model uses the standard price; the plugin does not guess prices from `-pro` or `-fast` model IDs.
 
 ## Pausing provider requests
 
@@ -248,14 +248,14 @@ Use `/provimux-refresh` to force an immediate remote refresh of the model catalo
 
 ### Refresh commands
 
-- `/provimux-refresh` — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting pi.
+- `/provimux-refresh` — force an immediate remote refresh of the model catalog, rewrite the cache, and update registered models. Use this after adding or removing models on the proxy without restarting Pi.
 - `/login Provimux` / `/login provimux` — re-entering credentials always forces a fresh models query and rewrites the cache.
 
 Delete `~/.pi/agent/provimux-models.json` to clear the cache manually.
 
 ## Model mapping
 
-From CPA catalog entry → pi model:
+From CPA catalog entry → Pi model:
 
 | CPA field | Pi field |
 | ----------- | ---------- |
@@ -267,47 +267,47 @@ From CPA catalog entry → pi model:
 | `supports_reasoning_effort_updates` | `compat.supportsMidConvoEffort` |
 | `visibility: "hide"` | skipped |
 
-Unsupported pi thinking levels are set to `null` so they are hidden in the UI. A level the model lacks asked on the command line of a one-shot run (`pi -p --thinking low`, `--model provimux/<model>:low`, or `--models provimux/<model>:low` when that pattern selects the model; also `--mode json`) is refused: nothing is sent, the error names the levels the model has, and pi exits with 1. The flags are read as pi reads them: a suffix that is part of a model's id (`--model provimux/local-assistant:high`, for a model listed as `local-assistant:high`) asks for no level. Elsewhere (the level picker, a saved default level, `--thinking` in an interactive or RPC session) pi moves the level to the nearest one the model has, and the request names that level, never the missing one. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller prices are not selected arbitrarily and fall back to zero. These are catalog/list prices, not a guarantee of CPA's own markup or billing.
+Unsupported Pi thinking levels are set to `null` so they are hidden in the UI. A level the model lacks asked on the command line of a one-shot run (`pi -p --thinking low`, `--model provimux/<model>:low`, or `--models provimux/<model>:low` when that pattern selects the model; also `--mode json`) is refused: nothing is sent, the error names the levels the model has, and Pi exits with 1. The flags are read as Pi reads them: a suffix that is part of a model's id (`--model provimux/local-assistant:high`, for a model listed as `local-assistant:high`) asks for no level. Elsewhere (the level picker, a saved default level, `--thinking` in an interactive or RPC session) Pi moves the level to the nearest one the model has, and the request names that level, never the missing one. When available, prices are matched against canonical model entries in `models.dev`; `cost.tiers[].tier.size` becomes Pi's `inputTokensAbove`, including thresholds such as `272000`. The legacy `context_over_200k` field is used only when no explicit tiers are present. Ambiguous reseller prices are not selected arbitrarily and fall back to zero. These are catalog/list prices, not a guarantee of CPA's own markup or billing.
 
 ## GPT Responses prompt caching
 
-pi builds no top-level `instructions`: it puts the system prompt, as given, in a leading
-`{ "role": "developer", "content": "…" }` input item, for every model, and the provider sends that as pi built it.
+Pi builds no top-level `instructions`: it puts the system prompt, as given, in a leading
+`{ "role": "developer", "content": "…" }` input item, for every model, and the provider sends that as Pi built it.
 For `gpt-` model IDs (ignoring case and surrounding whitespace) the provider makes sure the request starts with a base
 prompt: when the final body has `instructions` (an extension's `before_provider_request` hook set them), their text
 becomes the leading developer message instead; when the input does not start with a developer message (no system
 prompt, or a hook put another item first), `You are a helpful assistant.` is put in front as one. Existing input items
 stay in order, tools and `prompt_cache_key` are unchanged, and other models keep their request shape. This applies
-to HTTP and WebSocket requests, including pi background streams that use this provider. A changed developer prefix or
+to HTTP and WebSocket requests, including Pi background streams that use this provider. A changed developer prefix or
 model sends the full input instead of a WebSocket continuation delta. To drop or replace the base prompt, a hook
 removes or changes that first item.
 
 ## Cache-preserving thinking level changes
 
-Models whose catalog entry sets `supports_reasoning_effort_updates` (GPT-6 on CLIProxyAPI) get pi's cache-preserving mid-session thinking level changes, with placement following the OpenAI documentation: the effort of the first turn becomes the fixed request-level `reasoning.effort`, and each later change is carried by a `configuration_update` input item placed immediately before the user message it applies to, so switching levels mid-session keeps the prompt prefix — and the upstream prompt cache — intact instead of rewriting it. WebSocket `previous_response_id` continuation also survives level changes. pi's Codex adapter carries these changes itself; the provider only moves the items to the placement above. pi records the level it sent on each reply, `none` with thinking off.
+Models whose catalog entry sets `supports_reasoning_effort_updates` (GPT-6 on CLIProxyAPI) get Pi's cache-preserving mid-session thinking level changes, with placement following the OpenAI documentation: the effort of the first turn becomes the fixed request-level `reasoning.effort`, and each later change is carried by a `configuration_update` input item placed immediately before the user message it applies to, so switching levels mid-session keeps the prompt prefix — and the upstream prompt cache — intact instead of rewriting it. WebSocket `previous_response_id` continuation also survives level changes. Pi's Codex adapter carries these changes itself; the provider only moves the items to the placement above. Pi records the level it sent on each reply, `none` with thinking off.
 
 The raw `models.dev` response is cached for 24 hours at `~/.pi/agent/tmp/models-dev-cache.json`. A fresh cache avoids the network request; an expired cache is refreshed with a three-second timeout, and stale data is retained if refresh fails. If neither the network nor a previous cache is available, pricing safely falls back to zero. A small explicit alias table covers known CLIProxyAPI variants such as `gemini-pro-agent` → `gemini-3.1-pro-preview`; unknown variants are not guessed.
 
 ## Claude Messages format
 
-Claude models can be sent in Claude's own format to CLIProxyAPI's `/v1/messages`, using pi's built-in Anthropic client,
+Claude models can be sent in Claude's own format to CLIProxyAPI's `/v1/messages`, using Pi's built-in Anthropic client,
 instead of the Codex Responses format every other model uses. This happens automatically; nothing needs configuring.
 
-- **Which models:** those CLIProxyAPI lists with `owned_by: "anthropic"` (from its plain `/v1/models`) that pi's
+- **Which models:** those CLIProxyAPI lists with `owned_by: "anthropic"` (from its plain `/v1/models`) that Pi's
   built-in catalog also knows, **and** for which CLIProxyAPI reports an output limit (`max_tokens`). Their compat
-  flags and thinking levels come from that catalog. Every other model, Claude models pi doesn't know, and Claude
+  flags and thinking levels come from that catalog. Every other model, Claude models Pi doesn't know, and Claude
   models without a reported output limit stay on the Codex format.
 - **Setting:** `claudeMessages` in `provimux.json` (or `PROVIMUX_CLAUDE_MESSAGES`) is `"auto"` by default.
   `false` keeps every model on the Codex format; `true` also switches Claude models CLIProxyAPI reports no output
-  limit for (they then get pi's 16,384 default, see below).
+  limit for (they then get Pi's 16,384 default, see below).
 - **Why:** Claude's format can carry Anthropic features the Codex format can't. The main one is the **1-hour cache**:
-  with `PI_CACHE_RETENTION=long`, pi marks the prompt with `cache_control` `ttl: "1h"`, CLIProxyAPI passes it through,
+  with `PI_CACHE_RETENTION=long`, Pi marks the prompt with `cache_control` `ttl: "1h"`, CLIProxyAPI passes it through,
   and Anthropic writes the 1-hour tier, on API keys too. One-hour cache writes cost 2× the input price instead of
   1.25×. The thinking levels offered are also the model's own, not a generic list.
 - **Limits come from CLIProxyAPI:** the context window and output limit are what CLIProxyAPI reports, as for every
   other model. Unlike the Codex format, Claude's format sends the output limit (`max_tokens`) on every request. In
   `"auto"`, a Claude model CLIProxyAPI reports no output limit for stays on the Codex format, which sends no output
-  limit; with `true` pi would fall back to 16,384 output tokens.
+  limit; with `true` Pi would fall back to 16,384 output tokens.
 - **Not available for these models:** Fast mode (a Codex service tier; they keep their standard price under `/fast`
   and `/ultrafast`) and the Codex WebSocket transport. Thinking, tools, images and auto-compaction work as before.
 - Changing the setting refreshes the model list (the cache records it). The first request of an ongoing session after
@@ -315,7 +315,7 @@ instead of the Codex Responses format every other model uses. This happens autom
 
 ## Where each model comes from, in its name
 
-Through CLIProxyAPI pi sees one provider, so its model list does not say whether a model is served by a subscription
+Through CLIProxyAPI Pi sees one provider, so its model list does not say whether a model is served by a subscription
 login or by a paid API key, nor by whom. [Provimux](https://github.com/ngvoicu/provimux), or a CLIProxyAPI that lists its credentials
 ([router-for-me/CLIProxyAPI#7634](https://github.com/router-for-me/CLIProxyAPI/pull/7634)), is asked for them with the
 plain model list (`GET /v1/models?include=accounts`, one request per model list refresh), and each model's name then
@@ -340,7 +340,7 @@ anthropic/claude-opus-5.5 · OpenRouter api
   `/provimux-refresh` (the startup refresh also updates it). What answered a given request is a separate matter:
   see the next section.
 
-pi shows a model's name in `/model` beside its id and searches it, and its model patterns (`--model`, scoped models)
+Pi shows a model's name in `/model` beside its id and searches it, and its model patterns (`--model`, scoped models)
 also match names: `openrouter` now matches every model that comes from OpenRouter, not only ids that contain the
 word.
 
@@ -360,13 +360,13 @@ It only ever shows the route that produced the answer you see.
 
 - It is read from the answer itself: the `X-CPA-AUTH-*` response headers, or on the Codex WebSocket the `cpa_auth_*`
   fields of the turn's `response.created`. No other extension is needed.
-- When pi tries a request again (an HTTP 429, or a Codex WebSocket continuation replayed on a fresh socket), only
+- When Pi tries a request again (an HTTP 429, or a Codex WebSocket continuation replayed on a fresh socket), only
   what the attempt that answered said counts: an attempt that names nobody is unnamed, whatever an earlier one said.
 - Only an answer changes it: a turn that completed (or calls tools) with something in it. A failed, aborted or empty
   turn leaves it as it was.
 - Whatever routes an install has and however it orders them, the footer names the one that answered: the credential
   list and its priorities play no part, and a route that is not in the list is named all the same.
-- Only the session's own turns count: pi's cache warmer and other extensions' requests, which can run at the same
+- Only the session's own turns count: Pi's cache warmer and other extensions' requests, which can run at the same
   time, never change it.
 - `answered: unknown`: the proxy names answers (its model list lists credentials, as Provimux's does; a lookup of the
   list that fails changes nothing), but not this one (Provimux leaves an answer unnamed when plugin code took part in it).
@@ -380,9 +380,9 @@ Set `"answered": false` in `~/.pi/agent/provimux.json` to turn it off (takes eff
 
 ## Where each model comes from (for other extensions)
 
-Through CLIProxyAPI pi sees one provider, but each model is served by a subscription login or an API key of some lab,
+Through CLIProxyAPI Pi sees one provider, but each model is served by a subscription login or an API key of some lab,
 and the two can differ in window, prompt-cache lifetime and price (a Claude login keeps a cache for an hour, a Claude
-API key for 5 minutes by default). This package tells other pi extensions where each model comes from, over pi's event
+API key for 5 minutes by default). This package tells other Pi extensions where each model comes from, over Pi's event
 bus (`pi.events`), so that they need to know nothing about CLIProxyAPI.
 [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) uses it to fill windows, cache lifetimes and prices
 from providers.dev.
@@ -419,15 +419,15 @@ from providers.dev.
   - **Nothing** from plain CLIProxyAPI, which names no answer, nor before an extension asked for the routes.
   - **When**: as soon as the answer's headers (or its `response.created` event) arrive and its stream's first event
     says which model it is for, so before the answer ends, while the request is still out.
-  - **Each request on its own.** Requests overlap: pi's cache warmer refreshes the cache while the turn it warms is
+  - **Each request on its own.** Requests overlap: Pi's cache warmer refreshes the cache while the turn it warms is
     still streaming, and an extension can send its own request with the session's callbacks. Each request keeps its
     own response headers and its one report, so an answer is never reported with another request's credential or
     model.
 
   [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) reads `upstreams: []` as "route not known".
 
-An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
-(`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider pi has none for
+An upstream is `{ provider, model?, subscription? }`: the Pi provider the model would come from if used directly
+(`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider Pi has none for
 (`devin`, `antigravity`); the model's id there when it differs; `true` for a subscription login, `false` for an API
 key, absent when not known.
 
@@ -441,7 +441,7 @@ How the routes are made:
   `api.kimi.com`, `api.moonshot.ai`, `api.moonshot.cn`, `api.deepseek.com`, `api.mistral.ai`, `api.groq.com`,
   `api.cerebras.ai`, `api.fireworks.ai`, `api.together.ai`, `integrate.api.nvidia.com`, `api.xiaomimimo.com`;
   another host is not known), whatever its entry is called; without a host, an OpenAI-compatible entry counts as
-  OpenRouter only when named `openrouter`. The model id is the provider's own, as pi's catalog has it (the
+  OpenRouter only when named `openrouter`. The model id is the provider's own, as Pi's catalog has it (the
   session's models, else the catalog pi-ai is built with): a prefix before it (CLIProxyAPI's own, or one configured
   for the credential) is left out unless what is left is not in the catalog and the id with it is. So
   `openai/gpt-oss-120b` at Groq stays as it is, and a prefix `openai` before Groq's `llama-3.3-70b-versatile` is left
@@ -455,7 +455,7 @@ How the routes are made:
 
 ## Elapsed time and TPS (TUI)
 
-The provider extension also loads `extensions/tps.ts` (so pi lists the package as a single extension), which only activates for the primary interactive TUI session (`ctx.hasUI && ctx.mode === "tui"`):
+The provider extension also loads `extensions/tps.ts` (so Pi lists the package as a single extension), which only activates for the primary interactive TUI session (`ctx.hasUI && ctx.mode === "tui"`):
 
 - While the agent is running, the footer shows `Elapsed …` (updates every second).
 - When the agent settles, the footer keeps the final elapsed time and a notification reports approximate TPS plus token usage (`out` / `in` / cache r/w / total).
@@ -465,7 +465,7 @@ Set `"tps": false` in `~/.pi/agent/provimux.json` to turn off just this helper (
 
 ## Failure behavior
 
-- CLIProxyAPI `closed network connection` responses are normalized as transient network errors so pi's agent-level retry policy reconnects and restarts the interrupted assistant turn. Completed conversation and tool results remain available; token streaming does not resume from the exact interruption point.
+- CLIProxyAPI `closed network connection` responses are normalized as transient network errors so Pi's agent-level retry policy reconnects and restarts the interrupted assistant turn. Completed conversation and tool results remain available; token streaming does not resume from the exact interruption point.
 - Before setup / without credentials: provider still appears in `/login`; no models are listed yet.
 - After successful `/login`: models are registered; credentials are stored in `auth.json` and mirrored to `provimux.json`.
 - The built-in `/logout` command removes only the matching `auth.json` credential; environment variables and `provimux.json` are unchanged.
