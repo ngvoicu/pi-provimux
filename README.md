@@ -4,8 +4,10 @@
 provider in pi, and works the same with plain [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
 Every model your Provimux or CLIProxyAPI serves appears in pi's `/model`, under the provider `provimux`. With
-Provimux, each model's name also says which accounts serve it (a subscription login or an API key, and whose), and
-other pi extensions learn which one answered. With CLIProxyAPI, those parts stay quiet and everything else works.
+Provimux's [Serve only my names](https://github.com/ngvoicu/provimux/blob/main/.github/README.md#serve-only-my-names)
+on (Provimux v8.1.3-pmx.2 or newer), `/model` shows only the names you chose, once the list is read again (when pi
+starts, or with `/provimux-refresh`). With Provimux, each model's name also says which accounts serve it (a
+subscription login or an API key, and whose), and other pi extensions learn which one answered. With CLIProxyAPI, those parts stay quiet and everything else works.
 
 ```bash
 pi install npm:pi-provimux
