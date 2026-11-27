@@ -9,7 +9,8 @@ setting or default changed.
   `paused · /continue` in the warning colour (`paused` under 60 columns). It shows the same state as the orange
   `paused` beside a Provimux model's name, which stays, and changes at the same moments: at the start, at once where
   you type `/pause` or `/continue`, and when the guard checks the setting (a request about to go out, or one held). An
-  idle window that has not checked since another window paused shows nothing until its next request is held.
+  idle window keeps what its guard last saw until its next check: one that last saw no pause shows nothing after
+  another window pauses, and one that last saw a pause keeps both signs after another window continues.
 - **Descriptions in Pi** say what each command does for you: `/pause` holds each new model request Pi sends, in every
   Pi window with pi-provimux, until `/continue`; `/fast` and `/ultrafast` turn their mode on or off, saved for later
   starts, asking the server for its priority or Ultra Fast service tier; `/provimux-refresh` reloads the model list,

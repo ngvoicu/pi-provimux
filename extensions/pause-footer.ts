@@ -25,8 +25,10 @@ type Followed = PauseController & { [SET_ENABLED_FOLLOWERS]?: Set<() => void> };
 
 /**
  * Calls `follower` after every `setEnabled` of this controller, wherever it comes from (the start, the commands, the
- * guard). The controller is the original project's and stays as it is: its own `setEnabled` runs first, unchanged.
- * Returns the function that stops following.
+ * guard). The controller is the original project's and stays as it is: its own `setEnabled` runs first, and its result
+ * and any exception of its own pass through as without the wrapper. Whatever the followers do after it (reading the
+ * terminal's width, drawing, cleaning up) can't throw out of the wrapper: the request guard calls `setEnabled`, and an
+ * exception there would make Pi send a held request at once. Returns the function that stops following.
  */
 function followSetEnabled(controller: PauseController, follower: () => void): () => void {
 	const followed = controller as Followed;
@@ -35,10 +37,21 @@ function followSetEnabled(controller: PauseController, follower: () => void): ()
 		const own = new Set<() => void>();
 		followers = own;
 		followed[SET_ENABLED_FOLLOWERS] = own;
-		const setEnabled = controller.setEnabled.bind(controller);
-		controller.setEnabled = (enabled: boolean, now?: number): void => {
-			setEnabled(enabled, now);
-			for (const follow of [...own]) follow();
+		const setEnabled = controller.setEnabled;
+		controller.setEnabled = function (this: PauseController, ...args: Parameters<PauseController["setEnabled"]>) {
+			const result = setEnabled.apply(this, args);
+			try {
+				for (const follow of [...own]) {
+					try {
+						follow();
+					} catch {
+						// A display fault: the mark may be stale, the guard is not touched.
+					}
+				}
+			} catch {
+				// Nothing a follower does reaches the caller.
+			}
+			return result;
 		};
 	}
 	followers.add(follower);
@@ -66,13 +79,19 @@ export function registerPauseFooter(
 	function render(): void {
 		const ctx = active;
 		if (!ctx) return;
-		const text = pauseMode.isEnabled() ? pauseStatusText(columns()) : undefined;
-		if (text === shown) return;
 		try {
+			const text = pauseMode.isEnabled() ? pauseStatusText(columns()) : undefined;
+			if (text === shown) return;
 			ctx.ui.setStatus(PAUSE_STATUS_KEY, text === undefined ? undefined : ctx.ui.theme.fg("warning", text));
 			shown = text;
 		} catch {
-			// A session replaced since: the next session_start shows it again.
+			// The width could not be read or the status not set (a session replaced since): the mark is taken down where
+			// it can be and stops following; the next session_start shows it again.
+			try {
+				ctx.ui.setStatus(PAUSE_STATUS_KEY, undefined);
+			} catch {
+				// A stale interface: nothing to take down.
+			}
 			stop();
 		}
 	}

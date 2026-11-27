@@ -140,8 +140,10 @@ Requests are paused: each new request Pi sends to a model waits until you type /
 While a window's request guard believes requests are paused, its footer says `paused · /continue` in the warning
 colour (`paused` alone in a terminal narrower than 60 columns); with a Provimux model selected, the model's name in the
 footer also ends with `paused`, in orange. Both come from that one belief. A window knows it from its start, at once when you type `/pause` or `/continue` in it, and each time its guard checks
-the setting, which is when a request is about to go out and while one is held. An idle window that has not checked
-since another window paused shows nothing until its next request is held, and then shows the mark.
+the setting, which is when a request is about to go out and while one is held. An idle window keeps what its guard
+last saw until its next check: after another window pauses, one that last saw no pause shows nothing until its next
+request is held, and then shows the mark; after another window continues, one that last saw a pause keeps both signs
+until its next request goes out.
 
 Then `/continue`: `Requests continue: each window holding a request checks about every 0.2 seconds and then lets it go.` `/continue`
 with nothing paused: `Requests were not paused.` `/pause` twice: `Requests were already paused. Type /continue to let them go.`

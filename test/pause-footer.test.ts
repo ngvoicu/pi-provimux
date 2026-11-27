@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FastModeController } from "../extensions/fast.ts";
 import { FastFooterController } from "../extensions/fast-footer.ts";
@@ -26,7 +27,17 @@ const WIDE = "<warning>paused · /continue</warning>";
  */
 function window(
 	agentDir: string,
-	options: { columns?: number; mode?: string; hasUI?: boolean; stale?: boolean; footer?: boolean } = {},
+	options: {
+		columns?: number;
+		mode?: string;
+		hasUI?: boolean;
+		stale?: boolean;
+		footer?: boolean;
+		/** Reads the terminal's width (a fault injected here). */
+		measure?: () => number;
+		/** Whether setStatus throws now (a fault injected after the start). */
+		failStatus?: () => boolean;
+	} = {},
 ) {
 	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
 	const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
@@ -39,7 +50,7 @@ function window(
 	let columns = options.columns ?? 120;
 	const statuses = new Map<string, string | undefined>();
 	const setStatus = vi.fn((key: string, text: string | undefined) => {
-		if (options.stale) throw new Error("stale context");
+		if (options.stale || options.failStatus?.()) throw new Error("stale context");
 		statuses.set(key, text);
 	});
 	const ctx = {
@@ -52,7 +63,7 @@ function window(
 		},
 	} as unknown as ExtensionCommandContext;
 	const controller = new PauseController(resolvePauseDefault(agentDir));
-	if (options.footer !== false) registerPauseFooter(pi, controller, { columns: () => columns });
+	if (options.footer !== false) registerPauseFooter(pi, controller, { columns: options.measure ?? (() => columns) });
 	registerPauseCommands({ pi, agentDir, pauseMode: controller });
 	registerPauseGuard({ pi, agentDir, pauseMode: controller });
 	const modelStatus = new FastFooterController("provimux", new FastModeController(false), () => undefined, controller);
@@ -62,6 +73,8 @@ function window(
 	let held = 0;
 	return {
 		controller,
+		handlers,
+		ctx,
 		start: () => emit("session_start"),
 		shutdown: () => emit("session_shutdown"),
 		command: (name: string, args = "") => commands.get(name)?.handler(args, ctx),
@@ -259,9 +272,9 @@ describe("nothing of its own", () => {
 		saveConfigFile(agentDir, { pause: true });
 		const stale = open(agentDir, { stale: true });
 		stale.start();
-		expect(stale.setStatus).toHaveBeenCalledTimes(1);
+		expect(stale.setStatus).toHaveBeenCalledTimes(2);
 		await stale.command("continue");
-		expect(stale.setStatus).toHaveBeenCalledTimes(1);
+		expect(stale.setStatus).toHaveBeenCalledTimes(2);
 		expect(process.stdout.listenerCount("resize")).toBe(resizeListeners);
 		expect(vi.getTimerCount()).toBe(0);
 	});
@@ -306,5 +319,119 @@ describe("nothing of its own", () => {
 		expect(withMark).toEqual(without);
 		expect(without.slice(0, -4).every((r) => !r)).toBe(true);
 		expect(without.at(-1)).toBe(true);
+	});
+});
+
+describe("a fault while drawing the mark never reaches the request guard", () => {
+	type Faults = { measure?: () => number; failStatus?: () => boolean; footer?: boolean; afterStart?: () => void };
+	/**
+	 * A paused window's request through Pi 1.6.0's own request-hook runner (which sends a request at once when a hook
+	 * throws), held while the setting says paused and let go after it says otherwise. Returns, every 100 ms, whether the
+	 * request was let go, and the runner's errors.
+	 */
+	const heldRequest = async (faults: Faults, checks: (w: Window) => void = () => {}) => {
+		const agentDir = tempAgentDir();
+		const w = open(agentDir, faults);
+		w.start();
+		faults.afterStart?.();
+		saveConfigFile(agentDir, { pause: true });
+		const errors: unknown[] = [];
+		const runner = {
+			extensions: [{ path: "pi-provimux", handlers: w.handlers }],
+			createContext: () => w.ctx,
+			emitError: (error: unknown) => errors.push(error),
+		};
+		const payload = { model: "fixture" };
+		let released = false;
+		const sent = ExtensionRunner.prototype.emitBeforeProviderRequest.call(runner as never, payload).then((out) => {
+			released = true;
+			return out;
+		});
+		const seen: boolean[] = [];
+		for (let t = 0; t < PAUSE_POLL_INTERVAL_MS * 5; t += 100) {
+			await vi.advanceTimersByTimeAsync(100);
+			seen.push(released);
+		}
+		// Held: the guard believes requests are paused, and the orange label says so.
+		expect(w.controller.isEnabled()).toBe(true);
+		expect(w.label()).toContain("paused");
+		checks(w);
+		saveConfigFile(agentDir, { pause: false });
+		for (let t = 0; t < PAUSE_POLL_INTERVAL_MS * 2; t += 100) {
+			await vi.advanceTimersByTimeAsync(100);
+			seen.push(released);
+		}
+		expect(await sent).toBe(payload);
+		expect(w.controller.isEnabled()).toBe(false);
+		expect(w.label()).not.toContain("paused");
+		return { seen, errors };
+	};
+
+	const asOnMain = async (faults: Faults, checks?: (w: Window) => void) => {
+		const without = await heldRequest({ footer: false });
+		const faulty = await heldRequest(faults, checks);
+		// The same moments as with no mark at all (main's guard), and no error reached Pi's runner.
+		expect(faulty.seen).toEqual(without.seen);
+		expect(faulty.seen.slice(0, (PAUSE_POLL_INTERVAL_MS * 5) / 100).every((r) => !r)).toBe(true);
+		expect(faulty.seen.at(-1)).toBe(true);
+		expect(faulty.errors).toEqual([]);
+		expect(without.errors).toEqual([]);
+	};
+
+	it("an exception from reading the terminal's width", async () => {
+		await asOnMain(
+			{
+				measure: () => {
+					throw new Error("fixture terminal width failed");
+				},
+			},
+			(w) => expect(w.footer()).toBeUndefined(),
+		);
+	});
+
+	it("an exception from setStatus", async () => {
+		let failing = false;
+		await asOnMain({ failStatus: () => failing }, (w) => {
+			failing = true;
+			expect(w.setStatus).toHaveBeenCalled();
+		});
+		// And from the first draw while held: the guard holds all the same.
+		await asOnMain({ failStatus: () => true });
+	});
+
+	it("an exception from the cleanup after a failed draw", async () => {
+		let failing = false;
+		let off: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			await asOnMain({
+				failStatus: () => failing,
+				afterStart: () => {
+					failing = true;
+					off = vi.spyOn(process.stdout, "off").mockImplementation(() => {
+						throw new Error("fixture cleanup failed");
+					});
+				},
+			});
+			expect(off).toHaveBeenCalled();
+		} finally {
+			off?.mockRestore();
+		}
+	});
+
+	it("setEnabled's own result and exceptions pass through the wrapper unchanged", () => {
+		const agentDir = tempAgentDir();
+		const w = open(agentDir);
+		w.start();
+		w.controller.setEnabled(true, 1_000);
+		w.controller.setEnabled(false, 1_250);
+		expect(w.controller.getPausedDurationMs(5_000)).toBe(250);
+		expect(w.controller.setEnabled(true)).toBeUndefined();
+		// A controller whose own setEnabled throws, followed by the mark: the same exception reaches the caller.
+		const x = open(agentDir);
+		vi.spyOn(x.controller, "setEnabled").mockImplementation(() => {
+			throw new Error("fixture controller failure");
+		});
+		x.start();
+		expect(() => x.controller.setEnabled(true)).toThrow("fixture controller failure");
 	});
 });
