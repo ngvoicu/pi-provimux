@@ -1249,7 +1249,7 @@ describe("/provimux-refresh command", () => {
 			await expect(providerExtension(pi)).resolves.toBeUndefined();
 			const refresh = commands.get("provimux-refresh");
 			expect(refresh).toBeDefined();
-			expect(refresh?.description).toContain("refresh");
+			expect(refresh?.description).toContain("Reload the model list");
 			expect(refresh?.description).toContain("Provimux");
 		});
 	});
@@ -1264,7 +1264,7 @@ describe("/provimux-refresh command", () => {
 
 			await commands.get("provimux-refresh")!.handler("", ctx);
 			expect(notify).toHaveBeenCalledWith(
-				"Provimux is not configured. Use /login Provimux or /login provimux.",
+				"Provimux is not set up yet, so there is no model list to reload. Type /login Provimux (or /login provimux) and enter your server's address and key.",
 				"error",
 			);
 		});
@@ -1279,7 +1279,10 @@ describe("/provimux-refresh command", () => {
 			const ctx = { ui: { notify } } as unknown as ExtensionCommandContext;
 
 			await refresh.handler("now", ctx);
-			expect(notify).toHaveBeenCalledWith("Usage: /provimux-refresh", "error");
+			expect(notify).toHaveBeenCalledWith(
+				"/provimux-refresh takes no arguments: type /provimux-refresh on its own.",
+				"error",
+			);
 		});
 	});
 
@@ -1292,7 +1295,7 @@ describe("/provimux-refresh command", () => {
 			const ctx = { ui: { notify } } as unknown as ExtensionCommandContext;
 
 			await refresh.handler("", ctx);
-			expect(notify).toHaveBeenCalledWith(expect.stringContaining("not configured"), "error");
+			expect(notify).toHaveBeenCalledWith(expect.stringContaining("not set up yet"), "error");
 		});
 	});
 
@@ -1325,7 +1328,7 @@ describe("/provimux-refresh command", () => {
 				await refresh.handler("", ctx);
 
 				expect(fetchMock).toHaveBeenCalledTimes(6);
-				expect(notify).toHaveBeenCalledWith(expect.stringContaining("Refreshed 1 Provimux models"), "info");
+				expect(notify).toHaveBeenCalledWith(expect.stringContaining("Reloaded 1 Provimux models"), "info");
 
 				const diskCache = loadModelsCache(agentDir, "http://127.0.0.1:8317");
 				expect(diskCache?.models.map((model) => model.id)).toEqual(["refreshed"]);
@@ -1333,7 +1336,7 @@ describe("/provimux-refresh command", () => {
 				const infoMessages = notify.mock.calls
 					.filter(([, level]) => level === "info")
 					.map(([message]) => String(message));
-				expect(infoMessages.some((message) => message.includes("retained from cache"))).toBe(false);
+				expect(infoMessages.some((message) => message.includes("kept from the saved list"))).toBe(false);
 			} finally {
 				fetchMock.mockRestore();
 			}
@@ -1358,7 +1361,10 @@ describe("/provimux-refresh command", () => {
 
 				await refresh.handler("", ctx);
 
-				expect(notify).toHaveBeenCalledWith(expect.stringContaining("Failed to refresh Provimux models"), "error");
+				expect(notify).toHaveBeenCalledWith(
+					expect.stringContaining("Could not reload the Provimux models"),
+					"error",
+				);
 			} finally {
 				fetchMock.mockRestore();
 			}

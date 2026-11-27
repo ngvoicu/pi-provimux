@@ -91,8 +91,22 @@ describe("pause commands", () => {
 		await commands.get("continue")?.handler("", ctx);
 		expect(controller.isEnabled()).toBe(false);
 		expect(loadConfigFile(agentDir)).toEqual({ pause: false });
-		expect(notify).toHaveBeenNthCalledWith(1, "Requests are paused.", "info");
-		expect(notify).toHaveBeenNthCalledWith(2, "Requests are continued.", "info");
+		expect(notify).toHaveBeenNthCalledWith(
+			1,
+			"Requests are paused: every new request to a model waits, in every Pi window, also after a restart, until you type /continue. An answer already streaming finishes.",
+			"info",
+		);
+		expect(notify).toHaveBeenNthCalledWith(2, "Requests continue: the ones that were waiting go out now.", "info");
+
+		await commands.get("continue")?.handler("", ctx);
+		expect(notify).toHaveBeenNthCalledWith(3, "Requests were not paused, so nothing was waiting.", "info");
+		await commands.get("pause")?.handler("", ctx);
+		await commands.get("pause")?.handler("", ctx);
+		expect(controller.isEnabled()).toBe(true);
+		expect(notify).toHaveBeenNthCalledWith(5, "Requests were already paused. Type /continue to let them go.", "info");
+
+		await commands.get("pause")?.handler("now", ctx);
+		expect(notify).toHaveBeenNthCalledWith(6, "/pause takes no arguments: type /pause on its own.", "error");
 	});
 });
 
