@@ -38,6 +38,7 @@ import {
 } from "./codex-stream.ts";
 import { FastModeController, type FastPreference } from "./fast.ts";
 import { FastFooterController } from "./fast-footer.ts";
+import { GatewayList, priceAnswersWith, type SourcesReader } from "./figures.ts";
 import {
 	ANTHROPIC_MESSAGES_API,
 	CONFIG_FILE_NAME,
@@ -45,6 +46,7 @@ import {
 	DEFAULT_BASE_URL,
 	decodeRefreshMeta,
 	encodeRefreshMeta,
+	fetchModelSources,
 	firstNonEmpty,
 	isModelReferencedAsDefault,
 	isUnauthorizedModelsError,
@@ -70,7 +72,13 @@ import { registerPauseFooter } from "./pause-footer.ts";
 import { registerTransientNetworkErrorRetry } from "./retry.ts";
 import { registerThinkingLevelGuard } from "./thinking-levels.ts";
 import registerTpsStatus from "./tps.ts";
-import { answeredClaudeMessages, answeredStream, UpstreamsAnnouncer } from "./upstreams.ts";
+import {
+	answeredClaudeMessages,
+	answeredStream,
+	fetchModelAccounts,
+	routesOfSources,
+	UpstreamsAnnouncer,
+} from "./upstreams.ts";
 
 class ConfigPersistenceError extends Error {
 	constructor(cause: unknown) {
@@ -867,7 +875,7 @@ export function registerRefreshCommand(options: {
 
 	pi.registerCommand(REFRESH_COMMAND, {
 		description:
-			"Reload the model list from your Provimux server now, with the accounts behind each model where the server lists them",
+			"Reload the model list from your Provimux server now, with the accounts behind each model where the server lists them, and the prices and cache lifetimes it gives for what they answered as",
 		handler: refreshHandler(REFRESH_COMMAND),
 	});
 }
@@ -1070,11 +1078,34 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	registerTransientNetworkErrorRetry(pi, identity.providerId);
 	// `pi -p --thinking low` on a model without low is refused, not moved silently.
 	registerThinkingLevelGuard(pi, identity.providerId);
-	// Where each model really comes from (login or API key, which lab), for other extensions.
-	const upstreams = new UpstreamsAnnouncer(pi, identity.providerId, () =>
-		resolveConnection(agentDir, identity.providerId),
+	// Where each model really comes from (login or API key, which lab), for other extensions. From a gateway that gives
+	// prices and cache lifetimes per providers.dev entry, the routes come from the list the model load read, with them;
+	// from any other, from a list read of their own, as before.
+	const gateway = new GatewayList(fetchModelSources, () => {
+		const current = resolveConnection(agentDir, identity.providerId);
+		return current
+			? { plainModelsUrl: resolveEndpoints(current.baseUrlInput).plainModelsUrl, apiKey: current.apiKey }
+			: null;
+	});
+	const routesFrom = async (baseUrlInput: string, apiKey: string, signal?: AbortSignal) => {
+		if (gateway.supports !== true) return fetchModelAccounts(baseUrlInput, apiKey, signal);
+		const url = resolveEndpoints(baseUrlInput).plainModelsUrl;
+		const sources = gateway.current(url, apiKey) ?? (await gateway.read(url, apiKey, undefined, signal));
+		if (!sources.read) throw new Error(`${url} was not read`);
+		return routesOfSources(sources);
+	};
+	const upstreams = new UpstreamsAnnouncer(
+		pi,
+		identity.providerId,
+		() => resolveConnection(agentDir, identity.providerId),
+		routesFrom,
+		undefined,
+		gateway,
 	);
 	upstreams.register();
+	// Each answer is counted at the price of the entry it names, where the gateway gives one.
+	const unprice = priceAnswersWith(identity.providerId, (entry) => gateway.priceOf(entry));
+	pi.on("session_shutdown", () => unprice());
 	// The footer says which route answered each of the session's turns: on by default, `"answered": false` turns it off.
 	let answeredEnabled = true;
 	try {
@@ -1142,6 +1173,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	});
 
 	const connection = resolveConnection(agentDir, identity.providerId);
+	// The model loads read the list through the shared reader: what they read is also what the routes and the price of
+	// each answer use. A load that asks for figures (the saved list had them) tells the reader to ask so too.
+	const readSources: SourcesReader = (url, apiKey, timeoutMs, signal, figures) => {
+		if (figures && gateway.supports === undefined) gateway.supports = true;
+		return gateway.read(url, apiKey, timeoutMs, signal, false);
+	};
 	const registerConfiguredProvider = async (
 		currentConnection: { baseUrlInput: string; apiKey: string },
 		options: { forceRefresh?: boolean; replaceCache?: boolean } = {},
@@ -1159,6 +1196,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					claudeMessages: resolveClaudeMessagesDefault(agentDir),
 					signal: refresh.signal,
 					shouldCommit: () => modelRefreshCoordinator.isCurrent(refresh.generation),
+					readSources,
 				},
 			);
 			if (!modelRefreshCoordinator.isCurrent(refresh.generation)) return undefined;
@@ -1249,6 +1287,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		fastMode,
 		refreshCoordinator: modelRefreshCoordinator,
 		onRefresh: async (currentConnection) => {
+			gateway.forgetReads();
 			const result = await registerConfiguredProvider(currentConnection, { forceRefresh: true, replaceCache: true });
 			void upstreams.refreshed();
 			return result;

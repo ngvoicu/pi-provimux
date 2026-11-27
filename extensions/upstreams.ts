@@ -30,8 +30,20 @@
  * An upstream is `{ provider, model?, subscription? }`: the pi provider the model would come from if used directly
  * (anthropic, openai-codex, openai, meta, openrouter, google) or a providers.dev provider pi has none for (devin,
  * antigravity); the model's id there when it differs; a subscription login (true) or an API key (false).
+ *
+ * From a Provimux that gives prices and cache lifetimes per providers.dev entry (figures.ts), and only from one:
+ * - an upstream may also say `entry`: the providers.dev entry (`<provider>/<model>`) of what answered, as the answer
+ *   names it (`X-Provimux-Entry`, `provimux_entry`), or in a route what the account last answered as; `null` where the
+ *   answer named its account and no entry, or the account's answers name no one entry. A reader looks nothing up for
+ *   an upstream with `entry`: the figures are the gateway's, and `null` has none. An answer's upstream also says
+ *   `account`, the gateway's marker of the account that answered.
+ * - `model-upstreams` also carries `figures`: the gateway's figures object (its `state`, `dataset_version`,
+ *   `generated_at`, `fetched_at`, and `entries`: entry → price, cache, input_window, max_output, as the gateway gives
+ *   them), told again whenever the list is read again.
+ * Readers that know none of this (pi-cache-keeper 0.10.8) read the routes and the answers as before.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { decodeWireValue, type GatewayList, handOnFigures, type ListedSources, priceByEntry } from "./figures.ts";
 import { resolveEndpoints } from "./lib.ts";
 import { type Account, likelyAccounts, own, parseAccounts } from "./sources.ts";
 
@@ -49,12 +61,21 @@ export const AUTH_HOST_HEADER = "x-cpa-auth-host";
 export const AUTH_KIND_FIELD = "cpa_auth_kind";
 export const AUTH_PROVIDER_FIELD = "cpa_auth_provider";
 export const AUTH_HOST_FIELD = "cpa_auth_host";
+/** Provimux's marker of the account that answered, and the providers.dev entry of the answer. */
+export const ACCOUNT_HEADER = "x-provimux-account";
+export const ENTRY_HEADER = "x-provimux-entry";
+export const ACCOUNT_FIELD = "provimux_account";
+export const ENTRY_FIELD = "provimux_entry";
 const REQUEST_TIMEOUT_MS = 10_000;
 
 export interface Upstream {
 	provider: string;
 	model?: string;
 	subscription?: boolean;
+	/** From a Provimux with figures only: the providers.dev entry; null: none (see the top of this file). */
+	entry?: string | null;
+	/** On an answer from a Provimux with figures: the marker of the account that answered. */
+	account?: string;
 }
 
 export interface Route {
@@ -67,6 +88,8 @@ export interface ModelAccounts {
 	owners: Record<string, string>;
 	/** Model id → the credentials that serve it; empty when CLIProxyAPI does not list them. */
 	accounts: Record<string, Account[]>;
+	/** Provimux's figures, where its list gave them: told with the routes. */
+	figures?: Record<string, unknown>;
 }
 
 /** Where a CLIProxyAPI credential leads, by its provider and kind: pi's provider id, or providers.dev's. */
@@ -165,14 +188,46 @@ export function upstreamOf(account: Account, modelId: string, catalog?: Catalog)
 const unique = (upstreams: Upstream[]): Upstream[] => {
 	const seen = new Set<string>();
 	return upstreams.filter((upstream) => {
-		const key = JSON.stringify([upstream.provider, upstream.model, upstream.subscription]);
+		const key = JSON.stringify([upstream.provider, upstream.model, upstream.subscription, upstream.entry]);
 		return !seen.has(key) && seen.add(key);
 	});
 };
 
+/**
+ * What a credential's answers for a model last said they were, from a Provimux that keeps it (`answered`): its one
+ * entry where every recorded answer named that entry; null where they differ or named none. Undefined where nothing is
+ * recorded (no answer yet, or a proxy that keeps no such record): the upstream is said as before, and a reader looks it
+ * up as before, until an answer names what it is.
+ */
+export function answeredEntry(account: Account): string | null | undefined {
+	if (!account.answered || account.answered.length === 0) return undefined;
+	const [only, ...more] = account.answered;
+	return only && more.length === 0 && only.entry ? only.entry : null;
+}
+
+/**
+ * A credential's upstream for a route: as `upstreamOf`, with the entry it last answered as where the proxy records it.
+ * A credential that leads somewhere not known is known by that entry, where there is one.
+ */
+function routeUpstreamOf(account: Account, modelId: string, catalog?: Catalog): Upstream | undefined {
+	const entry = answeredEntry(account);
+	const upstream = upstreamOf(account, modelId, catalog);
+	if (entry === undefined) return upstream;
+	if (upstream) return { ...upstream, entry };
+	if (!entry) return undefined;
+	const slash = entry.indexOf("/");
+	if (slash <= 0 || slash === entry.length - 1) return undefined;
+	return {
+		provider: entry.slice(0, slash),
+		model: entry.slice(slash + 1),
+		subscription: account.kind !== "apikey",
+		entry,
+	};
+}
+
 /** The upstreams of some credentials; empty when one of them leads somewhere not known (it may answer). */
 function upstreamsOf(accounts: Account[], modelId: string, catalog?: Catalog): Upstream[] {
-	const upstreams = accounts.map((account) => upstreamOf(account, modelId, catalog));
+	const upstreams = accounts.map((account) => routeUpstreamOf(account, modelId, catalog));
 	return upstreams.every((upstream) => upstream !== undefined) ? unique(upstreams as Upstream[]) : [];
 }
 
@@ -186,7 +241,7 @@ export function routeOf(modelId: string, listed: ModelAccounts, catalog?: Catalo
 		const fallbacks = unique(
 			accounts
 				.filter((account) => !likely.includes(account))
-				.map((account) => upstreamOf(account, modelId, catalog))
+				.map((account) => routeUpstreamOf(account, modelId, catalog))
 				.filter((upstream): upstream is Upstream => upstream !== undefined && !main.has(JSON.stringify(upstream))),
 		);
 		return { upstreams, ...(fallbacks.length > 0 ? { fallbacks } : {}) };
@@ -255,11 +310,30 @@ export async function fetchModelAccounts(
 	return listed;
 }
 
+/** A list the extension read (the model load's) in the form of `fetchModelAccounts`, with the gateway's figures. */
+export function routesOfSources(sources: ListedSources): ModelAccounts {
+	const listed: ModelAccounts = { owners: Object.create(null), accounts: Object.create(null) };
+	for (const [id, owner] of sources.owners) listed.owners[id] = owner;
+	for (const [id, accounts] of sources.accounts) listed.accounts[id] = accounts;
+	if (sources.figures) listed.figures = handOnFigures(sources.figures);
+	return listed;
+}
+
 /** What an answer says answered it, as given: the kind, provider and host (any may be absent or not a string). */
 export interface Statement {
 	kind: unknown;
 	provider: unknown;
 	host: unknown;
+	/** Provimux's marker of the account, and the answer's providers.dev entry, as written on the wire. */
+	account?: unknown;
+	entry?: unknown;
+}
+
+/** The entry an answer names, decoded; null where it is written in a form that cannot be read; undefined: none. */
+export function statedEntry(statement: Statement | undefined): string | null | undefined {
+	const raw = typeof statement?.entry === "string" ? statement.entry.trim() : "";
+	if (!raw) return undefined;
+	return decodeWireValue(raw) ?? null;
 }
 
 const STATEMENTS_KEY = Symbol.for("pi-provimux.answered-statements");
@@ -300,6 +374,9 @@ function keepWithMessage(stream: unknown, said: (message: Record<string, unknown
 			(message) => {
 				const statement = isRecord(message) ? said(message) : undefined;
 				if (statement && isRecord(message)) (message as Record<symbol, unknown>)[ANSWER] = statement;
+				// Counted at the price of the entry that answered, where the gateway gives one.
+				const entry = statedEntry(statement);
+				if (entry) priceByEntry(message, entry);
 			},
 			() => {},
 		);
@@ -361,10 +438,14 @@ function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 		onResponse: (response: { status: number; headers: Record<string, string> }, model: never) => {
 			// A retried request: the last response is the one whose body is read.
 			headers = response.headers ?? {};
+			const account = header(ACCOUNT_HEADER);
+			const entry = header(ENTRY_HEADER);
 			said = {
 				kind: header(AUTH_KIND_HEADER),
 				provider: header(AUTH_PROVIDER_HEADER),
 				host: header(AUTH_HOST_HEADER),
+				...(account !== undefined ? { account } : {}),
+				...(entry !== undefined ? { entry } : {}),
 			};
 			return onResponse?.(response, model);
 		},
@@ -373,7 +454,13 @@ function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 				heard = true;
 				// Over HTTP the headers alone count: a body's own fields are an inner gateway's.
 				if (!headers && data.type === "response.created") {
-					said = { kind: data[AUTH_KIND_FIELD], provider: data[AUTH_PROVIDER_FIELD], host: data[AUTH_HOST_FIELD] };
+					said = {
+						kind: data[AUTH_KIND_FIELD],
+						provider: data[AUTH_PROVIDER_FIELD],
+						host: data[AUTH_HOST_FIELD],
+						...(data[ACCOUNT_FIELD] !== undefined ? { account: data[ACCOUNT_FIELD] } : {}),
+						...(data[ENTRY_FIELD] !== undefined ? { entry: data[ENTRY_FIELD] } : {}),
+					};
 					const id = isRecord(data.response) ? data.response.id : undefined;
 					saidOf = typeof id === "string" ? id : undefined;
 				} else if (!headers && typeof data.type === "string" && FAILED_ATTEMPT.has(data.type)) {
@@ -540,6 +627,8 @@ export class UpstreamsAnnouncer {
 		private readonly fetchAccounts: typeof fetchModelAccounts = fetchModelAccounts,
 		/** pi's catalog, as a test gives it; else the session's models, else pi-ai's own. */
 		private readonly givenCatalog?: Catalog,
+		/** The gateway's list as the extension last read it: whether it gives figures, and the read an answer brings. */
+		private readonly gateway?: GatewayList,
 	) {}
 
 	/** A provider's model ids as pi's catalog has them, for the model ids said (`ownModelId`). */
@@ -586,6 +675,11 @@ export class UpstreamsAnnouncer {
 			this.keepRegistry(ctx);
 		});
 		this.pi.on("session_shutdown", () => this.shutdown());
+		// The list read again (a model load, or the read an answer with a new entry brought): from a gateway that gives
+		// figures, the routes and their figures are told again. From any other, only when asked, as before.
+		this.gateway?.onChange(() => {
+			if (this.wanted && this.gateway?.supports === true) void this.announce(true);
+		});
 		this.pi.events.on(REQUEST_EVENT, () => {
 			this.wanted = true;
 			void this.announce();
@@ -599,7 +693,7 @@ export class UpstreamsAnnouncer {
 			if (!stated) return;
 			statements().delete(event.data);
 			this.keepRegistry(ctx);
-			this.answered(event.model, stated.kind, stated.provider, stated.host);
+			this.answered(event.model, stated);
 		});
 	}
 
@@ -609,11 +703,11 @@ export class UpstreamsAnnouncer {
 		return !!this.listed && Object.values(this.listed.accounts).some((accounts) => accounts.length > 0);
 	}
 
-	private answered(modelId: string, kindValue: unknown, providerValue: unknown, hostValue: unknown): void {
+	private answered(modelId: string, stated: Statement): void {
 		const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
-		const kind = text(kindValue)?.toLowerCase();
-		const provider = text(providerValue);
-		const host = text(hostValue);
+		const kind = text(stated.kind)?.toLowerCase();
+		const provider = text(stated.provider);
+		const host = text(stated.host);
 		let upstreams: Upstream[] | undefined;
 		if ((kind !== "oauth" && kind !== "apikey") || !provider) {
 			// Named nobody: from a proxy that names answers, one it would not name (plugin code took part); said as
@@ -623,10 +717,26 @@ export class UpstreamsAnnouncer {
 		} else {
 			// Named: from the response alone, without waiting for the credential list; only once an extension asked.
 			this.namedBefore = true;
+			const upstream = statedUpstream(modelId, { provider, kind, ...(host ? { host } : {}) }, this.catalog);
+			const named = this.namedEntry(modelId, stated);
 			if (!this.wanted) return;
-			upstreams = [statedUpstream(modelId, { provider, kind, ...(host ? { host } : {}) }, this.catalog)];
+			upstreams = [{ ...upstream, ...named }];
 		}
 		if (upstreams) this.emit(ANSWERED_EVENT, { provider: this.providerId, model: modelId, upstreams });
+	}
+
+	/**
+	 * What an answer says of its account and entry, for its upstream: from an answer that names its entry, or from a
+	 * gateway known to give figures (an answer there that names its account and no entry has none: `entry: null`).
+	 * Nothing from any other (Provimux 8.1.7-pmx.3 names the account only): the upstream is as before. An entry new to
+	 * what the extension holds brings one more read of the list.
+	 */
+	private namedEntry(modelId: string, stated: Statement): Pick<Upstream, "entry" | "account"> {
+		const account = typeof stated.account === "string" && stated.account.trim() ? stated.account.trim() : undefined;
+		const entry = statedEntry(stated);
+		if (entry === undefined && !(account && this.gateway?.supports === true)) return {};
+		if (entry) this.gateway?.noteAnswer(modelId, account, entry);
+		return { entry: entry ?? null, ...(account ? { account } : {}) };
 	}
 
 	/** The session shut down: what it asked for is dropped, the lookup in flight aborted. */
@@ -655,9 +765,12 @@ export class UpstreamsAnnouncer {
 		return this.wanted ? this.announce() : Promise.resolve();
 	}
 
-	/** Asks CLIProxyAPI for its credentials and tells the routes. When it does not answer, nothing is said. */
-	announce(): Promise<void> {
-		if (this.running) return this.running;
+	/**
+	 * Asks CLIProxyAPI for its credentials and tells the routes. When it does not answer, nothing is said. `again`: the
+	 * list was just read again; a lookup already running read the older one, so this one follows it.
+	 */
+	announce(again = false): Promise<void> {
+		if (this.running) return again ? this.running.then(() => this.announce()) : this.running;
 		const signal = this.session.signal;
 		if (signal.aborted) return Promise.resolve();
 		const running: Promise<void> = (async () => {
@@ -680,7 +793,8 @@ export class UpstreamsAnnouncer {
 			const models: Record<string, Route> = Object.fromEntries(
 				[...ids].map((id) => [id, routeOf(id, listed, this.catalog)]),
 			);
-			this.emit(UPSTREAMS_EVENT, { provider: this.providerId, models }, signal);
+			const figures = listed.figures;
+			this.emit(UPSTREAMS_EVENT, { provider: this.providerId, models, ...(figures ? { figures } : {}) }, signal);
 		})()
 			.catch(() => {
 				// Nothing said: a lookup never ends pi.

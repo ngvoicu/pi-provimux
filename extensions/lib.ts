@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import type { FastPreference } from "./fast.ts";
-import { type Account, parseAccounts, sourceLabel } from "./sources.ts";
+import { type EntryCost, entryCost, type GatewayFigures, parseFigures, type SourcesReader } from "./figures.ts";
+import { type Account, likelyAccounts, parseAccounts, sourceLabel } from "./sources.ts";
 
 // Local shape matching pi ThinkingLevelMap; avoid hard runtime peer imports here.
 export type ThinkingLevelMap = Partial<
@@ -164,6 +165,8 @@ export interface MappedModels {
 	 * list was read and listed none; absent: not known (the lookup failed, or the cache, which records only true).
 	 */
 	listsCredentials?: boolean;
+	/** The proxy's list gave prices and cache lifetimes per providers.dev entry (`figures`): asked for at once next time. */
+	listsFigures?: boolean;
 }
 
 export interface ModelsCacheFile extends MappedModels {
@@ -1094,27 +1097,50 @@ export interface ModelSources {
 	accounts: Map<string, Account[]>;
 	/** The list was read (HTTP 200 with a list): only then does it say whether CPA lists credentials. */
 	read?: boolean;
+	/** Provimux's prices and cache lifetimes per providers.dev entry, where its list gave them. */
+	figures?: GatewayFigures;
+	/** An account row carries `answered`: a Provimux that names each answer's entry. */
+	answers?: boolean;
 }
 
 /**
  * CPA's plain OpenAI model list with the credentials that serve each model (`?include=accounts`). A CPA that does
  * not know the parameter answers the plain list: owners only. Empty on any failure.
+ *
+ * `figures`: asks `?include=accounts,figures` (a Provimux known to give figures; one that does not reads it as
+ * `accounts`). Asked without, a list whose accounts say what their answers were is from a Provimux that gives figures:
+ * it is asked once more, with them.
  */
 export async function fetchModelSources(
 	plainModelsUrl: string,
 	apiKey: string,
 	timeoutMs = MODELS_REQUEST_TIMEOUT_MS,
 	signal?: AbortSignal,
+	figures = false,
+): Promise<ModelSources> {
+	const sources = await readModelSources(plainModelsUrl, apiKey, timeoutMs, signal, figures);
+	if (figures || !sources.answers || signal?.aborted) return sources;
+	const withFigures = await readModelSources(plainModelsUrl, apiKey, timeoutMs, signal, true);
+	return withFigures.read ? withFigures : sources;
+}
+
+async function readModelSources(
+	plainModelsUrl: string,
+	apiKey: string,
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+	figures: boolean,
 ): Promise<ModelSources> {
 	const sources: ModelSources = { owners: new Map(), accounts: new Map() };
 	try {
 		const timeoutSignal = AbortSignal.timeout(timeoutMs);
-		const response = await fetch(`${plainModelsUrl}?include=accounts`, {
+		const response = await fetch(`${plainModelsUrl}?include=accounts${figures ? ",figures" : ""}`, {
 			headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
 			signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
 		});
 		if (!response.ok) return sources;
-		const data = asRecord(await response.json())?.data;
+		const body: unknown = await response.json();
+		const data = asRecord(body)?.data;
 		if (!Array.isArray(data)) return sources;
 		for (const item of Array.isArray(data) ? data : []) {
 			const record = asRecord(item);
@@ -1124,7 +1150,10 @@ export async function fetchModelSources(
 			if (ownedBy) sources.owners.set(id, ownedBy);
 			const accounts = parseAccounts(record?.accounts);
 			if (accounts.length > 0) sources.accounts.set(id, accounts);
+			if (accounts.some((account) => account.answered)) sources.answers = true;
 		}
+		const held = parseFigures(asRecord(body)?.figures);
+		if (held) sources.figures = held;
 		sources.read = true;
 	} catch {
 		// Without the list every model stays on the Codex format, and no name says where a model comes from.
@@ -1142,6 +1171,26 @@ export function claudeFormatFor(
 	return findClaudeFormatEntry(modelId, catalog);
 }
 
+/**
+ * A model's price from the gateway's figures: the price of the entry the account tried first last answered as (the
+ * newest item of its `answered`). Several accounts sharing the first place: only where their entries are priced alike.
+ * Undefined where an account tried first has no answer recorded, its last answer named no entry, or the figures give
+ * that entry no price: the model keeps models.dev's price, as without figures.
+ */
+export function figuresCostFor(
+	accounts: Account[] | undefined,
+	figures: GatewayFigures | undefined,
+): EntryCost | undefined {
+	if (!accounts || accounts.length === 0 || !figures) return undefined;
+	const costs = likelyAccounts(accounts).map((account) => {
+		const entry = account.answered?.[0]?.entry;
+		return entry && Object.hasOwn(figures.entries, entry) ? entryCost(figures.entries[entry]) : undefined;
+	});
+	const [first] = costs;
+	if (!first || costs.some((cost) => !cost || JSON.stringify(cost) !== JSON.stringify(first))) return undefined;
+	return first;
+}
+
 /** The output limit CLIProxyAPI reports for a model, if any. */
 export function reportedMaxTokens(model: CodexClientModel): number | undefined {
 	for (const value of [model.max_tokens, model.max_output_tokens, model.max_completion_tokens]) {
@@ -1157,6 +1206,8 @@ export async function loadMappedModels(
 	agentDir?: string,
 	signal?: AbortSignal,
 	claudeMode: ClaudeMessagesMode = "off",
+	/** How the list is read (a shared reader), and whether to ask for figures at once. */
+	list: { readSources?: SourcesReader; figures?: boolean } = {},
 ): Promise<MappedModels> {
 	const claudeWanted = claudeMode !== "off";
 	const pricingEnabled = typeof timeoutOrFastMode === "boolean";
@@ -1167,7 +1218,13 @@ export async function loadMappedModels(
 	const [remoteModels, costCatalog, sources, claudeCatalog] = await Promise.all([
 		fetchCodexModels(endpoints.modelsUrl, apiKey, timeoutMs, signal),
 		pricingEnabled ? fetchModelsDevCostMap(agentDir, false, signal) : Promise.resolve(undefined),
-		fetchModelSources(endpoints.plainModelsUrl, apiKey, timeoutMs, signal),
+		(list.readSources ?? fetchModelSources)(
+			endpoints.plainModelsUrl,
+			apiKey,
+			timeoutMs,
+			signal,
+			list.figures === true,
+		),
 		claudeWanted ? loadBuiltinClaudeFormatCatalog() : Promise.resolve(undefined),
 	]);
 	const owners = claudeWanted ? sources.owners : undefined;
@@ -1181,6 +1238,13 @@ export async function loadMappedModels(
 			const source = sourceLabel(sources.accounts.get(codexModelId(model)) ?? []);
 			const mapped = toPiModel(model, costCatalog, effectiveFastMode, claudeFormat, source);
 			if (mapped && claudeFormat) claudeFormatIds.add(mapped.id);
+			// The gateway's price for what the model last answered as; Fast mode's price stays models.dev's.
+			const fast = effectiveFastMode && !claudeFormat && supportsFastServiceTier(model);
+			const figured =
+				mapped && pricingEnabled && !fast
+					? figuresCostFor(sources.accounts.get(mapped.id), sources.figures)
+					: undefined;
+			if (mapped && figured) mapped.cost = figured;
 			return mapped;
 		})
 		.filter((model): model is PiProviderModel => model !== null);
@@ -1204,6 +1268,7 @@ export async function loadMappedModels(
 		...(claudeWanted ? { claudeMessages: claudeMode } : {}),
 		// Said only by a list that was read: a failed lookup says nothing either way.
 		...(sources.read ? { listsCredentials: sources.accounts.size > 0 } : {}),
+		...(sources.figures ? { listsFigures: true } : {}),
 	};
 }
 
@@ -1313,6 +1378,8 @@ export async function resolveMappedModels(
 		signal?: AbortSignal;
 		shouldCommit?: () => boolean;
 		staleTtlMs?: number;
+		/** How the list is read: a reader shared with the rest of the extension. */
+		readSources?: SourcesReader;
 	} = {},
 ): Promise<ResolvedModelsResult> {
 	const cacheMatchesFastMode = (cache: ModelsCacheFile): boolean =>
@@ -1333,6 +1400,7 @@ export async function resolveMappedModels(
 		agentDir,
 		options.signal,
 		options.claudeMessages ?? "off",
+		{ readSources: options.readSources, figures: existingCache?.listsFigures === true },
 	);
 	const { merged } = mergeModelsWithExistingCache(
 		options.replaceCache ? null : existingCache,

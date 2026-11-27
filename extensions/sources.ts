@@ -16,6 +16,13 @@ export interface Account {
 	priority: number;
 	/** The host of an API key's base URL. */
 	host?: string;
+	/** Provimux's marker of the account (`a.` or `s.` and 20 characters): equal on every answer it gives. */
+	account?: string;
+	/**
+	 * What this account's answers for this model said they were, newest first (Provimux with figures): a providers.dev
+	 * entry, or null for answers that named none. A record of answers, not a promise. Absent: the proxy keeps none.
+	 */
+	answered?: Array<{ entry: string | null; on?: string }>;
 }
 
 /** A table's own entry: a name such as `constructor` or `__proto__` finds nothing. */
@@ -25,6 +32,14 @@ export function own<T>(table: Readonly<Record<string, T>>, key: string): T | und
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** An account row's `answered`: an item whose entry is neither a string nor null is an entry not known (null). */
+function parseAnswered(items: unknown[]): NonNullable<Account["answered"]> {
+	return items.filter(isRecord).map((item) => ({
+		entry: typeof item.entry === "string" && item.entry ? item.entry : null,
+		...(typeof item.on === "string" ? { on: item.on } : {}),
+	}));
+}
 
 /** The `accounts` of a model list entry; what is not a credential is left out. */
 export function parseAccounts(value: unknown): Account[] {
@@ -36,6 +51,8 @@ export function parseAccounts(value: unknown): Account[] {
 			kind: account.kind,
 			priority: typeof account.priority === "number" ? account.priority : 0,
 			...(typeof account.host === "string" && account.host ? { host: account.host.toLowerCase() } : {}),
+			...(typeof account.account === "string" && account.account ? { account: account.account } : {}),
+			...(Array.isArray(account.answered) ? { answered: parseAnswered(account.answered) } : {}),
 		});
 	}
 	return accounts;
