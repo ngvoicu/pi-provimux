@@ -66,6 +66,7 @@ import {
 } from "./lib.ts";
 import type { PauseController } from "./pause.ts";
 import { pauseController, readPauseSetting, waitForPauseToEnd } from "./pause.ts";
+import { registerPauseFooter } from "./pause-footer.ts";
 import { registerTransientNetworkErrorRetry } from "./retry.ts";
 import { registerThinkingLevelGuard } from "./thinking-levels.ts";
 import registerTpsStatus from "./tps.ts";
@@ -563,8 +564,10 @@ export function registerPauseCommands(options: {
 	pi: ExtensionAPI;
 	agentDir: string;
 	pauseMode: PauseController;
+	/** After the pause changed here: the footer shows it at once. */
+	onChange?: () => void;
 }): void {
-	const { pi, agentDir, pauseMode } = options;
+	const { pi, agentDir, pauseMode, onChange } = options;
 
 	const setPause = async (
 		enabled: boolean,
@@ -588,6 +591,7 @@ export function registerPauseCommands(options: {
 		}
 
 		pauseMode.setEnabled(enabled);
+		onChange?.();
 		const text = enabled
 			? wasPaused
 				? "Requests were already paused. Type /continue to let them go."
@@ -886,7 +890,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		logWarn(`invalid pause configuration (${message}); using pause=false`);
 	}
 	pauseController.setEnabled(pauseEnabled);
-	registerPauseCommands({ pi, agentDir, pauseMode: pauseController });
+	// The pause in the footer: in every window, read again every few seconds.
+	const pauseFooter = registerPauseFooter(pi, agentDir, { controller: pauseController });
+	registerPauseCommands({ pi, agentDir, pauseMode: pauseController, onChange: () => pauseFooter.refresh() });
 	registerPauseGuard({ pi, agentDir, pauseMode: pauseController });
 
 	const proactiveCompaction = new ProactiveCompactionController(agentDir, identity.providerId);

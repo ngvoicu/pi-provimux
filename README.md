@@ -125,6 +125,11 @@ type `/continue`. A held request waits and is sent as soon as you continue; noth
 Requests are paused: every new request to a model waits, in every Pi window, also after a restart, until you type /continue. An answer already streaming finishes.
 ```
 
+While requests are paused, Pi's footer says `paused · /continue` in the warning colour (`paused` alone in a terminal
+narrower than 60 columns), in every Pi window: at once in the window where you typed `/pause`, within 2 seconds in
+the others, and from the start in a Pi started while paused. With a Provimux model selected, the model's name in the
+footer also ends with `paused`, in orange.
+
 Then `/continue`: `Requests continue: the ones that were waiting go out now.` `/continue` with nothing paused:
 `Requests were not paused, so nothing was waiting.` `/pause` twice: `Requests were already paused. Type /continue to let them go.`
 
@@ -132,8 +137,10 @@ Then `/continue`: `Requests continue: the ones that were waiting go out now.` `/
 restart: the pause is saved as `pause` in `provimux.json`, and each window reads it before each request. It lasts until
 `/continue` in any window.
 
-**What they do not do.** `/pause` does not stop an answer already streaming, cancel anything, or show in the footer: a
-paused Pi simply waits. More: [Pausing provider requests](#pausing-provider-requests).
+**What they do not do.** `/pause` does not stop an answer already streaming or cancel anything: a paused Pi simply
+waits, and the footer says why. Pi puts every extension's status on one line, in the order of their names, and cuts
+it at the right edge, so in a narrow terminal the statuses of other extensions before it can push `paused` out of
+view. More: [Pausing provider requests](#pausing-provider-requests).
 
 ## What it does
 
@@ -332,7 +339,7 @@ Use `/continue` to clear the pause:
 /continue
 ```
 
-The pause holds every request Pi sends to a model, whatever its provider. Both commands persist the `pause` boolean in `~/.pi/agent/provimux.json`. Before every provider request, the extension rereads this setting. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
+The pause holds every request Pi sends to a model, whatever its provider. While it is set, the footer of every Pi window with this extension says `paused · /continue` (`paused` under 60 columns); an idle window reads the setting every 2 seconds. Both commands persist the `pause` boolean in `~/.pi/agent/provimux.json`. Before every provider request, the extension rereads this setting. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
 
 ## Model cache
 
