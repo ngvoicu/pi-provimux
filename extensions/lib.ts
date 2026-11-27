@@ -7,8 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import type { FastPreference } from "./fast.ts";
-import { type EntryCost, entryCost, type GatewayFigures, parseFigures, type SourcesReader } from "./figures.ts";
-import { type Account, likelyAccounts, parseAccounts, sourceLabel } from "./sources.ts";
+import { type GatewayFigures, parseFigures, type SourcesReader } from "./figures.ts";
+import { type Account, parseAccounts, sourceLabel } from "./sources.ts";
 
 // Local shape matching pi ThinkingLevelMap; avoid hard runtime peer imports here.
 export type ThinkingLevelMap = Partial<
@@ -1171,26 +1171,6 @@ export function claudeFormatFor(
 	return findClaudeFormatEntry(modelId, catalog);
 }
 
-/**
- * A model's price from the gateway's figures: the price of the entry the account tried first last answered as (the
- * newest item of its `answered`). Several accounts sharing the first place: only where their entries are priced alike.
- * Undefined where an account tried first has no answer recorded, its last answer named no entry, or the figures give
- * that entry no price: the model keeps models.dev's price, as without figures.
- */
-export function figuresCostFor(
-	accounts: Account[] | undefined,
-	figures: GatewayFigures | undefined,
-): EntryCost | undefined {
-	if (!accounts || accounts.length === 0 || !figures) return undefined;
-	const costs = likelyAccounts(accounts).map((account) => {
-		const entry = account.answered?.[0]?.entry;
-		return entry && Object.hasOwn(figures.entries, entry) ? entryCost(figures.entries[entry]) : undefined;
-	});
-	const [first] = costs;
-	if (!first || costs.some((cost) => !cost || JSON.stringify(cost) !== JSON.stringify(first))) return undefined;
-	return first;
-}
-
 /** The output limit CLIProxyAPI reports for a model, if any. */
 export function reportedMaxTokens(model: CodexClientModel): number | undefined {
 	for (const value of [model.max_tokens, model.max_output_tokens, model.max_completion_tokens]) {
@@ -1238,13 +1218,6 @@ export async function loadMappedModels(
 			const source = sourceLabel(sources.accounts.get(codexModelId(model)) ?? []);
 			const mapped = toPiModel(model, costCatalog, effectiveFastMode, claudeFormat, source);
 			if (mapped && claudeFormat) claudeFormatIds.add(mapped.id);
-			// The gateway's price for what the model last answered as; Fast mode's price stays models.dev's.
-			const fast = effectiveFastMode && !claudeFormat && supportsFastServiceTier(model);
-			const figured =
-				mapped && pricingEnabled && !fast
-					? figuresCostFor(sources.accounts.get(mapped.id), sources.figures)
-					: undefined;
-			if (mapped && figured) mapped.cost = figured;
 			return mapped;
 		})
 		.filter((model): model is PiProviderModel => model !== null);

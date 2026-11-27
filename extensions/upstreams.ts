@@ -32,18 +32,20 @@
  * antigravity); the model's id there when it differs; a subscription login (true) or an API key (false).
  *
  * From a Provimux that gives prices and cache lifetimes per providers.dev entry (figures.ts), and only from one:
- * - an upstream may also say `entry`: the providers.dev entry (`<provider>/<model>`) of what answered, as the answer
- *   names it (`X-Provimux-Entry`, `provimux_entry`), or in a route what the account last answered as; `null` where the
- *   answer named its account and no entry, or the account's answers name no one entry. A reader looks nothing up for
- *   an upstream with `entry`: the figures are the gateway's, and `null` has none. An answer's upstream also says
- *   `account`, the gateway's marker of the account that answered.
+ * - an upstream of a route may also say `entry`, the providers.dev entry (`<provider>/<model>`) its credentials last
+ *   answered as (`null` where their answers name no one entry; absent where none is recorded), and `accounts`, the
+ *   gateway's markers of those credentials. A reader looks nothing up for an upstream with `entry`: the figures are the
+ *   gateway's, and `null` has none.
+ * - `model-upstreams:answered-entry` (ENTRY_EVENT) is told just before an answer's `model-upstreams:answered`, with the
+ *   entry the answer names (`X-Provimux-Entry`, `provimux_entry`; `null` where it names its account and no entry) and
+ *   its account's marker. `model-upstreams:answered` itself is unchanged.
  * - `model-upstreams` also carries `figures`: the gateway's figures object (its `state`, `dataset_version`,
  *   `generated_at`, `fetched_at`, and `entries`: entry → price, cache, input_window, max_output, as the gateway gives
  *   them), told again whenever the list is read again.
  * Readers that know none of this (pi-cache-keeper 0.10.8) read the routes and the answers as before.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { decodeWireValue, type GatewayList, handOnFigures, type ListedSources, priceByEntry } from "./figures.ts";
+import { decodeWireValue, type GatewayList, handOnFigures, type ListedSources } from "./figures.ts";
 import { resolveEndpoints } from "./lib.ts";
 import { type Account, likelyAccounts, own, parseAccounts } from "./sources.ts";
 
@@ -52,6 +54,13 @@ export { type Account, likelyAccounts } from "./sources.ts";
 export const REQUEST_EVENT = "model-upstreams:request";
 export const UPSTREAMS_EVENT = "model-upstreams";
 export const ANSWERED_EVENT = "model-upstreams:answered";
+/**
+ * From a Provimux with figures: the providers.dev entry of an answer and its account's marker, told just before that
+ * answer's `model-upstreams:answered` (`{ provider, model, entry, account? }`, `entry` null where the answer named its
+ * account and no entry). An event of its own, so `model-upstreams:answered` stays as it was for readers that know none
+ * of it.
+ */
+export const ENTRY_EVENT = "model-upstreams:answered-entry";
 export const AUTH_KIND_HEADER = "x-cpa-auth-kind";
 /** The answering credential's provider, as the credential list names providers. */
 export const AUTH_PROVIDER_HEADER = "x-cpa-auth-provider";
@@ -72,10 +81,10 @@ export interface Upstream {
 	provider: string;
 	model?: string;
 	subscription?: boolean;
-	/** From a Provimux with figures only: the providers.dev entry; null: none (see the top of this file). */
+	/** In a route, from a Provimux with figures only: the providers.dev entry; null: none (see the top of this file). */
 	entry?: string | null;
-	/** On an answer from a Provimux with figures: the marker of the account that answered. */
-	account?: string;
+	/** In a route, from a Provimux that records answers: the markers of the credentials this upstream stands for. */
+	accounts?: string[];
 }
 
 export interface Route {
@@ -185,12 +194,30 @@ export function upstreamOf(account: Account, modelId: string, catalog?: Catalog)
 	return { provider, ...(model !== modelId ? { model } : {}), subscription: account.kind !== "apikey" };
 }
 
+/** An upstream as said before entries: what makes two alike. */
+const asBefore = (upstream: Upstream) => JSON.stringify([upstream.provider, upstream.model, upstream.subscription]);
+
+/**
+ * One upstream for those that read alike as before (provider, model, kind), so a reader that knows no entry reads the
+ * same routes. What the credentials behind them recorded goes together: their markers in `accounts`, and their entry
+ * where they agree; where one has none recorded, none is given (looked up as before); where they differ, null.
+ */
 const unique = (upstreams: Upstream[]): Upstream[] => {
-	const seen = new Set<string>();
-	return upstreams.filter((upstream) => {
-		const key = JSON.stringify([upstream.provider, upstream.model, upstream.subscription, upstream.entry]);
-		return !seen.has(key) && seen.add(key);
-	});
+	const kept = new Map<string, Upstream>();
+	for (const upstream of upstreams) {
+		const before = kept.get(asBefore(upstream));
+		if (!before) {
+			kept.set(asBefore(upstream), { ...upstream });
+			continue;
+		}
+		if (before.accounts && upstream.accounts)
+			before.accounts = [...new Set([...before.accounts, ...upstream.accounts])];
+		if ("entry" in before && before.entry !== upstream.entry) {
+			if ("entry" in upstream) before.entry = null;
+			else delete before.entry;
+		}
+	}
+	return [...kept.values()];
 };
 
 /**
@@ -206,22 +233,18 @@ export function answeredEntry(account: Account): string | null | undefined {
 }
 
 /**
- * A credential's upstream for a route: as `upstreamOf`, with the entry it last answered as where the proxy records it.
- * A credential that leads somewhere not known is known by that entry, where there is one.
+ * A credential's upstream for a route: as `upstreamOf`; from a Provimux that records answers, with the credential's
+ * marker (`accounts`) and the entry it last answered as. Nothing else changes: a credential that leads somewhere not
+ * known stays not known.
  */
 function routeUpstreamOf(account: Account, modelId: string, catalog?: Catalog): Upstream | undefined {
-	const entry = answeredEntry(account);
 	const upstream = upstreamOf(account, modelId, catalog);
-	if (entry === undefined) return upstream;
-	if (upstream) return { ...upstream, entry };
-	if (!entry) return undefined;
-	const slash = entry.indexOf("/");
-	if (slash <= 0 || slash === entry.length - 1) return undefined;
+	if (!upstream || !account.answered) return upstream;
+	const entry = answeredEntry(account);
 	return {
-		provider: entry.slice(0, slash),
-		model: entry.slice(slash + 1),
-		subscription: account.kind !== "apikey",
-		entry,
+		...upstream,
+		...(entry !== undefined ? { entry } : {}),
+		...(account.account ? { accounts: [account.account] } : {}),
 	};
 }
 
@@ -237,12 +260,12 @@ export function routeOf(modelId: string, listed: ModelAccounts, catalog?: Catalo
 	if (accounts && accounts.length > 0) {
 		const likely = likelyAccounts(accounts);
 		const upstreams = upstreamsOf(likely, modelId, catalog);
-		const main = new Set(upstreams.map((upstream) => JSON.stringify(upstream)));
+		const main = new Set(upstreams.map(asBefore));
 		const fallbacks = unique(
 			accounts
 				.filter((account) => !likely.includes(account))
 				.map((account) => routeUpstreamOf(account, modelId, catalog))
-				.filter((upstream): upstream is Upstream => upstream !== undefined && !main.has(JSON.stringify(upstream))),
+				.filter((upstream): upstream is Upstream => upstream !== undefined && !main.has(asBefore(upstream))),
 		);
 		return { upstreams, ...(fallbacks.length > 0 ? { fallbacks } : {}) };
 	}
@@ -374,9 +397,6 @@ function keepWithMessage(stream: unknown, said: (message: Record<string, unknown
 			(message) => {
 				const statement = isRecord(message) ? said(message) : undefined;
 				if (statement && isRecord(message)) (message as Record<symbol, unknown>)[ANSWER] = statement;
-				// Counted at the price of the entry that answered, where the gateway gives one.
-				const entry = statedEntry(statement);
-				if (entry) priceByEntry(message, entry);
 			},
 			() => {},
 		);
@@ -426,6 +446,7 @@ function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 	if (!options || !onEvent) return { options, said: () => undefined };
 	const onResponse = options.onResponse;
 	let headers: Record<string, string> | undefined;
+	/** Whether the current attempt was told: each attempt is told once, so the last told is the attempt that answered. */
 	let told = false;
 	/** What the current attempt said, and the response it said it of (WebSocket). */
 	let said: Statement | undefined;
@@ -438,6 +459,8 @@ function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 		onResponse: (response: { status: number; headers: Record<string, string> }, model: never) => {
 			// A retried request: the last response is the one whose body is read.
 			headers = response.headers ?? {};
+			// A new response: a new attempt, told with its first stream event.
+			told = false;
 			const account = header(ACCOUNT_HEADER);
 			const entry = header(ENTRY_HEADER);
 			said = {
@@ -464,11 +487,13 @@ function keptOptions<T extends AnswerCallbacks<never> | undefined>(
 					const id = isRecord(data.response) ? data.response.id : undefined;
 					saidOf = typeof id === "string" ? id : undefined;
 				} else if (!headers && typeof data.type === "string" && FAILED_ATTEMPT.has(data.type)) {
-					// The attempt ended without an answer: the next one starts unnamed.
+					// The attempt ended without an answer: the next one starts unnamed, and is told.
 					said = undefined;
 					saidOf = undefined;
+					told = false;
 				}
-				// The event is told once per request, with its first statement.
+				// Each attempt is told once, with its first statement: an attempt tried again (an HTTP retry, a Codex WebSocket
+				// replay on a fresh socket after a failed one) tells its own, so the last one told is the attempt that answered.
 				if (!told && said && (headers || data.type === "response.created")) {
 					told = true;
 					statements().set(data, said);
@@ -720,21 +745,22 @@ export class UpstreamsAnnouncer {
 			const upstream = statedUpstream(modelId, { provider, kind, ...(host ? { host } : {}) }, this.catalog);
 			const named = this.namedEntry(modelId, stated);
 			if (!this.wanted) return;
-			upstreams = [{ ...upstream, ...named }];
+			if (named) this.emit(ENTRY_EVENT, { provider: this.providerId, model: modelId, ...named });
+			upstreams = [upstream];
 		}
 		if (upstreams) this.emit(ANSWERED_EVENT, { provider: this.providerId, model: modelId, upstreams });
 	}
 
 	/**
-	 * What an answer says of its account and entry, for its upstream: from an answer that names its entry, or from a
+	 * What an answer says of its account and entry, for ENTRY_EVENT: from an answer that names its entry, or from a
 	 * gateway known to give figures (an answer there that names its account and no entry has none: `entry: null`).
-	 * Nothing from any other (Provimux 8.1.7-pmx.3 names the account only): the upstream is as before. An entry new to
-	 * what the extension holds brings one more read of the list.
+	 * Nothing from any other (Provimux 8.1.7-pmx.3 names the account only). An entry new to what the extension holds
+	 * brings one more read of the list.
 	 */
-	private namedEntry(modelId: string, stated: Statement): Pick<Upstream, "entry" | "account"> {
+	private namedEntry(modelId: string, stated: Statement): { entry: string | null; account?: string } | undefined {
 		const account = typeof stated.account === "string" && stated.account.trim() ? stated.account.trim() : undefined;
 		const entry = statedEntry(stated);
-		if (entry === undefined && !(account && this.gateway?.supports === true)) return {};
+		if (entry === undefined && !(account && this.gateway?.supports === true)) return undefined;
 		if (entry) this.gateway?.noteAnswer(modelId, account, entry);
 		return { entry: entry ?? null, ...(account ? { account } : {}) };
 	}

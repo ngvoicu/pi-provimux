@@ -1,5 +1,7 @@
 /**
- * The prices and cache lifetimes a Provimux gateway gives for the providers.dev entry of each answer.
+ * The prices and cache lifetimes a Provimux gateway gives for the providers.dev entry of each answer, held and handed on
+ * to other extensions (pi-cache-keeper shows them). This extension prices nothing with them: Pi counts each turn at the
+ * model's own price, as before.
  *
  * A Provimux that has them answers `/v1/models?include=accounts,figures` with a `figures` object (contract 1): per
  * providers.dev entry (`<provider>/<model>`, the first slash ends the provider) its price, cache lifetimes, input window
@@ -8,21 +10,12 @@
  * the entry is that account's. Nothing here guesses an entry from a model's name or an account's kind.
  *
  * - The list is read when the models are loaded (at the start, on `/provimux-refresh`); once more when an answer names
- *   an entry the copy held does not have, or that its account's row does not list yet; never once per answer.
+ *   an entry the copy held does not have, or that its account's row does not list yet; never once per answer while it
+ *   is held. A read that failed is tried again by the next such answer.
  * - A gateway gives figures when its list has `figures` (whatever its `state`). One that does not (Provimux
  *   8.1.7-pmx.3 or older, plain CLIProxyAPI) is read and used exactly as before.
  */
-import { calculateCost } from "@earendil-works/pi-ai/models";
 import type { Account } from "./sources.ts";
-
-/** Prices in US dollars per million tokens, in the shape of Pi's model `cost`. */
-export interface EntryCost {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	tiers?: Array<{ input: number; output: number; cacheRead: number; cacheWrite: number; inputTokensAbove: number }>;
-}
 
 /** The gateway's `figures` object as read: its state and dates, and its entries as the gateway gave them. */
 export interface GatewayFigures {
@@ -49,8 +42,6 @@ export interface ListedSources {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 const text = (value: unknown) => (typeof value === "string" && value ? value : undefined);
-const price = (value: unknown) =>
-	typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 
 /** The `figures` object of a list answer; undefined when there is none (a gateway without figures). */
 export function parseFigures(value: unknown): GatewayFigures | undefined {
@@ -81,53 +72,6 @@ export function handOnFigures(figures: GatewayFigures): Record<string, unknown> 
 		...(figures.fetchedAt ? { fetched_at: figures.fetchedAt } : {}),
 		entries: { ...figures.entries },
 	};
-}
-
-/**
- * An entry's price as Pi's `cost`: the base input and output price, the cache read price (0 where none is stated, as
- * Pi counts a price it lacks), the cache write price of the lifetime not stated or else the shortest (Pi's own
- * convention), and one tier per prompt size a price changes at. Undefined where the entry is not priced per token or
- * for comparison (`billing` `unknown`, or a value not known), or has no base input or output price.
- */
-export function entryCost(entry: unknown): EntryCost | undefined {
-	if (!isRecord(entry) || !isRecord(entry.price)) return undefined;
-	const p = entry.price;
-	if (p.billing !== "per_use" && p.billing !== "reference") return undefined;
-	const input = price(p.input);
-	const output = price(p.output);
-	if (input === undefined || output === undefined) return undefined;
-	const writes = (Array.isArray(p.cache_write) ? p.cache_write : [])
-		.filter(isRecord)
-		.map((item) => ({ lifetime: item.lifetime_s, price: price(item.price) }))
-		.filter((item): item is { lifetime: unknown; price: number } => item.price !== undefined);
-	const unstated = writes.find((item) => item.lifetime === null || item.lifetime === undefined);
-	const timed = writes
-		.filter((item) => typeof item.lifetime === "number" && item.lifetime > 0)
-		.sort((a, b) => (a.lifetime as number) - (b.lifetime as number));
-	const cost: EntryCost = {
-		input,
-		output,
-		cacheRead: price(p.cache_read) ?? 0,
-		cacheWrite: (unstated ?? timed[0])?.price ?? 0,
-	};
-	const tiers: NonNullable<EntryCost["tiers"]> = [];
-	let previous = { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite };
-	const items = (Array.isArray(p.tiers) ? p.tiers : [])
-		.filter(isRecord)
-		.filter((tier) => typeof tier.input_tokens_above === "number" && Number.isSafeInteger(tier.input_tokens_above))
-		.sort((a, b) => (a.input_tokens_above as number) - (b.input_tokens_above as number));
-	for (const tier of items) {
-		const next = {
-			input: price(tier.input) ?? previous.input,
-			output: price(tier.output) ?? previous.output,
-			cacheRead: price(tier.cache_read) ?? previous.cacheRead,
-			cacheWrite: price(tier.cache_write) ?? previous.cacheWrite,
-		};
-		tiers.push({ ...next, inputTokensAbove: tier.input_tokens_above as number });
-		previous = next;
-	}
-	if (tiers.length > 0) cost.tiers = tiers;
-	return cost;
 }
 
 /**
@@ -167,8 +111,8 @@ export type SourcesReader = (
 ) => Promise<ListedSources>;
 
 /**
- * What the gateway's model list last said, shared by everything in this extension that reads it: the model loads, the
- * routes told to other extensions, and the price of each answer. One read in flight at a time; a second asker shares it.
+ * What the gateway's model list last said, shared by everything in this extension that reads it: the model loads and
+ * the routes told to other extensions. One read in flight at a time; a second asker shares it.
  */
 export class GatewayList {
 	/** The gateway gives figures: its list had `figures`. Undefined: not known yet. */
@@ -242,18 +186,14 @@ export class GatewayList {
 		return this.latest?.sources.figures;
 	}
 
-	/** The price of an entry, where the figures last read give one. */
-	priceOf(entry: string): EntryCost | undefined {
-		const figures = this.figures();
-		return figures && Object.hasOwn(figures.entries, entry) ? entryCost(figures.entries[entry]) : undefined;
-	}
-
 	/**
 	 * An answer named this entry: where the figures held lack it, or its account's row does not list it yet (the
-	 * account's first answer for this name), the list is read once more, once per model, account and entry.
+	 * account's first answer for this name), the list is read once more, once per model, account and entry. A read that
+	 * failed counts as not done: the next such answer reads again. An answer that names an entry is from a gateway that
+	 * gives figures, also where the list could not be read before.
 	 */
 	noteAnswer(modelId: string, account: string | undefined, entry: string): void {
-		if (this.supports !== true) return;
+		this.supports = true;
 		const sources = this.latest?.sources;
 		const held = !!sources?.figures && Object.hasOwn(sources.figures.entries, entry);
 		const row = account ? sources?.accounts.get(modelId)?.find((one) => one.account === account) : undefined;
@@ -263,58 +203,18 @@ export class GatewayList {
 		if (this.readFor.has(key)) return;
 		this.readFor.add(key);
 		const connection = this.connection();
-		if (!connection) return;
-		void this.read(connection.plainModelsUrl, connection.apiKey).catch(() => {});
+		if (!connection) {
+			this.readFor.delete(key);
+			return;
+		}
+		const failed = () => this.readFor.delete(key);
+		void this.read(connection.plainModelsUrl, connection.apiKey).then((sources) => {
+			if (!sources.read) failed();
+		}, failed);
 	}
 
 	/** A list read by hand (`/provimux-refresh`): every answer may bring its one read again. */
 	forgetReads(): void {
 		this.readFor.clear();
 	}
-}
-
-const PRICES_KEY = Symbol.for("pi-provimux.entry-prices");
-
-/** Pi provider id → the price of an entry, as that provider's gateway gives it. Shared by every copy of the module. */
-function prices(): Map<string, (entry: string) => EntryCost | undefined> {
-	const global = globalThis as { [PRICES_KEY]?: Map<string, (entry: string) => EntryCost | undefined> };
-	global[PRICES_KEY] ??= new Map();
-	return global[PRICES_KEY];
-}
-
-/** Where a provider's answers are priced from. Returns what takes it back. */
-export function priceAnswersWith(providerId: string, priceOf: (entry: string) => EntryCost | undefined): () => void {
-	prices().set(providerId, priceOf);
-	return () => {
-		if (prices().get(providerId) === priceOf) prices().delete(providerId);
-	};
-}
-
-interface CostedMessage {
-	provider?: unknown;
-	usage?: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		cacheWrite1h?: number;
-		totalTokens?: number;
-		cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
-	};
-}
-
-/**
- * A message's cost counted again at the price of the entry its answer named, where the gateway gives one: Pi counts it
- * at the model's one price, which is the price of the account tried first. Nothing changes otherwise.
- */
-export function priceByEntry(message: unknown, entry: string | undefined): void {
-	if (!entry || !isRecord(message)) return;
-	const { provider, usage } = message as CostedMessage;
-	if (typeof provider !== "string" || !usage || !isRecord(usage.cost)) return;
-	const cost = prices().get(provider)?.(entry);
-	if (!cost) return;
-	const { totalFromProvider } = usage.cost as { totalFromProvider?: unknown };
-	// A total the provider reported is the provider's: left as it is.
-	if (totalFromProvider === true) return;
-	calculateCost({ cost } as Parameters<typeof calculateCost>[0], usage as Parameters<typeof calculateCost>[1]);
 }

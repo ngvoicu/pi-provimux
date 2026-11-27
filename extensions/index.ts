@@ -38,7 +38,7 @@ import {
 } from "./codex-stream.ts";
 import { FastModeController, type FastPreference } from "./fast.ts";
 import { FastFooterController } from "./fast-footer.ts";
-import { GatewayList, priceAnswersWith, type SourcesReader } from "./figures.ts";
+import { GatewayList, type SourcesReader } from "./figures.ts";
 import {
 	ANTHROPIC_MESSAGES_API,
 	CONFIG_FILE_NAME,
@@ -1103,9 +1103,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		gateway,
 	);
 	upstreams.register();
-	// Each answer is counted at the price of the entry it names, where the gateway gives one.
-	const unprice = priceAnswersWith(identity.providerId, (entry) => gateway.priceOf(entry));
-	pi.on("session_shutdown", () => unprice());
 	// The footer says which route answered each of the session's turns: on by default, `"answered": false` turns it off.
 	let answeredEnabled = true;
 	try {

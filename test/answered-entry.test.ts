@@ -2,15 +2,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	decodeWireValue,
-	entryCost,
 	GatewayList,
 	type ListedSources,
 	parseFigures,
-	priceAnswersWith,
-	priceByEntry,
 	type SourcesReader,
 } from "../extensions/figures.ts";
-import { fetchModelSources, figuresCostFor } from "../extensions/lib.ts";
+import { fetchModelSources, loadMappedModels } from "../extensions/lib.ts";
 import { parseAccounts } from "../extensions/sources.ts";
 import {
 	type Account,
@@ -18,11 +15,13 @@ import {
 	type AnswerCallbacks,
 	answeredEntry,
 	answeredOptions,
+	ENTRY_EVENT,
 	type ModelAccounts,
 	REQUEST_EVENT,
 	routeOf,
 	routesOfSources,
 	UPSTREAMS_EVENT,
+	type Upstream,
 	UpstreamsAnnouncer,
 } from "../extensions/upstreams.ts";
 
@@ -32,12 +31,7 @@ afterEach(() => {
 });
 
 /** One entry of a gateway's figures, contract 1 (prices-and-cache/openapi.yaml, Entry), as the gateway gives it. */
-function entry(price: Record<string, unknown>, cache: { short?: number | null; long?: number | null } = {}) {
-	const lifetime = (seconds: number | null | undefined) => ({
-		rely_on_s: seconds ?? null,
-		basis: seconds === undefined || seconds === null ? "none" : "measured",
-		date: "2026-11-17",
-	});
+function entry(price: Record<string, unknown> = {}) {
 	return {
 		provider: "openrouter",
 		model: "anthropic/claude-fable-5.2",
@@ -47,14 +41,11 @@ function entry(price: Record<string, unknown>, cache: { short?: number | null; l
 			input: 10,
 			output: 50,
 			cache_read: 0.5,
-			cache_write: [
-				{ lifetime_s: 300, price: 12.5 },
-				{ lifetime_s: 3600, price: 20 },
-			],
+			cache_write: [],
 			tiers: [],
 			...price,
 		},
-		cache: { short: lifetime(cache.short), long: lifetime(cache.long) },
+		cache: { short: { rely_on_s: 300, basis: "measured" }, long: { rely_on_s: 3600, basis: "measured" } },
 		input_window: { tokens: 1_000_000, at_least: false },
 		max_output: { tokens: 128_000, at_least: false },
 	};
@@ -63,49 +54,6 @@ function entry(price: Record<string, unknown>, cache: { short?: number | null; l
 const OPENROUTER = "openrouter/anthropic/claude-fable-5.2";
 const LOGIN_ENTRY = "claude-subscription/claude-fable-5-2";
 const held = (entries: Record<string, unknown>) => ({ contract: 1, state: "held", dataset_version: "d1", entries });
-
-describe("an entry's price, as Pi counts it", () => {
-	it("per use and for comparison; the cache write of the shortest lifetime; a missing cache read counts 0", () => {
-		expect(entryCost(entry({}))).toEqual({ input: 10, output: 50, cacheRead: 0.5, cacheWrite: 12.5 });
-		expect(entryCost(entry({ billing: "reference", reference: "anthropic/claude-fable-5-2" }))?.input).toBe(10);
-		expect(entryCost(entry({ cache_read: null, cache_write: [] }))).toEqual({
-			input: 10,
-			output: 50,
-			cacheRead: 0,
-			cacheWrite: 0,
-		});
-		// A write price the source states without a lifetime comes before every timed one.
-		const unstated = entry({
-			cache_write: [
-				{ lifetime_s: null, price: 11 },
-				{ lifetime_s: 300, price: 12.5 },
-			],
-		});
-		expect(entryCost(unstated)?.cacheWrite).toBe(11);
-	});
-
-	it("none where the entry is not priced per token or for comparison, or lacks a base price", () => {
-		expect(entryCost(entry({ billing: "unknown" }))).toBeUndefined();
-		expect(entryCost(entry({ billing: "something-new" }))).toBeUndefined();
-		expect(entryCost(entry({ input: null }))).toBeUndefined();
-		expect(entryCost(entry({ output: -1 }))).toBeUndefined();
-		expect(entryCost({ provider: "x" })).toBeUndefined();
-		expect(entryCost("junk")).toBeUndefined();
-	});
-
-	it("prices above a prompt size, ascending; a price a tier leaves out is the one below it", () => {
-		const tiered = entry({
-			tiers: [
-				{ input_tokens_above: 400_000, input: 30, output: null, cache_read: null, cache_write: null },
-				{ input_tokens_above: 200_000, input: 20, output: 75, cache_read: 1, cache_write: null },
-			],
-		});
-		expect(entryCost(tiered)?.tiers).toEqual([
-			{ inputTokensAbove: 200_000, input: 20, output: 75, cacheRead: 1, cacheWrite: 12.5 },
-			{ inputTokensAbove: 400_000, input: 30, output: 75, cacheRead: 1, cacheWrite: 12.5 },
-		]);
-	});
-});
 
 describe("an answer's entry as it is written on the wire", () => {
 	it("is percent-decoded as UTF-8; a form that can't be read is none", () => {
@@ -119,30 +67,30 @@ describe("an answer's entry as it is written on the wire", () => {
 
 describe("the gateway's figures", () => {
 	it("are held entries only while the gateway holds them", () => {
-		expect(parseFigures(held({ [OPENROUTER]: entry({}) }))?.entries[OPENROUTER]).toBeDefined();
-		expect(parseFigures({ state: "off", entries: { [OPENROUTER]: entry({}) } })?.entries).toEqual({});
+		expect(parseFigures(held({ [OPENROUTER]: entry() }))?.entries[OPENROUTER]).toBeDefined();
+		expect(parseFigures({ state: "off", entries: { [OPENROUTER]: entry() } })?.entries).toEqual({});
 		expect(parseFigures({ state: "none", entries: {} })?.state).toBe("none");
 		expect(parseFigures(undefined)).toBeUndefined();
 		expect(parseFigures([])).toBeUndefined();
 	});
 });
 
-describe("the model list, from a gateway with figures", () => {
-	const row = (answered?: unknown) => ({
-		provider: "claude",
-		kind: "oauth",
-		priority: 5,
-		account: "a.aaaaaaaaaaaaaaaaaaaa",
-		...(answered === undefined ? {} : { answered }),
-	});
+const row = (answered?: unknown) => ({
+	provider: "claude",
+	kind: "oauth",
+	priority: 5,
+	account: "a.aaaaaaaaaaaaaaaaaaaa",
+	...(answered === undefined ? {} : { answered }),
+});
 
+describe("the model list, from a gateway with figures", () => {
 	it("is asked once as before; a list whose accounts record answers is asked again, with the figures", async () => {
 		const urls: string[] = [];
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async (url: string) => {
 				urls.push(url);
-				const figures = url.endsWith(",figures") ? { figures: held({ [LOGIN_ENTRY]: entry({}) }) } : {};
+				const figures = url.endsWith(",figures") ? { figures: held({ [LOGIN_ENTRY]: entry() }) } : {};
 				return new Response(
 					JSON.stringify({
 						data: [{ id: "claude-fable-5-2", owned_by: "anthropic", accounts: [row([])] }],
@@ -158,7 +106,6 @@ describe("the model list, from a gateway with figures", () => {
 			account: "a.aaaaaaaaaaaaaaaaaaaa",
 			answered: [],
 		});
-
 		// Known to give figures: one read, with them.
 		urls.length = 0;
 		await fetchModelSources("http://gw/v1/models", "k", 1000, undefined, true);
@@ -200,48 +147,74 @@ describe("the model list, from a gateway with figures", () => {
 	});
 });
 
-describe("a model's price before an answer", () => {
-	const figures = parseFigures(
-		held({
-			[LOGIN_ENTRY]: entry({ input: 8, output: 40 }),
-			[OPENROUTER]: entry({}),
-			"x/unpriced": entry({ billing: "unknown" }),
-		}),
-	);
-	const account = (priority: number, answered?: Account["answered"]): Account => ({
-		provider: "claude",
-		kind: "oauth",
-		priority,
-		...(answered ? { answered } : {}),
-	});
-
-	it("is what the account tried first last answered as", () => {
-		expect(
-			figuresCostFor([account(5, [{ entry: LOGIN_ENTRY }]), account(0, [{ entry: OPENROUTER }])], figures)?.input,
-		).toBe(8);
-		// The newest item counts.
-		expect(figuresCostFor([account(5, [{ entry: OPENROUTER }, { entry: LOGIN_ENTRY }])], figures)?.input).toBe(10);
-	});
-
-	it("none, so models.dev's price as before, where it is not one price or not known", () => {
-		expect(figuresCostFor([account(5, [])], figures)).toBeUndefined();
-		expect(figuresCostFor([account(5)], figures)).toBeUndefined();
-		expect(figuresCostFor([account(5, [{ entry: null }])], figures)).toBeUndefined();
-		expect(figuresCostFor([account(5, [{ entry: "x/unpriced" }])], figures)).toBeUndefined();
-		expect(figuresCostFor([account(5, [{ entry: "not/held" }])], figures)).toBeUndefined();
-		// Two accounts share the first place and are priced differently.
-		expect(
-			figuresCostFor([account(5, [{ entry: LOGIN_ENTRY }]), account(5, [{ entry: OPENROUTER }])], figures),
-		).toBeUndefined();
-		expect(figuresCostFor([account(5, [{ entry: LOGIN_ENTRY }])], undefined)).toBeUndefined();
+// The review's case (2026-11-27): an alias the owner set, `opus`, whose login has answered and is recorded; the list
+// is loaded again. Pi's price for it is the model's listed one, exactly as without the figures: nothing is priced from
+// them, also not Fast mode's price.
+describe("prices: pi-provimux prices nothing from the gateway's figures", () => {
+	it("a model's registered price is the same with the figures and the record as without them", async () => {
+		const opus = "claude-subscription/claude-opus-5-5";
+		const gpt = "openai/gpt-6.1-sol";
+		const rows = (recorded: boolean) => [
+			{
+				id: "opus",
+				owned_by: "anthropic",
+				accounts: [{ ...row(recorded ? [{ entry: opus }] : undefined), priority: 1 }],
+			},
+			{
+				id: "gpt-6.1-sol",
+				owned_by: "openai",
+				accounts: [
+					{
+						provider: "codex",
+						kind: "apikey",
+						priority: 1,
+						account: "s.bbbbbbbbbbbbbbbbbbbb",
+						...(recorded ? { answered: [{ entry: gpt }] } : {}),
+					},
+				],
+			},
+		];
+		const figures = held({
+			[gpt]: entry({ input: 4, output: 20, cache_read: null }),
+			[opus]: entry({ billing: "reference", input: 4, output: 20 }),
+		});
+		const load = async (recorded: boolean, fast: boolean) => {
+			vi.stubGlobal("fetch", async (input: unknown) => {
+				const url = String(input);
+				if (url.includes("models.dev"))
+					return Response.json({
+						openai: {
+							models: {
+								"gpt-6.1-sol": {
+									cost: { input: 4, output: 20 },
+									experimental: { modes: { fast: { cost: { input: 8, output: 40 } } } },
+								},
+							},
+						},
+					});
+				if (url.includes("client_version"))
+					return Response.json({
+						models: [{ slug: "opus" }, { slug: "gpt-6.1-sol", service_tiers: ["priority"] }],
+					});
+				return Response.json({
+					data: rows(recorded),
+					...(recorded && url.endsWith(",figures") ? { figures } : {}),
+				});
+			});
+			const loaded = await loadMappedModels("http://fixture.invalid", "k", fast, undefined);
+			return Object.fromEntries(loaded.models.map((model) => [model.id, model.cost]));
+		};
+		for (const fast of [false, true]) expect(await load(true, fast)).toEqual(await load(false, fast));
+		expect((await load(true, false)).opus).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 	});
 });
 
-describe("a route's entry", () => {
-	const login = (answered?: Account["answered"]): Account => ({
+describe("a route's entry and accounts", () => {
+	const login = (answered?: Account["answered"], account = "a.cccccccccccccccccccc"): Account => ({
 		provider: "claude",
 		kind: "oauth",
 		priority: 5,
+		account,
 		...(answered ? { answered } : {}),
 	});
 	const openrouter = (answered?: Account["answered"]): Account => ({
@@ -249,6 +222,7 @@ describe("a route's entry", () => {
 		kind: "apikey",
 		priority: 0,
 		host: "openrouter.ai",
+		account: "a.dddddddddddddddddddd",
 		...(answered ? { answered } : {}),
 	});
 	const route = (accounts: Account[]) =>
@@ -256,76 +230,62 @@ describe("a route's entry", () => {
 			owners: { "claude-fable-5-2": "anthropic" },
 			accounts: { "claude-fable-5-2": accounts },
 		});
+	/** A route as a reader that knows no entry reads it: provider, model and kind only. */
+	const asBefore = (told: { upstreams: Upstream[]; fallbacks?: Upstream[] }) =>
+		JSON.parse(
+			JSON.stringify(told, (key, value) => (key === "entry" || key === "accounts" ? undefined : value)),
+		) as unknown;
 
-	it("is what the account's answers named; with nothing recorded the upstream is as before", () => {
+	it("is what the account's answers named, with its marker; with nothing recorded the entry is not said", () => {
 		expect(answeredEntry(login())).toBeUndefined();
 		expect(answeredEntry(login([]))).toBeUndefined();
 		expect(answeredEntry(login([{ entry: LOGIN_ENTRY }]))).toBe(LOGIN_ENTRY);
 		expect(answeredEntry(login([{ entry: null }]))).toBeNull();
 		expect(answeredEntry(login([{ entry: LOGIN_ENTRY }, { entry: null }]))).toBeNull();
 
-		expect(route([login([]), openrouter([])])).toEqual(route([login(), openrouter()]));
 		expect(route([login([]), openrouter([{ entry: OPENROUTER }])])).toEqual({
-			upstreams: [{ provider: "anthropic", subscription: true }],
-			fallbacks: [{ provider: "openrouter", subscription: false, entry: OPENROUTER }],
+			upstreams: [{ provider: "anthropic", subscription: true, accounts: ["a.cccccccccccccccccccc"] }],
+			fallbacks: [
+				{ provider: "openrouter", subscription: false, entry: OPENROUTER, accounts: ["a.dddddddddddddddddddd"] },
+			],
 		});
-		expect(route([login([{ entry: null }])])).toEqual({
-			upstreams: [{ provider: "anthropic", subscription: true, entry: null }],
-		});
+		expect(route([login()])).toEqual({ upstreams: [{ provider: "anthropic", subscription: true }] });
 	});
 
-	it("an account that leads somewhere not known is known by the entry it answered as", () => {
+	it("a reader that knows no entry reads the same routes as before, however the accounts' records stand", () => {
+		const before = route([login(), openrouter(), login(undefined, "a.eeeeeeeeeeeeeeeeeeee")]);
+		for (const records of [
+			[[{ entry: LOGIN_ENTRY }], [{ entry: OPENROUTER }], [{ entry: "claude-subscription/other" }]],
+			[[{ entry: LOGIN_ENTRY }], [], []],
+			[[], [{ entry: null }], [{ entry: LOGIN_ENTRY }]],
+		] as Array<Array<Account["answered"]>>) {
+			const told = route([login(records[0]), openrouter(records[1]), login(records[2], "a.eeeeeeeeeeeeeeeeeeee")]);
+			expect(asBefore(told)).toEqual(before);
+		}
+		// An account that leads somewhere not known stays not known, whatever it answered as.
 		const elsewhere: Account = {
 			provider: "openai-compatible-x",
 			kind: "apikey",
 			priority: 0,
 			host: "relay.example.test",
+			answered: [{ entry: OPENROUTER }],
 		};
 		expect(route([elsewhere])).toEqual({ upstreams: [] });
-		expect(route([{ ...elsewhere, answered: [{ entry: OPENROUTER }] }])).toEqual({
-			upstreams: [
-				{ provider: "openrouter", model: "anthropic/claude-fable-5.2", subscription: false, entry: OPENROUTER },
-			],
-		});
-	});
-});
-
-describe("each answer counted at the price of its entry", () => {
-	const usage = () => ({
-		input: 4100,
-		output: 14,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 4114,
-		cost: { input: 0.0328, output: 0.00056, cacheRead: 0, cacheWrite: 0, total: 0.03336 },
 	});
 
-	it("where the gateway gives a price for the entry the answer named; as before otherwise", () => {
-		const release = priceAnswersWith("provimux-test", (ref) =>
-			ref === OPENROUTER ? entryCost(entry({})) : undefined,
-		);
-		try {
-			const priced = { provider: "provimux-test", usage: usage() };
-			priceByEntry(priced, OPENROUTER);
-			expect(priced.usage.cost.total).toBeCloseTo(0.041 + 0.0007, 10);
-
-			for (const [provider, ref] of [
-				["provimux-test", "not/held"],
-				["another", OPENROUTER],
-			]) {
-				const kept = { provider, usage: usage() };
-				priceByEntry(kept, ref);
-				expect(kept.usage.cost.total).toBe(0.03336);
-			}
-			const reported = {
-				provider: "provimux-test",
-				usage: { ...usage(), cost: { ...usage().cost, totalFromProvider: true } },
-			};
-			priceByEntry(reported, OPENROUTER);
-			expect(reported.usage.cost.total).toBe(0.03336);
-		} finally {
-			release();
-		}
+	it("two accounts read alike are one upstream with both markers; their entry where they agree, else none", () => {
+		const two = (second: Account["answered"]) =>
+			route([login([{ entry: LOGIN_ENTRY }]), login(second, "a.eeeeeeeeeeeeeeeeeeee")]).upstreams;
+		expect(two([{ entry: LOGIN_ENTRY }])).toEqual([
+			{
+				provider: "anthropic",
+				subscription: true,
+				entry: LOGIN_ENTRY,
+				accounts: ["a.cccccccccccccccccccc", "a.eeeeeeeeeeeeeeeeeeee"],
+			},
+		]);
+		expect(two([{ entry: "claude-subscription/other" }])[0]?.entry).toBeNull();
+		expect(two([])[0]).not.toHaveProperty("entry");
 	});
 });
 
@@ -342,6 +302,8 @@ describe("the read an answer brings", () => {
 		answers: true,
 		read: true,
 	});
+	const failedRead = (): ListedSources => ({ owners: new Map(), accounts: new Map() });
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
 
 	it("is one read for an entry the figures lack or the account's row does not list, never one per answer", async () => {
 		const reader = vi.fn(async (..._args: Parameters<SourcesReader>) => sources({}));
@@ -354,26 +316,62 @@ describe("the read an answer brings", () => {
 		await vi.waitFor(() => expect(reader).toHaveBeenCalledTimes(1));
 		expect(reader.mock.calls[0]?.[4]).toBe(true);
 		// Held and listed: nothing to read.
-		reader.mockResolvedValue(sources({ [OPENROUTER]: entry({}) }, [{ entry: OPENROUTER }]));
+		reader.mockResolvedValue(sources({ [OPENROUTER]: entry() }, [{ entry: OPENROUTER }]));
 		await gateway.read("http://gw/v1/models", "k", undefined, undefined, false);
 		reader.mockClear();
 		gateway.noteAnswer("claude-fable-5-2", "a.bbbbbbbbbbbbbbbbbbbb", OPENROUTER);
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await settle();
 		expect(reader).not.toHaveBeenCalled();
-		expect(gateway.priceOf(OPENROUTER)?.input).toBe(10);
+		expect(gateway.figures()?.entries[OPENROUTER]).toBeDefined();
 	});
 
-	it("nothing from a gateway that gives no figures", async () => {
+	// The review's two cases (2026-11-27): the read an answer brought failed; the list could not be read at the start.
+	it("a read that failed is not remembered as done: the next answer naming the entry reads again", async () => {
+		const reader = vi.fn(async (..._args: Parameters<SourcesReader>) => sources({}));
+		const gateway = new GatewayList(reader, () => ({ plainModelsUrl: "http://gw/v1/models", apiKey: "k" }));
+		await gateway.read("http://gw/v1/models", "k");
+		reader.mockClear();
+		reader.mockResolvedValueOnce(failedRead());
+		gateway.noteAnswer("new-name", "a.cccccccccccccccccccc", "openrouter/x");
+		await settle();
+		reader.mockResolvedValue(sources({ "openrouter/x": entry() }, [{ entry: "openrouter/x" }]));
+		for (let i = 0; i < 4; i++) {
+			gateway.noteAnswer("new-name", "a.cccccccccccccccccccc", "openrouter/x");
+			await settle();
+		}
+		expect(reader).toHaveBeenCalledTimes(2);
+		// A read that threw counts as failed too.
+		reader.mockClear();
+		reader.mockRejectedValueOnce(new Error("down"));
+		gateway.noteAnswer("other-name", "a.cccccccccccccccccccc", "openrouter/y");
+		await settle();
+		gateway.noteAnswer("other-name", "a.cccccccccccccccccccc", "openrouter/y");
+		await settle();
+		expect(reader).toHaveBeenCalledTimes(2);
+	});
+
+	it("a list that could not be read at the start: an answer that names an entry brings the read, with the figures", async () => {
+		const reader = vi.fn(async (..._args: Parameters<SourcesReader>) => failedRead());
+		const gateway = new GatewayList(reader, () => ({ plainModelsUrl: "http://gw/v1/models", apiKey: "k" }));
+		await gateway.read("http://gw/v1/models", "k");
+		expect(gateway.supports).toBeUndefined();
+		reader.mockClear();
+		reader.mockResolvedValue(sources({ "openai/gpt-6.1-sol": entry() }, [{ entry: "openai/gpt-6.1-sol" }]));
+		for (let i = 0; i < 4; i++)
+			gateway.noteAnswer("claude-fable-5-2", "a.bbbbbbbbbbbbbbbbbbbb", "openai/gpt-6.1-sol");
+		await settle();
+		expect(reader).toHaveBeenCalledTimes(1);
+		expect(reader.mock.calls[0]?.[4]).toBe(true);
+		expect(gateway.figures()?.entries["openai/gpt-6.1-sol"]).toBeDefined();
+	});
+
+	it("nothing from a gateway whose answers name no entry", async () => {
 		const reader = vi.fn(
 			async (): Promise<ListedSources> => ({ owners: new Map(), accounts: new Map(), read: true }),
 		);
 		const gateway = new GatewayList(reader, () => ({ plainModelsUrl: "http://gw/v1/models", apiKey: "k" }));
 		await gateway.read("http://gw/v1/models", "k");
 		expect(gateway.supports).toBe(false);
-		reader.mockClear();
-		gateway.noteAnswer("claude-fable-5-2", "a.bbbbbbbbbbbbbbbbbbbb", OPENROUTER);
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(reader).not.toHaveBeenCalled();
 	});
 });
 
@@ -435,7 +433,7 @@ describe("the events, from a gateway with figures", () => {
 				],
 			],
 		]),
-		figures: parseFigures(held({ [OPENROUTER]: entry({}) })),
+		figures: parseFigures(held({ [OPENROUTER]: entry() })),
 		answers: true,
 		read: true,
 	});
@@ -459,21 +457,23 @@ describe("the events, from a gateway with figures", () => {
 		return fake;
 	}
 
-	it("the routes carry the entries the accounts answered as, and the figures", async () => {
+	it("the routes carry the entries and markers of the accounts, and the figures", async () => {
 		const { emitted } = await announcer(true);
 		const told = emitted.find(([channel]) => channel === UPSTREAMS_EVENT)?.[1] as {
 			models: Record<string, unknown>;
 			figures: { state: string; entries: Record<string, unknown> };
 		};
 		expect(told.models["claude-fable-5-2"]).toEqual({
-			upstreams: [{ provider: "anthropic", subscription: true }],
-			fallbacks: [{ provider: "openrouter", subscription: false, entry: OPENROUTER }],
+			upstreams: [{ provider: "anthropic", subscription: true, accounts: ["a.cccccccccccccccccccc"] }],
+			fallbacks: [
+				{ provider: "openrouter", subscription: false, entry: OPENROUTER, accounts: ["a.dddddddddddddddddddd"] },
+			],
 		});
 		expect(told.figures.state).toBe("held");
 		expect(Object.keys(told.figures.entries)).toEqual([OPENROUTER]);
 	});
 
-	it("an answer names its entry and its account, over HTTP and over the Codex WebSocket", async () => {
+	it("an answer's entry and account are told on their own, just before the answer, which is told as before", async () => {
 		const { emitted, respond, created } = await announcer(true);
 		emitted.length = 0;
 		respond({
@@ -487,37 +487,31 @@ describe("the events, from a gateway with figures", () => {
 			cpa_auth_kind: "oauth",
 			cpa_auth_provider: "claude",
 			provimux_account: "a.cccccccccccccccccccc",
-			provimux_entry: "claude-subscription/claude-fable-5-2",
+			provimux_entry: LOGIN_ENTRY,
 		});
 		expect(emitted).toEqual([
 			[
-				ANSWERED_EVENT,
-				{
-					provider: "provimux",
-					model: "claude-fable-5-2",
-					upstreams: [
-						{
-							provider: "openrouter",
-							subscription: false,
-							entry: OPENROUTER,
-							account: "a.dddddddddddddddddddd",
-						},
-					],
-				},
+				ENTRY_EVENT,
+				{ provider: "provimux", model: "claude-fable-5-2", entry: OPENROUTER, account: "a.dddddddddddddddddddd" },
 			],
 			[
 				ANSWERED_EVENT,
 				{
 					provider: "provimux",
 					model: "claude-fable-5-2",
-					upstreams: [
-						{
-							provider: "anthropic",
-							subscription: true,
-							entry: "claude-subscription/claude-fable-5-2",
-							account: "a.cccccccccccccccccccc",
-						},
-					],
+					upstreams: [{ provider: "openrouter", subscription: false }],
+				},
+			],
+			[
+				ENTRY_EVENT,
+				{ provider: "provimux", model: "claude-fable-5-2", entry: LOGIN_ENTRY, account: "a.cccccccccccccccccccc" },
+			],
+			[
+				ANSWERED_EVENT,
+				{
+					provider: "provimux",
+					model: "claude-fable-5-2",
+					upstreams: [{ provider: "anthropic", subscription: true }],
 				},
 			],
 		]);
@@ -533,14 +527,13 @@ describe("the events, from a gateway with figures", () => {
 		};
 		respond({ ...named, "X-Provimux-Account": "a.eeeeeeeeeeeeeeeeeeee" });
 		respond({ ...named, "X-Provimux-Account": "a.eeeeeeeeeeeeeeeeeeee", "X-Provimux-Entry": "lab/%ZZ" });
-		const upstreams = emitted.map(([, data]) => (data as { upstreams: Array<Record<string, unknown>> }).upstreams[0]);
-		expect(upstreams.map((upstream) => [upstream?.entry, upstream?.account])).toEqual([
-			[null, "a.eeeeeeeeeeeeeeeeeeee"],
-			[null, "a.eeeeeeeeeeeeeeeeeeee"],
+		expect(emitted.filter(([channel]) => channel === ENTRY_EVENT).map(([, data]) => data)).toEqual([
+			{ provider: "provimux", model: "claude-fable-5-2", entry: null, account: "a.eeeeeeeeeeeeeeeeeeee" },
+			{ provider: "provimux", model: "claude-fable-5-2", entry: null, account: "a.eeeeeeeeeeeeeeeeeeee" },
 		]);
 	});
 
-	it("from a gateway that names the account only (8.1.7-pmx.3), the answer is reported as before", async () => {
+	it("from a gateway that names the account only (8.1.7-pmx.3), only the answer is told, as before", async () => {
 		const { emitted, respond } = await announcer(false);
 		emitted.length = 0;
 		respond({
