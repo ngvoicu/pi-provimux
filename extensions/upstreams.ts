@@ -32,10 +32,6 @@
  * antigravity); the model's id there when it differs; a subscription login (true) or an API key (false).
  *
  * From a Provimux that gives prices and cache lifetimes per providers.dev entry (figures.ts), and only from one:
- * - an upstream of a route may also say `entry`, the providers.dev entry (`<provider>/<model>`) its credentials last
- *   answered as (`null` where their answers name no one entry; absent where none is recorded), and `accounts`, the
- *   gateway's markers of those credentials. A reader looks nothing up for an upstream with `entry`: the figures are the
- *   gateway's, and `null` has none.
  * - `model-upstreams:answered-entry` (ENTRY_EVENT) is told just before an answer's `model-upstreams:answered`, with the
  *   entry the answer names (`X-Provimux-Entry`, `provimux_entry`; `null` where it names its account and no entry) and
  *   its account's marker. `model-upstreams:answered` itself is unchanged.
@@ -81,10 +77,6 @@ export interface Upstream {
 	provider: string;
 	model?: string;
 	subscription?: boolean;
-	/** In a route, from a Provimux with figures only: the providers.dev entry; null: none (see the top of this file). */
-	entry?: string | null;
-	/** In a route, from a Provimux that records answers: the markers of the credentials this upstream stands for. */
-	accounts?: string[];
 }
 
 export interface Route {
@@ -194,63 +186,17 @@ export function upstreamOf(account: Account, modelId: string, catalog?: Catalog)
 	return { provider, ...(model !== modelId ? { model } : {}), subscription: account.kind !== "apikey" };
 }
 
-/** An upstream as said before entries: what makes two alike. */
-const asBefore = (upstream: Upstream) => JSON.stringify([upstream.provider, upstream.model, upstream.subscription]);
-
-/**
- * One upstream for those that read alike as before (provider, model, kind), so a reader that knows no entry reads the
- * same routes. What the credentials behind them recorded goes together: their markers in `accounts`, and their entry
- * where they agree; where one has none recorded, none is given (looked up as before); where they differ, null.
- */
 const unique = (upstreams: Upstream[]): Upstream[] => {
-	const kept = new Map<string, Upstream>();
-	for (const upstream of upstreams) {
-		const before = kept.get(asBefore(upstream));
-		if (!before) {
-			kept.set(asBefore(upstream), { ...upstream });
-			continue;
-		}
-		if (before.accounts && upstream.accounts)
-			before.accounts = [...new Set([...before.accounts, ...upstream.accounts])];
-		if ("entry" in before && before.entry !== upstream.entry) {
-			if ("entry" in upstream) before.entry = null;
-			else delete before.entry;
-		}
-	}
-	return [...kept.values()];
+	const seen = new Set<string>();
+	return upstreams.filter((upstream) => {
+		const key = JSON.stringify([upstream.provider, upstream.model, upstream.subscription]);
+		return !seen.has(key) && seen.add(key);
+	});
 };
-
-/**
- * What a credential's answers for a model last said they were, from a Provimux that keeps it (`answered`): its one
- * entry where every recorded answer named that entry; null where they differ or named none. Undefined where nothing is
- * recorded (no answer yet, or a proxy that keeps no such record): the upstream is said as before, and a reader looks it
- * up as before, until an answer names what it is.
- */
-export function answeredEntry(account: Account): string | null | undefined {
-	if (!account.answered || account.answered.length === 0) return undefined;
-	const [only, ...more] = account.answered;
-	return only && more.length === 0 && only.entry ? only.entry : null;
-}
-
-/**
- * A credential's upstream for a route: as `upstreamOf`; from a Provimux that records answers, with the credential's
- * marker (`accounts`) and the entry it last answered as. Nothing else changes: a credential that leads somewhere not
- * known stays not known.
- */
-function routeUpstreamOf(account: Account, modelId: string, catalog?: Catalog): Upstream | undefined {
-	const upstream = upstreamOf(account, modelId, catalog);
-	if (!upstream || !account.answered) return upstream;
-	const entry = answeredEntry(account);
-	return {
-		...upstream,
-		...(entry !== undefined ? { entry } : {}),
-		...(account.account ? { accounts: [account.account] } : {}),
-	};
-}
 
 /** The upstreams of some credentials; empty when one of them leads somewhere not known (it may answer). */
 function upstreamsOf(accounts: Account[], modelId: string, catalog?: Catalog): Upstream[] {
-	const upstreams = accounts.map((account) => routeUpstreamOf(account, modelId, catalog));
+	const upstreams = accounts.map((account) => upstreamOf(account, modelId, catalog));
 	return upstreams.every((upstream) => upstream !== undefined) ? unique(upstreams as Upstream[]) : [];
 }
 
@@ -260,12 +206,12 @@ export function routeOf(modelId: string, listed: ModelAccounts, catalog?: Catalo
 	if (accounts && accounts.length > 0) {
 		const likely = likelyAccounts(accounts);
 		const upstreams = upstreamsOf(likely, modelId, catalog);
-		const main = new Set(upstreams.map(asBefore));
+		const main = new Set(upstreams.map((upstream) => JSON.stringify(upstream)));
 		const fallbacks = unique(
 			accounts
 				.filter((account) => !likely.includes(account))
-				.map((account) => routeUpstreamOf(account, modelId, catalog))
-				.filter((upstream): upstream is Upstream => upstream !== undefined && !main.has(asBefore(upstream))),
+				.map((account) => upstreamOf(account, modelId, catalog))
+				.filter((upstream): upstream is Upstream => upstream !== undefined && !main.has(JSON.stringify(upstream))),
 		);
 		return { upstreams, ...(fallbacks.length > 0 ? { fallbacks } : {}) };
 	}

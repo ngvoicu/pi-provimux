@@ -13,7 +13,6 @@ import {
 	type Account,
 	ANSWERED_EVENT,
 	type AnswerCallbacks,
-	answeredEntry,
 	answeredOptions,
 	ENTRY_EVENT,
 	type ModelAccounts,
@@ -21,7 +20,6 @@ import {
 	routeOf,
 	routesOfSources,
 	UPSTREAMS_EVENT,
-	type Upstream,
 	UpstreamsAnnouncer,
 } from "../extensions/upstreams.ts";
 
@@ -209,20 +207,12 @@ describe("prices: pi-provimux prices nothing from the gateway's figures", () => 
 	});
 });
 
-describe("a route's entry and accounts", () => {
-	const login = (answered?: Account["answered"], account = "a.cccccccccccccccccccc"): Account => ({
+describe("routes", () => {
+	const account = (answered?: Account["answered"], marker = "a.cccccccccccccccccccc", priority = 5): Account => ({
 		provider: "claude",
 		kind: "oauth",
-		priority: 5,
-		account,
-		...(answered ? { answered } : {}),
-	});
-	const openrouter = (answered?: Account["answered"]): Account => ({
-		provider: "openai-compatible-openrouter",
-		kind: "apikey",
-		priority: 0,
-		host: "openrouter.ai",
-		account: "a.dddddddddddddddddddd",
+		priority,
+		account: marker,
 		...(answered ? { answered } : {}),
 	});
 	const route = (accounts: Account[]) =>
@@ -230,39 +220,25 @@ describe("a route's entry and accounts", () => {
 			owners: { "claude-fable-5-2": "anthropic" },
 			accounts: { "claude-fable-5-2": accounts },
 		});
-	/** A route as a reader that knows no entry reads it: provider, model and kind only. */
-	const asBefore = (told: { upstreams: Upstream[]; fallbacks?: Upstream[] }) =>
-		JSON.parse(
-			JSON.stringify(told, (key, value) => (key === "entry" || key === "accounts" ? undefined : value)),
-		) as unknown;
 
-	it("is what the account's answers named, with its marker; with nothing recorded the entry is not said", () => {
-		expect(answeredEntry(login())).toBeUndefined();
-		expect(answeredEntry(login([]))).toBeUndefined();
-		expect(answeredEntry(login([{ entry: LOGIN_ENTRY }]))).toBe(LOGIN_ENTRY);
-		expect(answeredEntry(login([{ entry: null }]))).toBeNull();
-		expect(answeredEntry(login([{ entry: LOGIN_ENTRY }, { entry: null }]))).toBeNull();
-
-		expect(route([login([]), openrouter([{ entry: OPENROUTER }])])).toEqual({
-			upstreams: [{ provider: "anthropic", subscription: true, accounts: ["a.cccccccccccccccccccc"] }],
-			fallbacks: [
-				{ provider: "openrouter", subscription: false, entry: OPENROUTER, accounts: ["a.dddddddddddddddddddd"] },
-			],
+	it("are 105.0.8's whatever the accounts' records say: no entry and no marker is told with them", () => {
+		const openrouter: Account = {
+			provider: "openai-compatible-openrouter",
+			kind: "apikey",
+			priority: 0,
+			host: "openrouter.ai",
+		};
+		const before = route([account(), { ...openrouter }]);
+		expect(before).toEqual({
+			upstreams: [{ provider: "anthropic", subscription: true }],
+			fallbacks: [{ provider: "openrouter", subscription: false }],
 		});
-		expect(route([login()])).toEqual({ upstreams: [{ provider: "anthropic", subscription: true }] });
-	});
-
-	it("a reader that knows no entry reads the same routes as before, however the accounts' records stand", () => {
-		const before = route([login(), openrouter(), login(undefined, "a.eeeeeeeeeeeeeeeeeeee")]);
 		for (const records of [
-			[[{ entry: LOGIN_ENTRY }], [{ entry: OPENROUTER }], [{ entry: "claude-subscription/other" }]],
-			[[{ entry: LOGIN_ENTRY }], [], []],
-			[[], [{ entry: null }], [{ entry: LOGIN_ENTRY }]],
+			[[{ entry: LOGIN_ENTRY }], [{ entry: OPENROUTER }]],
+			[[], [{ entry: null }]],
 		] as Array<Array<Account["answered"]>>) {
-			const told = route([login(records[0]), openrouter(records[1]), login(records[2], "a.eeeeeeeeeeeeeeeeeeee")]);
-			expect(asBefore(told)).toEqual(before);
+			expect(route([account(records[0]), { ...openrouter, answered: records[1] }])).toEqual(before);
 		}
-		// An account that leads somewhere not known stays not known, whatever it answered as.
 		const elsewhere: Account = {
 			provider: "openai-compatible-x",
 			kind: "apikey",
@@ -271,21 +247,6 @@ describe("a route's entry and accounts", () => {
 			answered: [{ entry: OPENROUTER }],
 		};
 		expect(route([elsewhere])).toEqual({ upstreams: [] });
-	});
-
-	it("two accounts read alike are one upstream with both markers; their entry where they agree, else none", () => {
-		const two = (second: Account["answered"]) =>
-			route([login([{ entry: LOGIN_ENTRY }]), login(second, "a.eeeeeeeeeeeeeeeeeeee")]).upstreams;
-		expect(two([{ entry: LOGIN_ENTRY }])).toEqual([
-			{
-				provider: "anthropic",
-				subscription: true,
-				entry: LOGIN_ENTRY,
-				accounts: ["a.cccccccccccccccccccc", "a.eeeeeeeeeeeeeeeeeeee"],
-			},
-		]);
-		expect(two([{ entry: "claude-subscription/other" }])[0]?.entry).toBeNull();
-		expect(two([])[0]).not.toHaveProperty("entry");
 	});
 });
 
@@ -457,17 +418,15 @@ describe("the events, from a gateway with figures", () => {
 		return fake;
 	}
 
-	it("the routes carry the entries and markers of the accounts, and the figures", async () => {
+	it("the routes are told as before, with the figures beside them", async () => {
 		const { emitted } = await announcer(true);
 		const told = emitted.find(([channel]) => channel === UPSTREAMS_EVENT)?.[1] as {
 			models: Record<string, unknown>;
 			figures: { state: string; entries: Record<string, unknown> };
 		};
 		expect(told.models["claude-fable-5-2"]).toEqual({
-			upstreams: [{ provider: "anthropic", subscription: true, accounts: ["a.cccccccccccccccccccc"] }],
-			fallbacks: [
-				{ provider: "openrouter", subscription: false, entry: OPENROUTER, accounts: ["a.dddddddddddddddddddd"] },
-			],
+			upstreams: [{ provider: "anthropic", subscription: true }],
+			fallbacks: [{ provider: "openrouter", subscription: false }],
 		});
 		expect(told.figures.state).toBe("held");
 		expect(Object.keys(told.figures.entries)).toEqual([OPENROUTER]);
