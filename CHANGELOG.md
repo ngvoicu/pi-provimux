@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 105.0.8
 
 **Every command says what it does, and a pause shows in the footer.** Wording only, besides the footer: no command,
 setting or default changed.
