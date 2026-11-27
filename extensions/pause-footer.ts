@@ -1,17 +1,14 @@
 /**
- * The pause in the footer: `paused · /continue` while the saved pause is set, in every Pi window that has this
- * extension. It only displays: it keeps its own mark, and never changes what holds or releases a request (the request
- * guard reads the setting itself) nor anything the elapsed-time accounting reads.
+ * The pause in the footer: `paused · /continue` exactly while this window's request guard believes requests are paused.
+ * It reads the same state as the orange `paused` beside the model's name (the window's PauseController), and draws
+ * again each time that state is set: at the start, by /pause or /continue here, and by the guard when a request
+ * reaches it (and while it holds one). It reads no file and keeps no state of its own, so the two can't disagree.
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CONFIG_FILE_NAME } from "./lib.ts";
+import type { PauseController } from "./pause.ts";
 
 export const PAUSE_STATUS_KEY = "provimux-pause";
-/** How often an idle window reads the saved pause, so a /pause or /continue typed in another window shows here. */
-export const PAUSE_FOOTER_POLL_MS = 2_000;
 /** From this terminal width on, the footer also says how to end the pause. */
 export const PAUSE_WIDE_MIN_COLUMNS = 60;
 
@@ -20,58 +17,56 @@ export function pauseStatusText(columns: number): string {
 	return columns >= PAUSE_WIDE_MIN_COLUMNS ? "paused · /continue" : "paused";
 }
 
-/**
- * The saved pause, for the mark: true or false where the file says, undefined where it can't be read now (missing,
- * unreadable, half-written, not an object, or a `pause` that is not a boolean): the mark then stays as it was.
- */
-export function readSavedPause(agentDir: string): boolean | undefined {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(readFileSync(join(agentDir, CONFIG_FILE_NAME), "utf8"));
-	} catch {
-		return undefined;
-	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-	const pause = (parsed as { pause?: unknown }).pause;
-	if (pause === undefined) return false;
-	return typeof pause === "boolean" ? pause : undefined;
-}
-
 const terminalColumns = (): number =>
 	process.stdout.isTTY && process.stdout.columns > 0 ? process.stdout.columns : Number.POSITIVE_INFINITY;
 
-export interface PauseFooter {
-	/** Shows the pause as this window just set it (after /pause or /continue here). */
-	show(paused: boolean): void;
-}
+const SET_ENABLED_FOLLOWERS = Symbol.for("pi-provimux/pause-set-enabled-followers");
+type Followed = PauseController & { [SET_ENABLED_FOLLOWERS]?: Set<() => void> };
 
 /**
- * Shows the pause in the footer of the interactive session: at the session's start, at once after /pause or /continue
- * here, and within {@link PAUSE_FOOTER_POLL_MS} when another window changed the saved setting.
+ * Calls `follower` after every `setEnabled` of this controller, wherever it comes from (the start, the commands, the
+ * guard). The controller is the original project's and stays as it is: its own `setEnabled` runs first, unchanged.
+ * Returns the function that stops following.
  */
+function followSetEnabled(controller: PauseController, follower: () => void): () => void {
+	const followed = controller as Followed;
+	let followers = followed[SET_ENABLED_FOLLOWERS];
+	if (!followers) {
+		const own = new Set<() => void>();
+		followers = own;
+		followed[SET_ENABLED_FOLLOWERS] = own;
+		const setEnabled = controller.setEnabled.bind(controller);
+		controller.setEnabled = (enabled: boolean, now?: number): void => {
+			setEnabled(enabled, now);
+			for (const follow of [...own]) follow();
+		};
+	}
+	followers.add(follower);
+	return () => followers.delete(follower);
+}
+
+/** Shows the pause in the footer of the interactive session, as `pauseMode` (this window's guard state) holds it. */
 export function registerPauseFooter(
 	pi: ExtensionAPI,
-	agentDir: string,
-	options: { pollMs?: number; columns?: () => number } = {},
-): PauseFooter {
-	const pollMs = options.pollMs ?? PAUSE_FOOTER_POLL_MS;
+	pauseMode: PauseController,
+	options: { columns?: () => number } = {},
+): void {
 	const columns = options.columns ?? terminalColumns;
 	let active: ExtensionContext | undefined;
-	let timer: ReturnType<typeof setInterval> | undefined;
-	let paused = false;
 	let shown: string | undefined;
+	let unfollow: (() => void) | undefined;
 
 	const stop = (): void => {
-		if (timer) clearInterval(timer);
-		timer = undefined;
+		unfollow?.();
+		unfollow = undefined;
 		active = undefined;
 		shown = undefined;
-		process.stdout.off("resize", onResize);
+		process.stdout.off("resize", render);
 	};
-	const render = (): void => {
+	function render(): void {
 		const ctx = active;
 		if (!ctx) return;
-		const text = paused ? pauseStatusText(columns()) : undefined;
+		const text = pauseMode.isEnabled() ? pauseStatusText(columns()) : undefined;
 		if (text === shown) return;
 		try {
 			ctx.ui.setStatus(PAUSE_STATUS_KEY, text === undefined ? undefined : ctx.ui.theme.fg("warning", text));
@@ -80,31 +75,17 @@ export function registerPauseFooter(
 			// A session replaced since: the next session_start shows it again.
 			stop();
 		}
-	};
-	const read = (): void => {
-		const saved = readSavedPause(agentDir);
-		if (saved !== undefined) paused = saved;
-		render();
-	};
-	const onResize = (): void => render();
+	}
 
 	pi.on("session_start", (_event, ctx) => {
 		if (!ctx.hasUI || ctx.mode !== "tui") return;
 		stop();
 		active = ctx;
-		read();
+		render();
 		// The first status write failed (a stale interface): nothing is installed.
 		if (active !== ctx) return;
-		timer = setInterval(read, pollMs);
-		timer.unref?.();
-		process.stdout.on("resize", onResize);
+		unfollow = followSetEnabled(pauseMode, render);
+		process.stdout.on("resize", render);
 	});
 	pi.on("session_shutdown", () => stop());
-
-	return {
-		show: (value) => {
-			paused = value;
-			render();
-		},
-	};
 }

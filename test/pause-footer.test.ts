@@ -1,18 +1,14 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FastModeController } from "../extensions/fast.ts";
+import { FastFooterController } from "../extensions/fast-footer.ts";
 import { registerPauseCommands, registerPauseGuard } from "../extensions/index.ts";
-import { saveConfigFile } from "../extensions/lib.ts";
+import { resolvePauseDefault, saveConfigFile } from "../extensions/lib.ts";
 import { PAUSE_POLL_INTERVAL_MS, PauseController } from "../extensions/pause.ts";
-import {
-	PAUSE_FOOTER_POLL_MS,
-	PAUSE_STATUS_KEY,
-	pauseStatusText,
-	readSavedPause,
-	registerPauseFooter,
-} from "../extensions/pause-footer.ts";
+import { PAUSE_STATUS_KEY, pauseStatusText, registerPauseFooter } from "../extensions/pause-footer.ts";
 
 const dirs: string[] = [];
 const tempAgentDir = (): string => {
@@ -23,8 +19,10 @@ const tempAgentDir = (): string => {
 const WIDE = "<warning>paused · /continue</warning>";
 
 /**
- * One Pi window: its own pause controller (each window is its own Pi process), the request guard, the footer mark and
- * the commands; a footer that keeps what is set; a terminal `columns` wide. `footer: false` leaves the mark out.
+ * One Pi window, wired as the extension wires it: its own pause controller (each window is its own Pi process),
+ * read from the saved setting at load; the request guard; the footer mark; the commands; and the original project's
+ * model-name formatter with its orange `paused`. A footer that keeps what is set; a terminal `columns` wide.
+ * `footer: false` leaves the mark out.
  */
 function window(
 	agentDir: string,
@@ -53,21 +51,29 @@ function window(
 			theme: { fg: (color: string, text: string) => `<${color}>${text}</${color}>` },
 		},
 	} as unknown as ExtensionCommandContext;
-	const controller = new PauseController();
+	const controller = new PauseController(resolvePauseDefault(agentDir));
+	if (options.footer !== false) registerPauseFooter(pi, controller, { columns: () => columns });
+	registerPauseCommands({ pi, agentDir, pauseMode: controller });
 	registerPauseGuard({ pi, agentDir, pauseMode: controller });
-	const footer = options.footer === false ? undefined : registerPauseFooter(pi, agentDir, { columns: () => columns });
-	registerPauseCommands({ pi, agentDir, pauseMode: controller, onChange: (paused) => footer?.show(paused) });
+	const modelStatus = new FastFooterController("provimux", new FastModeController(false), () => undefined, controller);
 	const emit = (event: string) => {
 		for (const handler of handlers.get(event) ?? []) handler({}, ctx);
 	};
+	let held = 0;
 	return {
 		controller,
 		start: () => emit("session_start"),
 		shutdown: () => emit("session_shutdown"),
 		command: (name: string, args = "") => commands.get(name)?.handler(args, ctx),
 		/** A request reaching the guard: resolves when the guard lets it go. */
-		request: () => Promise.resolve(handlers.get("before_provider_request")?.[0]({}, ctx)),
+		request: () => {
+			held++;
+			return Promise.resolve(handlers.get("before_provider_request")?.[0]({}, ctx)).finally(() => held--);
+		},
+		held: () => held,
 		footer: () => statuses.get(PAUSE_STATUS_KEY),
+		/** The original project's orange label: the model's name in the footer. */
+		label: () => modelStatus.formatModelStatus("fixture model", false, "off"),
 		setStatus,
 		resize: (width: number) => {
 			columns = width;
@@ -84,48 +90,125 @@ const open = (...args: Parameters<typeof window>): Window => {
 	return w;
 };
 
+/** The mark and the orange label say the same thing, and it is what the window's guard believes. */
+const shows = (w: Window): boolean => {
+	const mark = w.footer() !== undefined;
+	expect(w.label().includes("paused")).toBe(mark);
+	expect(w.controller.isEnabled()).toBe(mark);
+	return mark;
+};
+
+let resizeListeners = 0;
 beforeEach(() => {
 	vi.useFakeTimers();
+	resizeListeners = process.stdout.listenerCount("resize");
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(() => {
+			throw new Error("unexpected fetch");
+		}),
+	);
 });
 afterEach(() => {
 	for (const w of windows.splice(0)) w.shutdown();
+	expect(process.stdout.listenerCount("resize")).toBe(resizeListeners);
+	vi.unstubAllGlobals();
 	vi.useRealTimers();
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe("the pause in the footer", () => {
-	it("shows at once in the window that typed /pause, and goes on /continue", async () => {
-		const here = open(tempAgentDir());
-		here.start();
-		expect(here.footer()).toBeUndefined();
-		await here.command("pause");
-		expect(here.footer()).toBe(WIDE);
-		await here.command("continue");
-		expect(here.footer()).toBeUndefined();
-		expect(here.setStatus).toHaveBeenLastCalledWith(PAUSE_STATUS_KEY, undefined);
-	});
-
-	it("shows in another, idle window within the poll interval, and goes when a third window continues", async () => {
+describe("the pause mark follows the request guard", () => {
+	it("agrees with the orange label in every state of the reviewer's probe, and after it", async () => {
 		const agentDir = tempAgentDir();
-		const [here, other, third] = [open(agentDir), open(agentDir), open(agentDir)];
-		for (const w of [here, other, third]) w.start();
-		await here.command("pause");
-		expect(other.footer()).toBeUndefined();
-		vi.advanceTimersByTime(PAUSE_FOOTER_POLL_MS);
-		expect(other.footer()).toBe(WIDE);
-		await third.command("continue");
-		expect(third.footer()).toBeUndefined();
-		vi.advanceTimersByTime(PAUSE_FOOTER_POLL_MS);
-		expect(here.footer()).toBeUndefined();
-		expect(other.footer()).toBeUndefined();
+		const [first, other] = [open(agentDir), open(agentDir)];
+		first.start();
+		other.start();
+		expect([shows(first), shows(other)]).toEqual([false, false]);
+
+		await first.command("pause");
+		expect(first.footer()).toBe(WIDE);
+		// The other window is idle and has not checked: both of its indicators say nothing, however long it waits.
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect([shows(first), shows(other)]).toEqual([true, false]);
+
+		// Its next request is held: then it shows the mark, and the orange label with it.
+		const request = other.request();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(other.held()).toBe(1);
+		expect([shows(first), shows(other)]).toEqual([true, true]);
+
+		// /continue in the other window: there at once; the first window is idle and keeps both until it checks.
+		await other.command("continue");
+		expect([shows(first), shows(other)]).toEqual([true, false]);
+		await vi.advanceTimersByTimeAsync(PAUSE_POLL_INTERVAL_MS);
+		await request;
+		expect(other.held()).toBe(0);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect([shows(first), shows(other)]).toEqual([true, false]);
+
+		// The first window's next request: its guard reads the setting, lets it go, and both indicators go together.
+		await first.request();
+		expect([shows(first), shows(other)]).toEqual([false, false]);
 	});
 
-	it("shows a pause saved before the window started, at its start", () => {
+	it("a held request's window clears both when another window continues, at the guard's next check", async () => {
+		const agentDir = tempAgentDir();
+		const [here, away] = [open(agentDir), open(agentDir)];
+		here.start();
+		away.start();
+		await here.command("pause");
+		let released = false;
+		const request = here.request().then(() => {
+			released = true;
+		});
+		await vi.advanceTimersByTimeAsync(PAUSE_POLL_INTERVAL_MS * 3);
+		expect([released, shows(here)]).toEqual([false, true]);
+		await away.command("continue");
+		expect(shows(here)).toBe(true);
+		await vi.advanceTimersByTimeAsync(PAUSE_POLL_INTERVAL_MS);
+		await request;
+		expect([released, shows(here)]).toEqual([true, false]);
+	});
+
+	it("agrees with the guard while the file is half-written, unreadable, invalid or missing", async () => {
+		const agentDir = tempAgentDir();
+		const path = join(agentDir, "provimux.json");
+		const here = open(agentDir);
+		here.start();
+		await here.command("pause");
+		let released = false;
+		const request = here.request().then(() => {
+			released = true;
+		});
+		for (const put of [
+			() => writeFileSync(path, "{"),
+			() => writeFileSync(path, '{"pause": tr'),
+			() => writeFileSync(path, '{"pause": "yes"}'),
+			() => {
+				rmSync(path);
+				mkdirSync(path);
+			},
+			() => writeFileSync(join(path, "x"), ""),
+		]) {
+			put();
+			await vi.advanceTimersByTimeAsync(PAUSE_POLL_INTERVAL_MS);
+			// The guard keeps what it believed when it can't read the setting: so does the mark.
+			expect([released, shows(here)]).toEqual([false, true]);
+		}
+		// No provimux.json at all: the original guard reads "not paused" and lets the request go; both indicators go.
+		rmSync(path, { recursive: true });
+		await vi.advanceTimersByTimeAsync(PAUSE_POLL_INTERVAL_MS);
+		await request;
+		expect([released, shows(here)]).toEqual([true, false]);
+	});
+
+	it("shows from the start in a Pi started while paused", () => {
 		const agentDir = tempAgentDir();
 		saveConfigFile(agentDir, { pause: true });
 		const later = open(agentDir);
 		later.start();
 		expect(later.footer()).toBe(WIDE);
+		expect(shows(later)).toBe(true);
 	});
 
 	it("says only paused in a narrow terminal, and follows a resize", async () => {
@@ -142,133 +225,75 @@ describe("the pause in the footer", () => {
 		narrow.resize(50);
 		expect(narrow.footer()).toBe("<warning>paused</warning>");
 	});
+});
 
-	it("reads nothing after the session ends, and sets nothing outside the TUI", () => {
+describe("nothing of its own", () => {
+	it("no timer and no file read: an idle window never changes its mark by itself", async () => {
+		const agentDir = tempAgentDir();
+		const idle = open(agentDir);
+		idle.start();
+		expect(vi.getTimerCount()).toBe(0);
+		saveConfigFile(agentDir, { pause: true });
+		await vi.advanceTimersByTimeAsync(10 * 60_000);
+		expect(idle.setStatus).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+		// Only the resize handling is added to what the original project listens to.
+		expect(process.stdout.listenerCount("resize")).toBe(resizeListeners + 1);
+	});
+
+	it("stops following after the session ends, and sets nothing outside the TUI or on a stale interface", async () => {
 		const agentDir = tempAgentDir();
 		const here = open(agentDir);
 		here.start();
 		here.shutdown();
-		saveConfigFile(agentDir, { pause: true });
-		vi.advanceTimersByTime(PAUSE_FOOTER_POLL_MS * 3);
+		expect(process.stdout.listenerCount("resize")).toBe(resizeListeners);
+		await here.command("pause");
+		expect(here.controller.isEnabled()).toBe(true);
 		expect(here.setStatus).not.toHaveBeenCalled();
+
 		const printMode = open(agentDir, { mode: "print", hasUI: false });
 		printMode.start();
-		vi.advanceTimersByTime(PAUSE_FOOTER_POLL_MS);
+		await printMode.command("continue");
 		expect(printMode.setStatus).not.toHaveBeenCalled();
+
+		saveConfigFile(agentDir, { pause: true });
+		const stale = open(agentDir, { stale: true });
+		stale.start();
+		expect(stale.setStatus).toHaveBeenCalledTimes(1);
+		await stale.command("continue");
+		expect(stale.setStatus).toHaveBeenCalledTimes(1);
+		expect(process.stdout.listenerCount("resize")).toBe(resizeListeners);
 		expect(vi.getTimerCount()).toBe(0);
 	});
-});
 
-describe("the mark only displays", () => {
-	it("a missing, unreadable or half-written provimux.json leaves the mark as it was", async () => {
+	it("a new session on the same controller follows it once, as a reload would", async () => {
 		const agentDir = tempAgentDir();
-		const path = join(agentDir, "provimux.json");
-		const [here, away] = [open(agentDir), open(agentDir)];
-		here.start();
-		away.start();
-		await here.command("pause");
-		vi.advanceTimersByTime(PAUSE_FOOTER_POLL_MS);
-		expect([here.footer(), away.footer()]).toEqual([WIDE, WIDE]);
-		const valid = readFileSync(path, "utf8");
-		for (const damage of [
-			() => writeFileSync(path, "{"),
-			() => writeFileSync(path, '{"pause": tr'),
-			() => writeFileSync(path, '{"pause": "yes"}'),
-			() => {
-				unlinkSync(path);
-				mkdirSync(path);
-			},
-			() => rmSync(path, { recursive: true }),
-		]) {
-			damage();
-			vi.advanceTimersByTime(PAUSE_FOOTER_POLL_MS);
-			expect([here.footer(), away.footer()]).toEqual([WIDE, WIDE]);
-		}
-		writeFileSync(path, valid);
-		expect(readSavedPause(agentDir)).toBe(true);
-		writeFileSync(path, '{"pause": false}');
-		vi.advanceTimersByTime(PAUSE_FOOTER_POLL_MS);
-		expect([here.footer(), away.footer()]).toEqual([undefined, undefined]);
-	});
-
-	it("never changes what the request guard or the elapsed-time accounting reads", async () => {
-		const agentDir = tempAgentDir();
-		const [here, away] = [open(agentDir), open(agentDir)];
-		here.start();
-		away.start();
-		await here.command("pause");
-		vi.advanceTimersByTime(PAUSE_FOOTER_POLL_MS * 5);
-		// The other window shows the pause, and its controller (the guard's state, and what elapsed time reads) is as it was.
-		expect(away.footer()).toBe(WIDE);
-		expect(away.controller.isEnabled()).toBe(false);
-		expect(away.controller.getPausedDurationMs()).toBe(0);
-		// A missing file for a tick does not clear the pause in the window that set it.
-		const path = join(agentDir, "provimux.json");
-		unlinkSync(path);
-		vi.advanceTimersByTime(PAUSE_FOOTER_POLL_MS);
-		expect(here.controller.isEnabled()).toBe(true);
-	});
-
-	it("a request held by the pause stays held while the file is missing for a poll and then half-written", async () => {
-		const agentDir = tempAgentDir();
-		const path = join(agentDir, "provimux.json");
 		const here = open(agentDir);
 		here.start();
+		here.start();
 		await here.command("pause");
-		unlinkSync(path);
-		vi.advanceTimersByTime(PAUSE_FOOTER_POLL_MS);
-		writeFileSync(path, "{");
-		let released = false;
-		const held = here.request().then(() => {
-			released = true;
-		});
-		await vi.advanceTimersByTimeAsync(PAUSE_FOOTER_POLL_MS * 3);
-		expect(released).toBe(false);
-		writeFileSync(path, '{"pause":false}');
-		await vi.advanceTimersByTimeAsync(PAUSE_POLL_INTERVAL_MS);
-		await held;
-		expect(released).toBe(true);
+		expect(here.setStatus).toHaveBeenCalledTimes(1);
+		expect(process.stdout.listenerCount("resize")).toBe(resizeListeners + 1);
 	});
 
-	it("the guard lets a request go at the same moment with the mark's poll running as without it", async () => {
-		// Before the request: the file missing, then half-written, while only the mark's poll reads it (the case where the
-		// poll used to clear the pause). Then the request, held across malformed, half-written and unreadable files, until
-		// the file says the pause is off.
-		const before: Array<[string, number]> = [
-			["missing", PAUSE_FOOTER_POLL_MS * 2],
-			["{", PAUSE_FOOTER_POLL_MS],
-		];
-		const after: Array<[string, number]> = [
-			["{", PAUSE_FOOTER_POLL_MS * 2],
-			['{"pause": tr', PAUSE_FOOTER_POLL_MS],
-			["unreadable", PAUSE_FOOTER_POLL_MS],
-			['{"pause":"yes"}', PAUSE_FOOTER_POLL_MS],
-			['{"pause":true}', PAUSE_FOOTER_POLL_MS],
-			['{"pause":false}', PAUSE_POLL_INTERVAL_MS * 2],
-		];
+	it("the guard lets a request go at the same moments with the mark as without it", async () => {
+		const states = ["{", '{"pause": tr', "unreadable", '{"pause":"yes"}', '{"pause":true}', '{"pause":false}'];
 		const run = async (footer: boolean): Promise<boolean[]> => {
 			const agentDir = tempAgentDir();
 			const path = join(agentDir, "provimux.json");
 			const w = open(agentDir, { footer });
 			w.start();
 			await w.command("pause");
-			const put = (content: string) => {
-				rmSync(path, { recursive: true, force: true });
-				if (content === "unreadable") mkdirSync(path);
-				else if (content !== "missing") writeFileSync(path, content);
-			};
-			for (const [content, ms] of before) {
-				put(content);
-				await vi.advanceTimersByTimeAsync(ms);
-			}
 			let released = false;
 			const request = w.request().then(() => {
 				released = true;
 			});
 			const seen: boolean[] = [];
-			for (const [content, ms] of after) {
-				put(content);
-				for (let t = 0; t < ms; t += 100) {
+			for (const content of states) {
+				rmSync(path, { recursive: true, force: true });
+				if (content === "unreadable") mkdirSync(path);
+				else writeFileSync(path, content);
+				for (let t = 0; t < PAUSE_POLL_INTERVAL_MS * 2; t += 100) {
 					await vi.advanceTimersByTimeAsync(100);
 					seen.push(released);
 				}
@@ -277,21 +302,9 @@ describe("the mark only displays", () => {
 			return seen;
 		};
 		const without = await run(false);
-		const withPoll = await run(true);
-		expect(withPoll).toEqual(without);
-		// Held until the file said the pause is off, then let go.
-		const offAt = without.length - (PAUSE_POLL_INTERVAL_MS * 2) / 100;
-		expect(without.slice(0, offAt).every((r) => !r)).toBe(true);
+		const withMark = await run(true);
+		expect(withMark).toEqual(without);
+		expect(without.slice(0, -4).every((r) => !r)).toBe(true);
 		expect(without.at(-1)).toBe(true);
-	});
-
-	it("a stale interface at the start installs no timer and no resize listener", () => {
-		const agentDir = tempAgentDir();
-		saveConfigFile(agentDir, { pause: true });
-		const listeners = process.stdout.listenerCount("resize");
-		const w = open(agentDir, { stale: true });
-		w.start();
-		expect(vi.getTimerCount()).toBe(0);
-		expect(process.stdout.listenerCount("resize")).toBe(listeners);
 	});
 });

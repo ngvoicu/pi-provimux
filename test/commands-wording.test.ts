@@ -36,8 +36,7 @@ describe("what /pause and /continue say", () => {
 		const agentDir = tempAgentDir();
 		const { pi, commands } = commandsOf();
 		const controller = new PauseController();
-		const shown: boolean[] = [];
-		registerPauseCommands({ pi, agentDir, pauseMode: controller, onChange: (paused) => shown.push(paused) });
+		registerPauseCommands({ pi, agentDir, pauseMode: controller });
 		const notify = vi.fn();
 		const ctx = { ui: { notify } } as unknown as ExtensionCommandContext;
 
@@ -47,8 +46,6 @@ describe("what /pause and /continue say", () => {
 		await commands.get("pause")?.handler("", ctx);
 		expect(controller.isEnabled()).toBe(true);
 		expect(notify).toHaveBeenLastCalledWith("Requests were already paused. Type /continue to let them go.", "info");
-		// The footer is told what this window set, each time.
-		expect(shown).toEqual([false, true, true]);
 
 		await commands.get("pause")?.handler("now", ctx);
 		expect(notify).toHaveBeenLastCalledWith(
@@ -108,7 +105,7 @@ describe("what /fast and /ultrafast say", () => {
 		const notify = vi.fn();
 		await commands.get("fast")?.handler("", { ui: { notify } } as unknown as ExtensionCommandContext);
 		expect(notify).toHaveBeenLastCalledWith(
-			"Fast mode is on, saved for later starts, but no model is selected. It applies to the Provimux models whose server entry lists service tiers. Type /fast again to turn it off.",
+			"Fast mode is on, saved for later starts, but no model is selected. It applies to the Provimux models whose server entry lists a service tier, except those sent in Claude's own format. Type /fast again to turn it off.",
 			"warning",
 		);
 	});

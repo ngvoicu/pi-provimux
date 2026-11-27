@@ -163,7 +163,7 @@ describe("speed commands", () => {
 		expect(loadConfigFile(agentDir)).toEqual({ fast: preference });
 		expect(harness.onStatusChange).toHaveBeenCalledTimes(1);
 		expect(harness.notify).toHaveBeenLastCalledWith(
-			`${label} mode is on, saved for later starts, but the current model (gpt-5.6-sol) does not list it, so its requests stay as they are. It applies to the Provimux models whose server entry lists service tiers. Type /${name} again to turn it off.`,
+			`${label} mode is on, saved for later starts, but the current model (gpt-5.6-sol) is not asked for a tier (its server entry lists none, or it is sent in Claude's own format), so its requests stay as they are. It applies to the Provimux models whose server entry lists a service tier, except those sent in Claude's own format. Type /${name} again to turn it off.`,
 			"warning",
 		);
 
@@ -224,7 +224,7 @@ describe("speed commands", () => {
 		expect(loadConfigFile(agentDir)).toStrictEqual({});
 		expect(refreshPreferences).toEqual([true, false]);
 		expect(harness.notify).toHaveBeenCalledWith(
-			"Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting and the prices were put back too.",
+			"Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting was put back, and reloading the model list for it reported no error.",
 			"warning",
 		);
 	});
@@ -248,7 +248,7 @@ describe("speed commands", () => {
 		expect(fastMode.getServiceTierFor(supportedModel.id)).toBe("ultrafast");
 		expect(refreshPreferences).toEqual(["ultrafast", true, "ultrafast"]);
 		expect(harness.notify).toHaveBeenCalledWith(
-			"Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting and the prices were put back too.",
+			"Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting was put back, and reloading the model list for it reported no error.",
 			"warning",
 		);
 		await harness.command("ultrafast").handler("", harness.ctx);
@@ -269,7 +269,7 @@ describe("speed commands", () => {
 		expect(fastMode.getServiceTierFor(supportedModel.id)).toBe("priority");
 		expect(loadConfigFile(agentDir)).toEqual({ fast: "ultrafast" });
 		expect(harness.notify).toHaveBeenCalledWith(
-			"Ultra Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting and the prices were put back too.",
+			"Ultra Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting was put back, and reloading the model list for it reported no error.",
 			"warning",
 		);
 	});
@@ -291,7 +291,7 @@ describe("speed commands", () => {
 			await harness.command("ultrafast").handler("", harness.ctx);
 
 			expect(harness.notify).toHaveBeenCalledWith(
-				"Ultra Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting and the prices were put back too.",
+				"Ultra Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting was put back, and reloading the model list for it reported no error.",
 				"warning",
 			);
 			expect(fastMode.getServiceTierFor(supportedModel.id)).toBe("priority");

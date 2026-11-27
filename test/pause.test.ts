@@ -93,12 +93,12 @@ describe("pause commands", () => {
 		expect(loadConfigFile(agentDir)).toEqual({ pause: false });
 		expect(notify).toHaveBeenNthCalledWith(
 			1,
-			"Requests are paused: each new request Pi sends to a model waits until you type /continue, in every Pi window with pi-provimux, also after a restart. An answer already streaming is not stopped.",
+			"Requests are paused: each new request Pi sends to a model waits until you type /continue, in every Pi window with pi-provimux that shares this agent folder, also after a restart. An answer already streaming is not stopped.",
 			"info",
 		);
 		expect(notify).toHaveBeenNthCalledWith(
 			2,
-			"Requests continue: a request held by the pause goes out within about 0.2 seconds.",
+			"Requests continue: each window holding a request checks about every 0.2 seconds and then lets it go.",
 			"info",
 		);
 	});

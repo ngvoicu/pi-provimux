@@ -5,12 +5,11 @@
 **Every command says what it does, and a pause shows in the footer.** Wording only, besides the footer: no command,
 setting or default changed.
 
-- **A pause shows in the footer.** While requests are paused, the footer of every Pi window with pi-provimux says
-  `paused · /continue` in the warning colour (`paused` under 60 columns): at once where you typed `/pause`, in the
-  others when they next read `provimux.json` (every 2 seconds), and from the start in a Pi started while paused. It
-  goes on `/continue` from any window. The mark only displays: it never holds or lets go a request and changes nothing
-  the elapsed time reads, and a `provimux.json` it can't read for a moment (missing, half-written) leaves it as it
-  was. The orange `paused` beside a Provimux model's name stays.
+- **A pause shows in the footer.** While a window's request guard believes requests are paused, its footer says
+  `paused · /continue` in the warning colour (`paused` under 60 columns). It shows the same state as the orange
+  `paused` beside a Provimux model's name, which stays, and changes at the same moments: at the start, at once where
+  you type `/pause` or `/continue`, and when the guard checks the setting (a request about to go out, or one held). An
+  idle window that has not checked since another window paused shows nothing until its next request is held.
 - **Descriptions in Pi** say what each command does for you: `/pause` holds each new model request Pi sends, in every
   Pi window with pi-provimux, until `/continue`; `/fast` and `/ultrafast` turn their mode on or off, saved for later
   starts, asking the server for its priority or Ultra Fast service tier; `/provimux-refresh` reloads the model list,
@@ -18,8 +17,8 @@ setting or default changed.
 - **Messages** say what happened and what to do next. `/fast` and `/ultrafast` now always say what they turned on or
   off and which tier they ask for (before, a model that offered the mode got only the footer label); a failed price
   reload says the mode is back to what it was and whether the saved setting was put back too. `/pause` says when
-  requests were already paused; `/continue` says a held request goes out within about 0.2 seconds, or that requests
-  were not paused. A command given an argument says it did not run and shows its right form. A failed
+  requests were already paused; `/continue` says each window holding a request checks about every 0.2 seconds and
+  then lets it go, or that requests were not paused. A command given an argument says it did not run and shows its right form. A failed
   `/provimux-refresh` says what to check. The `/login Provimux` prompts ask for the server URL and the client key in
   plain words.
 - **README:** one "Commands" section after the install lines: every command, what it does, when you would use it,

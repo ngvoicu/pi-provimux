@@ -564,10 +564,8 @@ export function registerPauseCommands(options: {
 	pi: ExtensionAPI;
 	agentDir: string;
 	pauseMode: PauseController;
-	/** After the pause changed here: the footer shows it at once. */
-	onChange?: (paused: boolean) => void;
 }): void {
-	const { pi, agentDir, pauseMode, onChange } = options;
+	const { pi, agentDir, pauseMode } = options;
 
 	const setPause = async (
 		enabled: boolean,
@@ -597,20 +595,19 @@ export function registerPauseCommands(options: {
 		}
 
 		pauseMode.setEnabled(enabled);
-		onChange?.(enabled);
 		const text = enabled
 			? wasPaused
 				? "Requests were already paused. Type /continue to let them go."
-				: "Requests are paused: each new request Pi sends to a model waits until you type /continue, in every Pi window with pi-provimux, also after a restart. An answer already streaming is not stopped."
+				: "Requests are paused: each new request Pi sends to a model waits until you type /continue, in every Pi window with pi-provimux that shares this agent folder, also after a restart. An answer already streaming is not stopped."
 			: wasPaused
-				? "Requests continue: a request held by the pause goes out within about 0.2 seconds."
+				? "Requests continue: each window holding a request checks about every 0.2 seconds and then lets it go."
 				: "Requests were not paused.";
 		ctx.ui.notify(text, "info");
 	};
 
 	pi.registerCommand("pause", {
 		description:
-			"Hold each new model request Pi sends, in every Pi window with pi-provimux, until you type /continue",
+			"Hold each new model request Pi sends, in every Pi window with pi-provimux that shares this agent folder, until you type /continue",
 		handler: async (args, ctx) => setPause(true, "pause", args, ctx),
 	});
 
@@ -703,7 +700,7 @@ export function registerFastCommands(options: {
 					const undone =
 						rollbackErrors.length > 0
 							? ` Putting back the saved setting or the prices failed (${rollbackErrors.join("; ")}): check ${CONFIG_FILE_NAME}.`
-							: " The saved setting and the prices were put back too.";
+							: " The saved setting was put back, and reloading the model list for it reported no error.";
 					ctx.ui.notify(
 						`${label} mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: ${message}.${undone}`,
 						"warning",
@@ -732,11 +729,13 @@ export function registerFastCommands(options: {
 						"info",
 					);
 				} else {
-					const current = currentModel
-						? `the current model (${currentModel.id}) does not list it, so its requests stay as they are`
-						: "no model is selected";
+					const current = !currentModel
+						? "no model is selected"
+						: currentModel.provider !== providerId
+							? `the current model (${currentModel.id}) is not a Provimux model, so its requests stay as they are`
+							: `the current model (${currentModel.id}) is not asked for a tier (its server entry lists none, or it is sent in Claude's own format), so its requests stay as they are`;
 					ctx.ui.notify(
-						`${label} mode is on, saved for later starts${instead}, but ${current}. It applies to the Provimux models whose server entry lists service tiers. Type /${name} again to turn it off.`,
+						`${label} mode is on, saved for later starts${instead}, but ${current}. It applies to the Provimux models whose server entry lists a service tier, except those sent in Claude's own format. Type /${name} again to turn it off.`,
 						"warning",
 					);
 				}
@@ -751,7 +750,7 @@ export function registerFastCommands(options: {
 			"fast",
 			"Fast",
 			true,
-			"Turn Fast mode on or off, saved for later starts: asks for the server's priority service tier on models that list it, which can cost more",
+			"Turn Fast mode on or off, saved for later starts: asks for the server's priority service tier on Provimux models whose entry lists a service tier, which can cost more",
 			"Ultra Fast",
 		),
 	);
@@ -761,7 +760,7 @@ export function registerFastCommands(options: {
 			"ultrafast",
 			"Ultra Fast",
 			"ultrafast",
-			"Turn Ultra Fast mode on or off, saved for later starts: asks for the server's Ultra Fast service tier on models that list it, which can cost more",
+			"Turn Ultra Fast mode on or off, saved for later starts: asks for the server's Ultra Fast service tier on Provimux models whose entry lists a service tier, which can cost more",
 			"Fast",
 		),
 	);
@@ -899,9 +898,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		logWarn(`invalid pause configuration (${message}); using pause=false`);
 	}
 	pauseController.setEnabled(pauseEnabled);
-	// The pause in the footer: in every window, read again every few seconds.
-	const pauseFooter = registerPauseFooter(pi, agentDir);
-	registerPauseCommands({ pi, agentDir, pauseMode: pauseController, onChange: (paused) => pauseFooter.show(paused) });
+	// The pause in the footer: shown exactly while this window's guard holds requests (what the orange label reads).
+	registerPauseFooter(pi, pauseController);
+	registerPauseCommands({ pi, agentDir, pauseMode: pauseController });
 	registerPauseGuard({ pi, agentDir, pauseMode: pauseController });
 
 	const proactiveCompaction = new ProactiveCompactionController(agentDir, identity.providerId);
