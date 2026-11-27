@@ -9,9 +9,10 @@
  * turn's response.created), read by the gateway from the request it really sent: after a fallback to another account,
  * the entry is that account's. Nothing here guesses an entry from a model's name or an account's kind.
  *
- * - The list is read when the models are loaded (at the start, on `/provimux-refresh`); once more when an answer names
- *   an entry the copy held does not have, or that its account's row does not list yet; never once per answer while it
- *   is held. A read that failed is tried again by the next such answer.
+ * - The list is read when the models are loaded and when the routes are told (at the start, on `/provimux-refresh`);
+ *   once more when an answer names an entry the figures held do not have, once per entry; never once per answer while
+ *   it is held. A read that failed is tried again by the next such answer. Such a read hands on its figures only: the
+ *   routes stay as last told.
  * - A gateway gives figures when its list has `figures` (whatever its `state`). One that does not (Provimux
  *   8.1.7-pmx.3 or older, plain CLIProxyAPI) is read and used exactly as before.
  */
@@ -29,7 +30,7 @@ export interface GatewayFigures {
 	entries: Record<string, unknown>;
 }
 
-/** What a model list read gave, for the figures: the list's model owners and accounts, and the figures if any. */
+/** What a model list read gave: the list's model owners and accounts, and the figures if any. */
 export interface ListedSources {
 	owners: Map<string, string>;
 	accounts: Map<string, Account[]>;
@@ -117,9 +118,9 @@ export type SourcesReader = (
 export class GatewayList {
 	/** The gateway gives figures: its list had `figures`. Undefined: not known yet. */
 	supports: boolean | undefined;
-	private latest: { key: string; sources: ListedSources } | undefined;
+	private latest: ListedSources | undefined;
 	private inflight: { key: string; promise: Promise<ListedSources> } | undefined;
-	/** The answers that already brought a read of their own: model, account and entry. */
+	/** The entries whose answers already brought a read of their own. */
 	private readFor = new Set<string>();
 	private listeners = new Set<() => void>();
 
@@ -145,7 +146,7 @@ export class GatewayList {
 		if (share && this.inflight?.key === key) return this.inflight.promise;
 		const promise = this.reader(plainModelsUrl, apiKey, timeoutMs, signal, this.supports === true)
 			.then((sources) => {
-				this.take(key, sources);
+				this.take(sources);
 				return sources;
 			})
 			.finally(() => {
@@ -155,17 +156,12 @@ export class GatewayList {
 		return promise;
 	}
 
-	/** The list last read for this gateway and key, if any. */
-	current(plainModelsUrl: string, apiKey: string): ListedSources | undefined {
-		return this.latest?.key === `${plainModelsUrl}\n${apiKey}` ? this.latest.sources : undefined;
-	}
-
-	private take(key: string, sources: ListedSources): void {
+	private take(sources: ListedSources): void {
 		// A list that was not read says nothing, either way.
 		if (!sources.read) return;
 		if (sources.figures) this.supports = true;
 		else if (!sources.answers) this.supports = false;
-		this.latest = { key, sources };
+		this.latest = sources;
 		for (const listener of this.listeners) {
 			try {
 				listener();
@@ -183,31 +179,26 @@ export class GatewayList {
 
 	/** The figures last read. */
 	figures(): GatewayFigures | undefined {
-		return this.latest?.sources.figures;
+		return this.latest?.figures;
 	}
 
 	/**
-	 * An answer named this entry: where the figures held lack it, or its account's row does not list it yet (the
-	 * account's first answer for this name), the list is read once more, once per model, account and entry. A read that
+	 * An answer named this entry: where the figures held lack it, the list is read once more, once per entry. A read that
 	 * failed counts as not done: the next such answer reads again. An answer that names an entry is from a gateway that
 	 * gives figures, also where the list could not be read before.
 	 */
-	noteAnswer(modelId: string, account: string | undefined, entry: string): void {
+	noteAnswer(entry: string): void {
 		this.supports = true;
-		const sources = this.latest?.sources;
-		const held = !!sources?.figures && Object.hasOwn(sources.figures.entries, entry);
-		const row = account ? sources?.accounts.get(modelId)?.find((one) => one.account === account) : undefined;
-		const listed = !account || !!row?.answered?.some((item) => item.entry === entry);
-		if (held && listed) return;
-		const key = `${modelId}\n${account ?? ""}\n${entry}`;
-		if (this.readFor.has(key)) return;
-		this.readFor.add(key);
+		const figures = this.latest?.figures;
+		if (figures && Object.hasOwn(figures.entries, entry)) return;
+		if (this.readFor.has(entry)) return;
+		this.readFor.add(entry);
 		const connection = this.connection();
 		if (!connection) {
-			this.readFor.delete(key);
+			this.readFor.delete(entry);
 			return;
 		}
-		const failed = () => this.readFor.delete(key);
+		const failed = () => this.readFor.delete(entry);
 		void this.read(connection.plainModelsUrl, connection.apiKey).then((sources) => {
 			if (!sources.read) failed();
 		}, failed);

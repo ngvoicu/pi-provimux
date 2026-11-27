@@ -10,7 +10,6 @@ import {
 import { fetchModelSources, loadMappedModels } from "../extensions/lib.ts";
 import { parseAccounts } from "../extensions/sources.ts";
 import {
-	type Account,
 	ANSWERED_EVENT,
 	type AnswerCallbacks,
 	answeredOptions,
@@ -100,10 +99,8 @@ describe("the model list, from a gateway with figures", () => {
 		const sources = await fetchModelSources("http://gw/v1/models", "k");
 		expect(urls).toEqual(["http://gw/v1/models?include=accounts", "http://gw/v1/models?include=accounts,figures"]);
 		expect(sources.figures?.entries[LOGIN_ENTRY]).toBeDefined();
-		expect(sources.accounts.get("claude-fable-5-2")?.[0]).toMatchObject({
-			account: "a.aaaaaaaaaaaaaaaaaaaa",
-			answered: [],
-		});
+		expect(sources.answers).toBe(true);
+		expect(sources.accounts.get("claude-fable-5-2")).toEqual([{ provider: "claude", kind: "oauth", priority: 5 }]);
 		// Known to give figures: one read, with them.
 		urls.length = 0;
 		await fetchModelSources("http://gw/v1/models", "k", 1000, undefined, true);
@@ -123,25 +120,6 @@ describe("the model list, from a gateway with figures", () => {
 		expect(urls).toEqual(["http://gw/v1/models?include=accounts"]);
 		expect(sources.figures).toBeUndefined();
 		expect(sources.answers).toBeUndefined();
-	});
-
-	it("an account row keeps its marker and its record; a row without them reads as before", () => {
-		expect(parseAccounts([{ provider: "claude", kind: "oauth", priority: 1 }])).toEqual([
-			{ provider: "claude", kind: "oauth", priority: 1 },
-		]);
-		expect(
-			parseAccounts([
-				row([{ entry: LOGIN_ENTRY, on: "2026-11-27" }, { entry: null, on: "2026-11-20" }, { entry: 7 }]),
-			]),
-		).toEqual([
-			{
-				provider: "claude",
-				kind: "oauth",
-				priority: 5,
-				account: "a.aaaaaaaaaaaaaaaaaaaa",
-				answered: [{ entry: LOGIN_ENTRY, on: "2026-11-27" }, { entry: null, on: "2026-11-20" }, { entry: null }],
-			},
-		]);
 	});
 });
 
@@ -208,21 +186,22 @@ describe("prices: pi-provimux prices nothing from the gateway's figures", () => 
 });
 
 describe("routes", () => {
-	const account = (answered?: Account["answered"], marker = "a.cccccccccccccccccccc", priority = 5): Account => ({
+	// The rows as the gateway lists them, read as pi-provimux reads them.
+	const account = (answered?: unknown[]) => ({
 		provider: "claude",
 		kind: "oauth",
-		priority,
-		account: marker,
+		priority: 5,
+		account: "a.cccccccccccccccccccc",
 		...(answered ? { answered } : {}),
 	});
-	const route = (accounts: Account[]) =>
+	const route = (rows: unknown[]) =>
 		routeOf("claude-fable-5-2", {
 			owners: { "claude-fable-5-2": "anthropic" },
-			accounts: { "claude-fable-5-2": accounts },
+			accounts: { "claude-fable-5-2": parseAccounts(rows) },
 		});
 
 	it("are 105.0.8's whatever the accounts' records say: no entry and no marker is told with them", () => {
-		const openrouter: Account = {
+		const openrouter = {
 			provider: "openai-compatible-openrouter",
 			kind: "apikey",
 			priority: 0,
@@ -236,10 +215,10 @@ describe("routes", () => {
 		for (const records of [
 			[[{ entry: LOGIN_ENTRY }], [{ entry: OPENROUTER }]],
 			[[], [{ entry: null }]],
-		] as Array<Array<Account["answered"]>>) {
+		] as unknown[][][]) {
 			expect(route([account(records[0]), { ...openrouter, answered: records[1] }])).toEqual(before);
 		}
-		const elsewhere: Account = {
+		const elsewhere = {
 			provider: "openai-compatible-x",
 			kind: "apikey",
 			priority: 0,
@@ -251,14 +230,9 @@ describe("routes", () => {
 });
 
 describe("the read an answer brings", () => {
-	const sources = (figures: Record<string, unknown>, answered: Account["answered"] = []): ListedSources => ({
+	const sources = (figures: Record<string, unknown>): ListedSources => ({
 		owners: new Map(),
-		accounts: new Map([
-			[
-				"claude-fable-5-2",
-				[{ provider: "x", kind: "apikey", priority: 0, account: "a.bbbbbbbbbbbbbbbbbbbb", answered }],
-			],
-		]),
+		accounts: new Map([["claude-fable-5-2", [{ provider: "x", kind: "apikey", priority: 0 }]]]),
 		figures: parseFigures(held(figures)),
 		answers: true,
 		read: true,
@@ -266,21 +240,21 @@ describe("the read an answer brings", () => {
 	const failedRead = (): ListedSources => ({ owners: new Map(), accounts: new Map() });
 	const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
 
-	it("is one read for an entry the figures lack or the account's row does not list, never one per answer", async () => {
+	it("is one read for an entry the figures lack, never one per answer", async () => {
 		const reader = vi.fn(async (..._args: Parameters<SourcesReader>) => sources({}));
 		const gateway = new GatewayList(reader, () => ({ plainModelsUrl: "http://gw/v1/models", apiKey: "k" }));
 		await gateway.read("http://gw/v1/models", "k");
 		expect(gateway.supports).toBe(true);
 		reader.mockClear();
-		gateway.noteAnswer("claude-fable-5-2", "a.bbbbbbbbbbbbbbbbbbbb", OPENROUTER);
-		gateway.noteAnswer("claude-fable-5-2", "a.bbbbbbbbbbbbbbbbbbbb", OPENROUTER);
+		gateway.noteAnswer(OPENROUTER);
+		gateway.noteAnswer(OPENROUTER);
 		await vi.waitFor(() => expect(reader).toHaveBeenCalledTimes(1));
 		expect(reader.mock.calls[0]?.[4]).toBe(true);
-		// Held and listed: nothing to read.
-		reader.mockResolvedValue(sources({ [OPENROUTER]: entry() }, [{ entry: OPENROUTER }]));
+		// Held: nothing to read.
+		reader.mockResolvedValue(sources({ [OPENROUTER]: entry() }));
 		await gateway.read("http://gw/v1/models", "k", undefined, undefined, false);
 		reader.mockClear();
-		gateway.noteAnswer("claude-fable-5-2", "a.bbbbbbbbbbbbbbbbbbbb", OPENROUTER);
+		gateway.noteAnswer(OPENROUTER);
 		await settle();
 		expect(reader).not.toHaveBeenCalled();
 		expect(gateway.figures()?.entries[OPENROUTER]).toBeDefined();
@@ -293,20 +267,20 @@ describe("the read an answer brings", () => {
 		await gateway.read("http://gw/v1/models", "k");
 		reader.mockClear();
 		reader.mockResolvedValueOnce(failedRead());
-		gateway.noteAnswer("new-name", "a.cccccccccccccccccccc", "openrouter/x");
+		gateway.noteAnswer("openrouter/x");
 		await settle();
-		reader.mockResolvedValue(sources({ "openrouter/x": entry() }, [{ entry: "openrouter/x" }]));
+		reader.mockResolvedValue(sources({ "openrouter/x": entry() }));
 		for (let i = 0; i < 4; i++) {
-			gateway.noteAnswer("new-name", "a.cccccccccccccccccccc", "openrouter/x");
+			gateway.noteAnswer("openrouter/x");
 			await settle();
 		}
 		expect(reader).toHaveBeenCalledTimes(2);
 		// A read that threw counts as failed too.
 		reader.mockClear();
 		reader.mockRejectedValueOnce(new Error("down"));
-		gateway.noteAnswer("other-name", "a.cccccccccccccccccccc", "openrouter/y");
+		gateway.noteAnswer("openrouter/y");
 		await settle();
-		gateway.noteAnswer("other-name", "a.cccccccccccccccccccc", "openrouter/y");
+		gateway.noteAnswer("openrouter/y");
 		await settle();
 		expect(reader).toHaveBeenCalledTimes(2);
 	});
@@ -317,9 +291,8 @@ describe("the read an answer brings", () => {
 		await gateway.read("http://gw/v1/models", "k");
 		expect(gateway.supports).toBeUndefined();
 		reader.mockClear();
-		reader.mockResolvedValue(sources({ "openai/gpt-6.1-sol": entry() }, [{ entry: "openai/gpt-6.1-sol" }]));
-		for (let i = 0; i < 4; i++)
-			gateway.noteAnswer("claude-fable-5-2", "a.bbbbbbbbbbbbbbbbbbbb", "openai/gpt-6.1-sol");
+		reader.mockResolvedValue(sources({ "openai/gpt-6.1-sol": entry() }));
+		for (let i = 0; i < 4; i++) gateway.noteAnswer("openai/gpt-6.1-sol");
 		await settle();
 		expect(reader).toHaveBeenCalledTimes(1);
 		expect(reader.mock.calls[0]?.[4]).toBe(true);
@@ -382,15 +355,8 @@ describe("the events, from a gateway with figures", () => {
 			[
 				"claude-fable-5-2",
 				[
-					{ provider: "claude", kind: "oauth", priority: 5, account: "a.cccccccccccccccccccc", answered: [] },
-					{
-						provider: "openai-compatible-openrouter",
-						kind: "apikey",
-						priority: 0,
-						host: "openrouter.ai",
-						account: "a.dddddddddddddddddddd",
-						answered: [{ entry: OPENROUTER }],
-					},
+					{ provider: "claude", kind: "oauth", priority: 5 },
+					{ provider: "openai-compatible-openrouter", kind: "apikey", priority: 0, host: "openrouter.ai" },
 				],
 			],
 		]),
@@ -490,6 +456,73 @@ describe("the events, from a gateway with figures", () => {
 			{ provider: "provimux", model: "claude-fable-5-2", entry: null, account: "a.eeeeeeeeeeeeeeeeeeee" },
 			{ provider: "provimux", model: "claude-fable-5-2", entry: null, account: "a.eeeeeeeeeeeeeeeeeeee" },
 		]);
+	});
+
+	// The review's case (2026-11-27): while Pi is open, the operator puts an API key above the login on the gateway; an
+	// answer then names an entry the figures held lack. The read it brings hands on its figures only: the routes are
+	// those last told, as 105.0.8 tells them, until the next /provimux-refresh.
+	it("a read an answer brings tells its figures with the routes last told, unchanged; nothing where they are the same", async () => {
+		const fake = fakePi();
+		const listed = (login: number, figures: Record<string, unknown>): ListedSources => ({
+			owners: new Map([["claude-fable-5-2", "anthropic"]]),
+			accounts: new Map([
+				[
+					"claude-fable-5-2",
+					[
+						{ provider: "claude", kind: "oauth", priority: login },
+						{ provider: "openai-compatible-openrouter", kind: "apikey", priority: 1, host: "openrouter.ai" },
+					],
+				],
+			]),
+			figures: parseFigures(held(figures)),
+			answers: true,
+			read: true,
+		});
+		const reader = vi.fn(async (..._args: Parameters<SourcesReader>) => listed(5, { [LOGIN_ENTRY]: entry() }));
+		const gateway = new GatewayList(reader, () => ({ plainModelsUrl: "http://gw/v1/models", apiKey: "k" }));
+		const announcer = new UpstreamsAnnouncer(
+			fake.pi,
+			"provimux",
+			() => ({ baseUrlInput: "x", apiKey: "k" }),
+			async () => routesOfSources(await gateway.read("http://gw/v1/models", "k")),
+			undefined,
+			gateway,
+		);
+		announcer.register();
+		fake.listeners.get(REQUEST_EVENT)!({});
+		await announcer.announce();
+		const told = () => fake.emitted.filter(([channel]) => channel === UPSTREAMS_EVENT).map(([, data]) => data);
+		const first = told()[0] as { models: Record<string, unknown>; figures: { entries: Record<string, unknown> } };
+		expect(first.models["claude-fable-5-2"]).toEqual({
+			upstreams: [{ provider: "anthropic", subscription: true }],
+			fallbacks: [{ provider: "openrouter", subscription: false }],
+		});
+		// The API key now first on the gateway, and its entry new.
+		reader.mockResolvedValue(listed(0, { [LOGIN_ENTRY]: entry(), [OPENROUTER]: entry() }));
+		fake.respond({
+			"X-CPA-AUTH-KIND": "apikey",
+			"X-CPA-AUTH-PROVIDER": "openai-compatible-openrouter",
+			"X-CPA-AUTH-HOST": "openrouter.ai",
+			"X-Provimux-Account": "a.dddddddddddddddddddd",
+			"X-Provimux-Entry": OPENROUTER,
+		});
+		await vi.waitFor(() => expect(told()).toHaveLength(2));
+		const second = told()[1] as typeof first;
+		expect(second.models).toEqual(first.models);
+		expect(Object.keys(second.figures.entries).sort()).toEqual([LOGIN_ENTRY, OPENROUTER].sort());
+		// A read whose figures are those told says nothing.
+		gateway.forgetReads();
+		reader.mockResolvedValue(listed(0, { [LOGIN_ENTRY]: entry(), [OPENROUTER]: entry() }));
+		await gateway.read("http://gw/v1/models", "k");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(told()).toHaveLength(2);
+		// /provimux-refresh reads the routes again, as 105.0.8 does.
+		await announcer.refreshed();
+		const third = told()[2] as typeof first;
+		expect(third.models["claude-fable-5-2"]).toEqual({
+			upstreams: [{ provider: "openrouter", subscription: false }],
+			fallbacks: [{ provider: "anthropic", subscription: true }],
+		});
 	});
 
 	it("from a gateway that names the account only (8.1.7-pmx.3), only the answer is told, as before", async () => {

@@ -1078,9 +1078,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	registerTransientNetworkErrorRetry(pi, identity.providerId);
 	// `pi -p --thinking low` on a model without low is refused, not moved silently.
 	registerThinkingLevelGuard(pi, identity.providerId);
-	// Where each model really comes from (login or API key, which lab), for other extensions. From a gateway that gives
-	// prices and cache lifetimes per providers.dev entry, the routes come from the list the model load read, with them;
-	// from any other, from a list read of their own, as before.
+	// Where each model really comes from (login or API key, which lab), for other extensions: read when they are told (at
+	// the start, on /provimux-refresh), as before; from a gateway that gives prices and cache lifetimes per providers.dev
+	// entry, that read asks for them too.
 	const gateway = new GatewayList(fetchModelSources, () => {
 		const current = resolveConnection(agentDir, identity.providerId);
 		return current
@@ -1090,7 +1090,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const routesFrom = async (baseUrlInput: string, apiKey: string, signal?: AbortSignal) => {
 		if (gateway.supports !== true) return fetchModelAccounts(baseUrlInput, apiKey, signal);
 		const url = resolveEndpoints(baseUrlInput).plainModelsUrl;
-		const sources = gateway.current(url, apiKey) ?? (await gateway.read(url, apiKey, undefined, signal));
+		const sources = await gateway.read(url, apiKey, undefined, signal);
 		if (!sources.read) throw new Error(`${url} was not read`);
 		return routesOfSources(sources);
 	};

@@ -1150,7 +1150,9 @@ async function readModelSources(
 			if (ownedBy) sources.owners.set(id, ownedBy);
 			const accounts = parseAccounts(record?.accounts);
 			if (accounts.length > 0) sources.accounts.set(id, accounts);
-			if (accounts.some((account) => account.answered)) sources.answers = true;
+			// A row that says what its answers were (`answered`): from a Provimux that gives figures.
+			if (Array.isArray(record?.accounts) && record.accounts.some((row) => Array.isArray(asRecord(row)?.answered)))
+				sources.answers = true;
 		}
 		const held = parseFigures(asRecord(body)?.figures);
 		if (held) sources.figures = held;

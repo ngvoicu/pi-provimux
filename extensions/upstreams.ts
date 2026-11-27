@@ -37,7 +37,8 @@
  *   its account's marker. `model-upstreams:answered` itself is unchanged.
  * - `model-upstreams` also carries `figures`: the gateway's figures object (its `state`, `dataset_version`,
  *   `generated_at`, `fetched_at`, and `entries`: entry → price, cache, input_window, max_output, as the gateway gives
- *   them), told again whenever the list is read again.
+ *   them). Where a later list read brings other figures (an answer named an entry not held), the event is told again
+ *   with the routes last told, unchanged, and the new figures: routes are read only when told, as 105.0.8 reads them.
  * Readers that know none of this (pi-cache-keeper 0.10.8) read the routes and the answers as before.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -585,6 +586,8 @@ export class UpstreamsAnnouncer {
 	private wanted = false;
 	/** Whether the proxy named what answered a request in this session: it is one that names answers. */
 	private namedBefore = false;
+	/** The routes last told, and the figures told with them (as JSON). */
+	private told: { models: Record<string, Route>; figures?: string } | undefined;
 	/** The session's models (pi's catalog with its updates and models.json), from the context pi gives handlers. */
 	private registry: ModelList | undefined;
 	/** The catalog pi-ai is built with, once loaded: when the session's models have none of a provider. */
@@ -646,11 +649,8 @@ export class UpstreamsAnnouncer {
 			this.keepRegistry(ctx);
 		});
 		this.pi.on("session_shutdown", () => this.shutdown());
-		// The list read again (a model load, or the read an answer with a new entry brought): from a gateway that gives
-		// figures, the routes and their figures are told again. From any other, only when asked, as before.
-		this.gateway?.onChange(() => {
-			if (this.wanted && this.gateway?.supports === true) void this.announce(true);
-		});
+		// The list read again (a model load, or the read an answer with a new entry brought): its figures only.
+		this.gateway?.onChange(() => this.figuresRead());
 		this.pi.events.on(REQUEST_EVENT, () => {
 			this.wanted = true;
 			void this.announce();
@@ -689,7 +689,7 @@ export class UpstreamsAnnouncer {
 			// Named: from the response alone, without waiting for the credential list; only once an extension asked.
 			this.namedBefore = true;
 			const upstream = statedUpstream(modelId, { provider, kind, ...(host ? { host } : {}) }, this.catalog);
-			const named = this.namedEntry(modelId, stated);
+			const named = this.namedEntry(stated);
 			if (!this.wanted) return;
 			if (named) this.emit(ENTRY_EVENT, { provider: this.providerId, model: modelId, ...named });
 			upstreams = [upstream];
@@ -703,11 +703,11 @@ export class UpstreamsAnnouncer {
 	 * Nothing from any other (Provimux 8.1.7-pmx.3 names the account only). An entry new to what the extension holds
 	 * brings one more read of the list.
 	 */
-	private namedEntry(modelId: string, stated: Statement): { entry: string | null; account?: string } | undefined {
+	private namedEntry(stated: Statement): { entry: string | null; account?: string } | undefined {
 		const account = typeof stated.account === "string" && stated.account.trim() ? stated.account.trim() : undefined;
 		const entry = statedEntry(stated);
 		if (entry === undefined && !(account && this.gateway?.supports === true)) return undefined;
-		if (entry) this.gateway?.noteAnswer(modelId, account, entry);
+		if (entry) this.gateway?.noteAnswer(entry);
 		return { entry: entry ?? null, ...(account ? { account } : {}) };
 	}
 
@@ -718,6 +718,7 @@ export class UpstreamsAnnouncer {
 		this.wanted = false;
 		this.namedBefore = false;
 		this.listed = undefined;
+		this.told = undefined;
 		this.registry = undefined;
 	}
 
@@ -738,11 +739,26 @@ export class UpstreamsAnnouncer {
 	}
 
 	/**
-	 * Asks CLIProxyAPI for its credentials and tells the routes. When it does not answer, nothing is said. `again`: the
-	 * list was just read again; a lookup already running read the older one, so this one follows it.
+	 * A list read brought figures other than those told: the routes last told, as they were, with the new figures. Routes
+	 * are never read here; before any routes were told, nothing is said (the routes, when told, carry the figures).
 	 */
-	announce(again = false): Promise<void> {
-		if (this.running) return again ? this.running.then(() => this.announce()) : this.running;
+	private figuresRead(): void {
+		if (this.running) {
+			void this.running.then(() => this.figuresRead());
+			return;
+		}
+		const told = this.told;
+		const held = this.gateway?.figures();
+		if (!this.wanted || !told || !held) return;
+		const figures = handOnFigures(held);
+		if (JSON.stringify(figures) === told.figures) return;
+		told.figures = JSON.stringify(figures);
+		this.emit(UPSTREAMS_EVENT, { provider: this.providerId, models: told.models, figures });
+	}
+
+	/** Asks CLIProxyAPI for its credentials and tells the routes. When it does not answer, nothing is said. */
+	announce(): Promise<void> {
+		if (this.running) return this.running;
 		const signal = this.session.signal;
 		if (signal.aborted) return Promise.resolve();
 		const running: Promise<void> = (async () => {
@@ -766,6 +782,7 @@ export class UpstreamsAnnouncer {
 				[...ids].map((id) => [id, routeOf(id, listed, this.catalog)]),
 			);
 			const figures = listed.figures;
+			this.told = { models, ...(figures ? { figures: JSON.stringify(figures) } : {}) };
 			this.emit(UPSTREAMS_EVENT, { provider: this.providerId, models, ...(figures ? { figures } : {}) }, signal);
 		})()
 			.catch(() => {
