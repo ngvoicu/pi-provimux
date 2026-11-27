@@ -565,7 +565,7 @@ export function registerPauseCommands(options: {
 	agentDir: string;
 	pauseMode: PauseController;
 	/** After the pause changed here: the footer shows it at once. */
-	onChange?: () => void;
+	onChange?: (paused: boolean) => void;
 }): void {
 	const { pi, agentDir, pauseMode, onChange } = options;
 
@@ -576,7 +576,10 @@ export function registerPauseCommands(options: {
 		ctx: ExtensionContext,
 	): Promise<void> => {
 		if (args.trim()) {
-			ctx.ui.notify(`/${commandName} takes no arguments: type /${commandName} on its own.`, "error");
+			ctx.ui.notify(
+				`/${commandName} takes no arguments, so it did not run. Type /${commandName} on its own.`,
+				"error",
+			);
 			return;
 		}
 
@@ -586,24 +589,28 @@ export function registerPauseCommands(options: {
 			saveConfigFile(agentDir, { pause: enabled });
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`Could not save the pause in ${CONFIG_FILE_NAME}: ${message}. Nothing changed.`, "error");
+			ctx.ui.notify(
+				`Could not save the pause in ${CONFIG_FILE_NAME}: ${message}. This window's pause stays as it was.`,
+				"error",
+			);
 			return;
 		}
 
 		pauseMode.setEnabled(enabled);
-		onChange?.();
+		onChange?.(enabled);
 		const text = enabled
 			? wasPaused
 				? "Requests were already paused. Type /continue to let them go."
-				: "Requests are paused: every new request to a model waits, in every Pi window, also after a restart, until you type /continue. An answer already streaming finishes."
+				: "Requests are paused: each new request Pi sends to a model waits until you type /continue, in every Pi window with pi-provimux, also after a restart. An answer already streaming is not stopped."
 			: wasPaused
-				? "Requests continue: the ones that were waiting go out now."
-				: "Requests were not paused, so nothing was waiting.";
+				? "Requests continue: a request held by the pause goes out within about 0.2 seconds."
+				: "Requests were not paused.";
 		ctx.ui.notify(text, "info");
 	};
 
 	pi.registerCommand("pause", {
-		description: "Hold every new model request, in every Pi window, until you type /continue",
+		description:
+			"Hold each new model request Pi sends, in every Pi window with pi-provimux, until you type /continue",
 		handler: async (args, ctx) => setPause(true, "pause", args, ctx),
 	});
 
@@ -642,7 +649,7 @@ export function registerFastCommands(options: {
 		handler: async (args: string, ctx: ExtensionContext) => {
 			if (args.trim()) {
 				ctx.ui.notify(
-					`/${name} takes no arguments: type /${name} on its own to turn ${label} mode on or off.`,
+					`/${name} takes no arguments, so it did not run. Type /${name} on its own to turn ${label} mode on or off.`,
 					"error",
 				);
 				return;
@@ -665,7 +672,7 @@ export function registerFastCommands(options: {
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					ctx.ui.notify(
-						`Could not save ${label} mode in ${CONFIG_FILE_NAME}: ${message}. Nothing changed.`,
+						`Could not save ${label} mode in ${CONFIG_FILE_NAME}: ${message}. ${label} mode stays as it was in this window.`,
 						"error",
 					);
 					return;
@@ -695,10 +702,10 @@ export function registerFastCommands(options: {
 					const message = error instanceof Error ? error.message : String(error);
 					const undone =
 						rollbackErrors.length > 0
-							? ` Going back to the previous setting failed too (${rollbackErrors.join("; ")}): check ${CONFIG_FILE_NAME}.`
-							: " The previous setting is back.";
+							? ` Putting back the saved setting or the prices failed (${rollbackErrors.join("; ")}): check ${CONFIG_FILE_NAME}.`
+							: " The saved setting and the prices were put back too.";
 					ctx.ui.notify(
-						`${label} mode was not changed: the model list, which carries the prices, could not be reloaded: ${message}.${undone}`,
+						`${label} mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: ${message}.${undone}`,
 						"warning",
 					);
 					onStatusChange?.(ctx);
@@ -711,24 +718,25 @@ export function registerFastCommands(options: {
 					currentModel !== undefined &&
 					currentModel.provider === providerId &&
 					fastMode.isModelSupported(currentModel.id);
+				const tier = selected === "ultrafast" ? "Ultra Fast" : "priority";
 				const instead =
 					previousPreference !== false && preference !== false ? ` (in place of ${otherLabel} mode)` : "";
 				if (preference === false) {
 					ctx.ui.notify(
-						`${label} mode is off, here and at later starts: requests use the normal speed and price.`,
+						`${label} mode is off, saved for later starts: requests no longer ask for a faster service tier.`,
 						"info",
 					);
 				} else if (supported) {
 					ctx.ui.notify(
-						`${label} mode is on, here and at later starts${instead}: requests to ${currentModel.id} ask for faster service, which can cost more. Type /${name} again to turn it off.`,
+						`${label} mode is on, saved for later starts${instead}: requests to ${currentModel.id} ask the server for its ${tier} service tier, which can cost more. Type /${name} again to turn it off.`,
 						"info",
 					);
 				} else {
 					const current = currentModel
-						? `the current model (${currentModel.id}) does not offer it`
+						? `the current model (${currentModel.id}) does not list it, so its requests stay as they are`
 						: "no model is selected";
 					ctx.ui.notify(
-						`${label} mode is on, here and at later starts${instead}, but ${current}, so nothing changes for now. It applies to the models that offer it. Type /${name} again to turn it off.`,
+						`${label} mode is on, saved for later starts${instead}, but ${current}. It applies to the Provimux models whose server entry lists service tiers. Type /${name} again to turn it off.`,
 						"warning",
 					);
 				}
@@ -743,7 +751,7 @@ export function registerFastCommands(options: {
 			"fast",
 			"Fast",
 			true,
-			"Turn Fast mode on or off, here and at later starts: faster answers on models that offer it, which can cost more",
+			"Turn Fast mode on or off, saved for later starts: asks for the server's priority service tier on models that list it, which can cost more",
 			"Ultra Fast",
 		),
 	);
@@ -753,7 +761,7 @@ export function registerFastCommands(options: {
 			"ultrafast",
 			"Ultra Fast",
 			"ultrafast",
-			"Turn Ultra Fast mode on or off, here and at later starts: the fastest answers on models that offer it, which can cost more",
+			"Turn Ultra Fast mode on or off, saved for later starts: asks for the server's Ultra Fast service tier on models that list it, which can cost more",
 			"Fast",
 		),
 	);
@@ -789,14 +797,14 @@ export function registerRefreshCommand(options: {
 		(name: string) =>
 		async (args: string, ctx: ExtensionContext): Promise<void> => {
 			if (args.trim()) {
-				ctx.ui.notify(`/${name} takes no arguments: type /${name} on its own.`, "error");
+				ctx.ui.notify(`/${name} takes no arguments, so it did not run. Type /${name} on its own.`, "error");
 				return;
 			}
 
 			const connection = resolveConnection(agentDir, providerId);
 			if (!connection) {
 				ctx.ui.notify(
-					`${providerName} is not set up yet, so there is no model list to reload. Type /login ${providerName} (or /login ${providerId}) and enter your server's address and key.`,
+					`${providerName} has no key set up (no login, no apiKey in ${CONFIG_FILE_NAME}, no PROVIMUX_API_KEY), so there is no model list to reload. Type /login ${providerName} (or /login ${providerId}) and enter your server's address and key.`,
 					"error",
 				);
 				return;
@@ -852,14 +860,15 @@ export function registerRefreshCommand(options: {
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(
-					`Could not reload the ${providerName} models: ${message}. The models you had stay in /model. Check that the server is running, or type /login ${providerName} to change its address or key.`,
+					`Could not reload the ${providerName} models: ${message}. Check that the server is running, or type /login ${providerName} to change its address or key.`,
 					"error",
 				);
 			}
 		};
 
 	pi.registerCommand(REFRESH_COMMAND, {
-		description: "Reload the model list from your Provimux server, with the accounts that serve each model",
+		description:
+			"Reload the model list from your Provimux server now, with the accounts behind each model where the server lists them",
 		handler: refreshHandler(REFRESH_COMMAND),
 	});
 }
@@ -891,8 +900,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	}
 	pauseController.setEnabled(pauseEnabled);
 	// The pause in the footer: in every window, read again every few seconds.
-	const pauseFooter = registerPauseFooter(pi, agentDir, { controller: pauseController });
-	registerPauseCommands({ pi, agentDir, pauseMode: pauseController, onChange: () => pauseFooter.refresh() });
+	const pauseFooter = registerPauseFooter(pi, agentDir);
+	registerPauseCommands({ pi, agentDir, pauseMode: pauseController, onChange: (paused) => pauseFooter.show(paused) });
 	registerPauseGuard({ pi, agentDir, pauseMode: pauseController });
 
 	const proactiveCompaction = new ProactiveCompactionController(agentDir, identity.providerId);

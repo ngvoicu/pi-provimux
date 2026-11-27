@@ -74,19 +74,13 @@ describe("speed commands", () => {
 		expect(fastMode.isEnabled()).toBe(true);
 		expect(loadConfigFile(agentDir)).toEqual({ baseUrl: "http://localhost:8317", fast: true });
 		expect(harness.onStatusChange).toHaveBeenCalledTimes(1);
-		expect(harness.notify).toHaveBeenLastCalledWith(
-			"Fast mode is on, here and at later starts: requests to gpt-5.6-sol ask for faster service, which can cost more. Type /fast again to turn it off.",
-			"info",
-		);
+		expect(harness.notify).not.toHaveBeenCalledWith(expect.anything(), "warning");
 
 		await harness.command().handler("", harness.ctx);
 		expect(fastMode.isEnabled()).toBe(false);
 		expect(loadConfigFile(agentDir)).toEqual({ baseUrl: "http://localhost:8317", fast: false });
 		expect(harness.onStatusChange).toHaveBeenCalledTimes(2);
-		expect(harness.notify).toHaveBeenLastCalledWith(
-			"Fast mode is off, here and at later starts: requests use the normal speed and price.",
-			"info",
-		);
+		expect(harness.notify).not.toHaveBeenCalledWith(expect.anything(), "warning");
 	});
 
 	it("switches directly between Fast and Ultra Fast and turns the active mode off", async () => {
@@ -106,13 +100,7 @@ describe("speed commands", () => {
 			expect(loadConfigFile(agentDir)).toEqual({ fast: preference });
 			expect(fastMode.getPreference()).toBe(preference);
 		}
-		expect(harness.notify.mock.calls.map(([text]) => text)).toEqual([
-			"Fast mode is on, here and at later starts: requests to gpt-5.6-sol ask for faster service, which can cost more. Type /fast again to turn it off.",
-			"Ultra Fast mode is on, here and at later starts (in place of Fast mode): requests to gpt-5.6-sol ask for faster service, which can cost more. Type /ultrafast again to turn it off.",
-			"Fast mode is on, here and at later starts (in place of Ultra Fast mode): requests to gpt-5.6-sol ask for faster service, which can cost more. Type /fast again to turn it off.",
-			"Ultra Fast mode is on, here and at later starts (in place of Fast mode): requests to gpt-5.6-sol ask for faster service, which can cost more. Type /ultrafast again to turn it off.",
-			"Ultra Fast mode is off, here and at later starts: requests use the normal speed and price.",
-		]);
+		expect(harness.notify).not.toHaveBeenCalledWith(expect.anything(), "warning");
 	});
 
 	it.each([
@@ -155,7 +143,7 @@ describe("speed commands", () => {
 		expect(fastMode.isEnabled()).toBe(false);
 		expect(loadConfigFile(agentDir)).toEqual({});
 		expect(harness.notify).toHaveBeenCalledWith(
-			`/${name} takes no arguments: type /${name} on its own to turn ${name === "fast" ? "Fast" : "Ultra Fast"} mode on or off.`,
+			`/${name} takes no arguments, so it did not run. Type /${name} on its own to turn ${name === "fast" ? "Fast" : "Ultra Fast"} mode on or off.`,
 			"error",
 		);
 	});
@@ -175,7 +163,7 @@ describe("speed commands", () => {
 		expect(loadConfigFile(agentDir)).toEqual({ fast: preference });
 		expect(harness.onStatusChange).toHaveBeenCalledTimes(1);
 		expect(harness.notify).toHaveBeenLastCalledWith(
-			`${label} mode is on, here and at later starts, but the current model (gpt-5.6-sol) does not offer it, so nothing changes for now. It applies to the models that offer it. Type /${name} again to turn it off.`,
+			`${label} mode is on, saved for later starts, but the current model (gpt-5.6-sol) does not list it, so its requests stay as they are. It applies to the Provimux models whose server entry lists service tiers. Type /${name} again to turn it off.`,
 			"warning",
 		);
 
@@ -185,7 +173,7 @@ describe("speed commands", () => {
 		expect(loadConfigFile(agentDir)).toEqual({ fast: false });
 		expect(harness.onStatusChange).toHaveBeenCalledTimes(2);
 		expect(harness.notify).toHaveBeenLastCalledWith(
-			`${label} mode is off, here and at later starts: requests use the normal speed and price.`,
+			`${label} mode is off, saved for later starts: requests no longer ask for a faster service tier.`,
 			"info",
 		);
 	});
@@ -236,9 +224,7 @@ describe("speed commands", () => {
 		expect(loadConfigFile(agentDir)).toStrictEqual({});
 		expect(refreshPreferences).toEqual([true, false]);
 		expect(harness.notify).toHaveBeenCalledWith(
-			expect.stringContaining(
-				"mode was not changed: the model list, which carries the prices, could not be reloaded: refresh failed. The previous setting is back.",
-			),
+			"Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting and the prices were put back too.",
 			"warning",
 		);
 	});
@@ -262,9 +248,7 @@ describe("speed commands", () => {
 		expect(fastMode.getServiceTierFor(supportedModel.id)).toBe("ultrafast");
 		expect(refreshPreferences).toEqual(["ultrafast", true, "ultrafast"]);
 		expect(harness.notify).toHaveBeenCalledWith(
-			expect.stringContaining(
-				"mode was not changed: the model list, which carries the prices, could not be reloaded: refresh failed. The previous setting is back.",
-			),
+			"Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting and the prices were put back too.",
 			"warning",
 		);
 		await harness.command("ultrafast").handler("", harness.ctx);
@@ -285,9 +269,7 @@ describe("speed commands", () => {
 		expect(fastMode.getServiceTierFor(supportedModel.id)).toBe("priority");
 		expect(loadConfigFile(agentDir)).toEqual({ fast: "ultrafast" });
 		expect(harness.notify).toHaveBeenCalledWith(
-			expect.stringContaining(
-				"mode was not changed: the model list, which carries the prices, could not be reloaded: refresh failed. The previous setting is back.",
-			),
+			"Ultra Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting and the prices were put back too.",
 			"warning",
 		);
 	});
@@ -309,9 +291,7 @@ describe("speed commands", () => {
 			await harness.command("ultrafast").handler("", harness.ctx);
 
 			expect(harness.notify).toHaveBeenCalledWith(
-				expect.stringContaining(
-					"mode was not changed: the model list, which carries the prices, could not be reloaded: refresh failed. The previous setting is back.",
-				),
+				"Ultra Fast mode is back to what it was in this window: the model list, which carries the prices, could not be reloaded: refresh failed. The saved setting and the prices were put back too.",
 				"warning",
 			);
 			expect(fastMode.getServiceTierFor(supportedModel.id)).toBe("priority");

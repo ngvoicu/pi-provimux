@@ -1249,7 +1249,7 @@ describe("/provimux-refresh command", () => {
 			await expect(providerExtension(pi)).resolves.toBeUndefined();
 			const refresh = commands.get("provimux-refresh");
 			expect(refresh).toBeDefined();
-			expect(refresh?.description).toContain("Reload the model list");
+			expect(refresh?.description).toContain("Reload");
 			expect(refresh?.description).toContain("Provimux");
 		});
 	});
@@ -1264,7 +1264,7 @@ describe("/provimux-refresh command", () => {
 
 			await commands.get("provimux-refresh")!.handler("", ctx);
 			expect(notify).toHaveBeenCalledWith(
-				"Provimux is not set up yet, so there is no model list to reload. Type /login Provimux (or /login provimux) and enter your server's address and key.",
+				"Provimux has no key set up (no login, no apiKey in provimux.json, no PROVIMUX_API_KEY), so there is no model list to reload. Type /login Provimux (or /login provimux) and enter your server's address and key.",
 				"error",
 			);
 		});
@@ -1280,7 +1280,7 @@ describe("/provimux-refresh command", () => {
 
 			await refresh.handler("now", ctx);
 			expect(notify).toHaveBeenCalledWith(
-				"/provimux-refresh takes no arguments: type /provimux-refresh on its own.",
+				"/provimux-refresh takes no arguments, so it did not run. Type /provimux-refresh on its own.",
 				"error",
 			);
 		});
@@ -1295,7 +1295,7 @@ describe("/provimux-refresh command", () => {
 			const ctx = { ui: { notify } } as unknown as ExtensionCommandContext;
 
 			await refresh.handler("", ctx);
-			expect(notify).toHaveBeenCalledWith(expect.stringContaining("not set up yet"), "error");
+			expect(notify).toHaveBeenCalledWith(expect.stringContaining("has no key set up"), "error");
 		});
 	});
 

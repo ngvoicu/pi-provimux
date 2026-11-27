@@ -28,11 +28,11 @@ see [Credits](#credits).
 
 | Command | What it does | When you would use it |
 | ------- | ------------ | --------------------- |
-| `/login Provimux` | Connects Pi to your server: asks for its address and key, checks them, and loads its models. | The first time, or when the server's address or key changes. |
-| `/provimux-refresh` | Reloads the model list from your server, with the accounts that serve each model. | You added or removed a model, an account or a priority on the server, and Pi is still running. |
-| `/fast` | Turns Fast mode on or off, here and at later starts: faster answers on models that offer it, which can cost more. | You want quicker answers and accept the higher price. |
-| `/ultrafast` | Turns Ultra Fast mode on or off, here and at later starts: the fastest tier, on models that offer it. | You want the fastest answers the model has. |
-| `/pause` | Holds every new model request, in every Pi window, until you type `/continue`. | You need Pi to stop sending for a while, for example while you change something on the server. |
+| `/login Provimux` | Connects Pi to your server: asks for its address and key, checks that the server answers its model list with them, and loads its models. | The first time, or when the server's address or key changes. |
+| `/provimux-refresh` | Reloads the model list from your server, with the accounts behind each model where the server lists them. | You added or removed a model, an account or a priority on the server, and Pi is still running. |
+| `/fast` | Turns Fast mode on or off, saved for later starts: asks the server for its priority service tier on models that list it, which can cost more. | You want quicker answers and accept that they may cost more. |
+| `/ultrafast` | Turns Ultra Fast mode on or off, saved for later starts: asks the server for its Ultra Fast service tier on models that list it. | You want the fastest tier the server offers for the model. |
+| `/pause` | Holds each new model request Pi sends, in every Pi window with pi-provimux, until you type `/continue`. | You need Pi to stop sending for a while, for example while you change something on the server. |
 | `/continue` | Lets the held requests go out again. | After `/pause`. |
 
 Not to confuse with [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper)'s refresh: `/provimux-refresh`
@@ -42,7 +42,8 @@ prices and cache lifetimes again. Neither changes which account answers: your se
 ### /login Provimux
 
 **What it does.** It connects Pi to your Provimux (or CLIProxyAPI) server. It asks for the server's address and its
-client key, asks the server for its model list to check them, and on success loads the models into `/model`.
+client key, and asks the server for its model list with them. If the server answers (an empty list is accepted), the
+login is saved and the models are loaded into `/model`. It does not try a request to a model.
 `/login provimux` (the provider id) does the same: Pi ignores case.
 
 **Example.** You type `/login Provimux`. Pi shows:
@@ -57,19 +58,23 @@ Checking the address and the key: asking the server for its model list...
 If the server does not answer, or refuses the key, you see `Could not log in with this address and key: …` and
 `Enter the address and the key again.`, and the two questions come back.
 
-**What it changes, and for how long.** For good, in every session: the address and the key are saved in
-`~/.pi/agent/provimux.json` and in Pi's `auth.json`, and the model list is saved for the next start.
+**What it changes, and for how long.** Every later session that uses the same `~/.pi/agent`: the address and the key
+are saved in `~/.pi/agent/provimux.json` and in Pi's `auth.json`, and the model list is saved for the next start.
+`PROVIMUX_BASE_URL` and `PROVIMUX_API_KEY`, where set, still win over them.
 
 **What it does not do.** It does not choose a model: pick one in `/model`. If Pi first asks how to sign in, choose
-**Sign in with an account**: the API-key way keeps only the key, and Pi forgets it at the next start (see
+**Sign in with an account**: the API-key way saves only the key, in `auth.json`, and after a restart Pi does not use
+it for Provimux, so it says `Provider is not configured: provimux` (see
 [Login-style setup](#login-style-setup-recommended)). Pi's `/logout` removes the login from `auth.json` only, not
 `provimux.json`.
 
 ### /provimux-refresh
 
 **What it does.** It asks your server for its model list again, now, and updates `/model`: models added on the server
-appear, removed ones go. With Provimux it also reads again which accounts serve each model, so the names in `/model`
-(`Claude Opus 5.5 · Anthropic sub, fallback api`) and what other extensions are told follow the server.
+appear, and models it no longer lists are removed at once. Where the server lists its accounts (Provimux does), it
+also reads again which accounts serve each model, so the names in `/model` (`Claude Opus 5.5 · Anthropic sub,
+fallback api`) and what other extensions are told follow the server; a server that doesn't, or a failed account
+lookup, leaves those parts as they were.
 
 **Example.** You type `/provimux-refresh`. Pi shows:
 
@@ -77,38 +82,41 @@ appear, removed ones go. With Provimux it also reads again which accounts serve 
 Reloaded 42 Provimux models from http://127.0.0.1:8317/v1/models?client_version=pi. /model shows the new list.
 ```
 
-A model the server stopped listing is kept for a while, in case it is only gone for a moment:
-`Reloaded 41 Provimux models (1 of them missing from the server's list right now, kept from the saved list for a while) from …`.
-If the server can't be reached: `Could not reload the Provimux models: …. The models you had stay in /model. Check that the server is running, or type /login Provimux to change its address or key.`
-Before any login: `Provimux is not set up yet, so there is no model list to reload. Type /login Provimux (or /login provimux) and enter your server's address and key.`
+If the reload fails: `Could not reload the Provimux models: …. Check that the server is running, or type /login Provimux to change its address or key.`
+With no key set up at all (no login, no `apiKey` in `provimux.json`, no `PROVIMUX_API_KEY`): `Provimux has no key set up (no login, no apiKey in provimux.json, no PROVIMUX_API_KEY), so there is no model list to reload. Type /login Provimux (or /login provimux) and enter your server's address and key.`
 
 **What it changes, and for how long.** The model list, in this Pi and in the saved list (`provimux-models.json`) the
-next start begins with. Pi also reloads the list by itself at every start, so you need this command only while Pi
-runs.
+next start begins with. At every start Pi also reloads the list by itself, in the background, beginning with the
+saved list; there, unlike here, a model the server stops listing is kept for a while (Pi says so if it is the model
+you use), in case it is gone only for a moment.
 
-**What it does not do.** It does not change your server, the model you use, or which account answers. It does not
+**What it does not do.** It does not change your server or which account answers, and it does not switch you to
+another model; but if the server no longer lists the model you use, that model is no longer offered in `/model`. It does not
 take an address or key: use `/login Provimux` for that. More: [Model cache](#model-cache).
 
 ### /fast and /ultrafast
 
 **What they do.** They ask the server for a faster service tier: `/fast` for the priority tier, `/ultrafast` for the
-Ultra Fast one. Only models whose server entry lists service tiers take it; on the others nothing changes. The same
-command again turns the mode off; the other command switches to it directly.
+Ultra Fast one. Only Provimux models whose server entry lists service tiers are asked; on the others nothing
+changes. How fast an answer comes and what it costs is the server's to decide. The same command again turns the mode
+off; the other command switches to it directly.
 
-**Example.** With a model that offers it, you type `/fast`. Pi shows `fast` in yellow beside the model's name in the
+**Example.** With a model that lists it, you type `/fast`. Pi shows `fast` in yellow beside the model's name in the
 footer, and:
 
 ```text
-Fast mode is on, here and at later starts: requests to gpt-5.6-sol ask for faster service, which can cost more. Type /fast again to turn it off.
+Fast mode is on, saved for later starts: requests to gpt-5.6-sol ask the server for its priority service tier, which can cost more. Type /fast again to turn it off.
 ```
 
-Then `/ultrafast` reads `Ultra Fast mode is on, here and at later starts (in place of Fast mode): …`, and `/ultrafast` again
-reads `Ultra Fast mode is off, here and at later starts: requests use the normal speed and price.` On a model that does not
-offer it: `Fast mode is on, here and at later starts, but the current model (claude-opus-5-5) does not offer it, so nothing changes for now. It applies to the models that offer it. Type /fast again to turn it off.`
+Then `/ultrafast` reads `Ultra Fast mode is on, saved for later starts (in place of Fast mode): …`, and `/ultrafast` again
+reads `Ultra Fast mode is off, saved for later starts: requests no longer ask for a faster service tier.` On a model that does not
+list it: `Fast mode is on, saved for later starts, but the current model (claude-opus-5-5) does not list it, so its requests stay as they are. It applies to the Provimux models whose server entry lists service tiers. Type /fast again to turn it off.`
 
-**What it changes, and for how long.** This Pi window, all its sessions, and every later start: the choice is saved as
-`fast` in `provimux.json`, until you type the command again. Other Pi windows already open keep their own until they
-start again. `PROVIMUX_FAST` set at start wins over the saved choice. The prices Pi counts with change to the mode's
+**What it changes, and for how long.** This Pi window, all its sessions, and every later start that uses the same
+`~/.pi/agent`: the choice is saved as `fast` in `provimux.json`, until you type the command again. Other Pi windows
+already open keep their own until they load the extension again (a restart, `/reload`, a new or resumed session).
+`PROVIMUX_FAST` set at start wins over the saved choice. If the model list (which carries the prices) can't be
+reloaded, the mode is turned back in this window and the command says whether the saved setting was put back too. The prices Pi counts with change to the mode's
 prices where [models.dev](https://models.dev) has them.
 
 **What they do not do.** They do not switch you to another model, and they do nothing on Claude models sent in
@@ -116,26 +124,30 @@ Claude's own format. More: [Fast and Ultra Fast modes](#fast-and-ultra-fast-mode
 
 ### /pause and /continue
 
-**What they do.** `/pause` holds every new request Pi is about to send to a model, whatever its provider, until you
-type `/continue`. A held request waits and is sent as soon as you continue; nothing is lost.
+**What they do.** `/pause` holds each new request Pi is about to send to a model, whatever its provider, until you
+type `/continue` (another extension's own requests that bypass Pi's request hook are not held). A held request waits
+and goes out within about 0.2 seconds of `/continue`: each window checks the setting every 200 ms. A request held in a
+window you close is never sent, and the pause does not keep anything waiting across a restart.
 
 **Example.** You type `/pause`. Pi shows:
 
 ```text
-Requests are paused: every new request to a model waits, in every Pi window, also after a restart, until you type /continue. An answer already streaming finishes.
+Requests are paused: each new request Pi sends to a model waits until you type /continue, in every Pi window with pi-provimux, also after a restart. An answer already streaming is not stopped.
 ```
 
 While requests are paused, Pi's footer says `paused · /continue` in the warning colour (`paused` alone in a terminal
-narrower than 60 columns), in every Pi window: at once in the window where you typed `/pause`, within 2 seconds in
-the others, and from the start in a Pi started while paused. With a Provimux model selected, the model's name in the
-footer also ends with `paused`, in orange.
+narrower than 60 columns), in every Pi window with pi-provimux: at once in the window where you typed `/pause`,
+in the others when they next read `provimux.json` (every 2 seconds), and from the start in a Pi started while paused.
+The mark only displays: when the file can't be read for a moment (missing, half-written), it stays as it was. With a
+Provimux model selected, the model's name in the footer also ends with `paused`, in orange.
 
-Then `/continue`: `Requests continue: the ones that were waiting go out now.` `/continue` with nothing paused:
-`Requests were not paused, so nothing was waiting.` `/pause` twice: `Requests were already paused. Type /continue to let them go.`
+Then `/continue`: `Requests continue: a request held by the pause goes out within about 0.2 seconds.` `/continue`
+with nothing paused: `Requests were not paused.` `/pause` twice: `Requests were already paused. Type /continue to let them go.`
 
 **What it changes, and for how long.** Every Pi window that has pi-provimux and the same `~/.pi/agent`, also after a
 restart: the pause is saved as `pause` in `provimux.json`, and each window reads it before each request. It lasts until
-`/continue` in any window.
+`/continue` in any window, or until `provimux.json` stops saying so (changed by hand, or removed: a window that finds
+no `provimux.json` sends its requests).
 
 **What they do not do.** `/pause` does not stop an answer already streaming or cancel anything: a paused Pi simply
 waits, and the footer says why. Pi puts every extension's status on one line, in the order of their names, and cuts
@@ -200,7 +212,7 @@ It needs Pi 1.6.0 or newer.
 
 This plugin needs both **baseUrl** and **apiKey**. Pi's built-in `/login` only supports multi-field prompts on the account/OAuth path, so Provimux appears under **Sign in with an account**.
 
-When `provimux.json` or `PROVIMUX_API_KEY` already holds a key and no account login is stored, Pi also offers **Sign in with an API key**. Do not use it: it stores only the key, in `auth.json`, and it does not survive a restart. The next start says `Provider is not configured: provimux`, and a saved default or a resumed session moves to another provider if you have one. Use **Sign in with an account**, or put `apiKey` and `baseUrl` in `provimux.json`. If you already used it, remove the `provimux` entry from `auth.json` (`/logout`) and log in with an account.
+When `provimux.json` or `PROVIMUX_API_KEY` already holds a key and no account login is stored, Pi also offers **Sign in with an API key**. Do not use it: it stores only the key, in `auth.json`, and after a restart Pi does not use that key for Provimux (with a login stored, the extension sets Provimux up for account logins only). The next start says `Provider is not configured: provimux`, and a saved default or a resumed session moves to another provider if you have one. Use **Sign in with an account**, or put `apiKey` and `baseUrl` in `provimux.json`. If you already used it, remove the `provimux` entry from `auth.json` (`/logout`) and log in with an account.
 
 **Which key wins.** The extension reads the address and the key from the `PROVIMUX_*` variables first, then `provimux.json`, then the login in `auth.json` (see [Resolution order](#environment-overrides)). So a key in `provimux.json` wins over a key saved by a later `/login` that does not rewrite the file, as the API-key login does not. The account login writes its address and key into `provimux.json` as well, so after it the two agree. Change the key or the proxy with an account `/login`. If you change them in `provimux.json` or the environment while an account login is stored, the model list follows the new values but requests still carry the stored login's key: run `/login` again, or remove the `provimux` entry from `auth.json`.
 
@@ -339,7 +351,7 @@ Use `/continue` to clear the pause:
 /continue
 ```
 
-The pause holds every request Pi sends to a model, whatever its provider. While it is set, the footer of every Pi window with this extension says `paused · /continue` (`paused` under 60 columns); an idle window reads the setting every 2 seconds. Both commands persist the `pause` boolean in `~/.pi/agent/provimux.json`. Before every provider request, the extension rereads this setting. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
+The pause holds each request Pi sends to a model through its request hook, whatever the provider. While it is set, the footer of every Pi window with this extension says `paused · /continue` (`paused` under 60 columns); the footer reads the setting every 2 seconds and only displays it: it never holds or lets go a request, and a file it can't read leaves the mark as it was. Both commands persist the `pause` boolean in `~/.pi/agent/provimux.json`. Before every provider request, the extension rereads this setting. When it is `true`, the request waits asynchronously and checks again every 200 ms until `/continue` sets it to `false`. A pause issued during an active run lets that run finish before Elapsed stops; a run that starts while paused excludes its waiting time from Elapsed and TPS.
 
 ## Model cache
 

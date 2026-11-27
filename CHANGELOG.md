@@ -5,18 +5,23 @@
 **Every command says what it does, and a pause shows in the footer.** Wording only, besides the footer: no command,
 setting or default changed.
 
-- **A pause shows in the footer.** While requests are paused, every Pi window's footer says `paused · /continue` in
-  the warning colour (`paused` under 60 columns): at once where you typed `/pause`, within 2 seconds in the others
-  (an idle window reads `provimux.json` every 2 seconds), and from the start in a Pi started while paused. It goes on
-  `/continue` from any window. The orange `paused` beside a Provimux model's name stays.
-- **Descriptions in Pi** say what each command does for you: `/pause` holds every new model request in every Pi
-  window until `/continue`; `/fast` and `/ultrafast` turn their mode on or off here and at later starts;
-  `/provimux-refresh` reloads the model list from your server, with the accounts that serve each model.
+- **A pause shows in the footer.** While requests are paused, the footer of every Pi window with pi-provimux says
+  `paused · /continue` in the warning colour (`paused` under 60 columns): at once where you typed `/pause`, in the
+  others when they next read `provimux.json` (every 2 seconds), and from the start in a Pi started while paused. It
+  goes on `/continue` from any window. The mark only displays: it never holds or lets go a request and changes nothing
+  the elapsed time reads, and a `provimux.json` it can't read for a moment (missing, half-written) leaves it as it
+  was. The orange `paused` beside a Provimux model's name stays.
+- **Descriptions in Pi** say what each command does for you: `/pause` holds each new model request Pi sends, in every
+  Pi window with pi-provimux, until `/continue`; `/fast` and `/ultrafast` turn their mode on or off, saved for later
+  starts, asking the server for its priority or Ultra Fast service tier; `/provimux-refresh` reloads the model list,
+  with the accounts behind each model where the server lists them.
 - **Messages** say what happened and what to do next. `/fast` and `/ultrafast` now always say what they turned on or
-  off (before, a model that offered the mode got only the footer label). `/pause` and `/continue` say when nothing
-  changed (already paused, nothing waiting). A command given an argument shows its right form. A failed
-  `/provimux-refresh` says the models you had stay and what to check. The `/login Provimux` prompts ask for the
-  server URL and the client key in plain words.
+  off and which tier they ask for (before, a model that offered the mode got only the footer label); a failed price
+  reload says the mode is back to what it was and whether the saved setting was put back too. `/pause` says when
+  requests were already paused; `/continue` says a held request goes out within about 0.2 seconds, or that requests
+  were not paused. A command given an argument says it did not run and shows its right form. A failed
+  `/provimux-refresh` says what to check. The `/login Provimux` prompts ask for the server URL and the client key in
+  plain words.
 - **README:** one "Commands" section after the install lines: every command, what it does, when you would use it,
   an example, what it changes and for how long, and what it does not do; and the difference between
   `/provimux-refresh` and pi-cache-keeper's `/cache-keeper-refresh`.
