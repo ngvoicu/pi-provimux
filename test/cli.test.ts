@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync, zstdDecompressSync } from "node:zlib";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { FellBackCacheCold as FELL_BACK_CACHE_COLD } from "./session-route-contract.ts";
+import { FellBack as FELL_BACK } from "./session-route-contract.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const EXTENSION = join(ROOT, "extensions", "index.ts");
@@ -298,9 +298,11 @@ async function serve(req: IncomingMessage, res: ServerResponse) {
 	if (url.pathname.startsWith("/v1/provimux/session-route")) {
 		const chunks: Buffer[] = [];
 		for await (const chunk of req) chunks.push(chunk as Buffer);
+		const authorization = req.headers.authorization;
 		requests.push({
 			path: url.pathname,
 			model: "",
+			key: typeof authorization === "string" ? authorization.replace(/^Bearer\s+/i, "") : undefined,
 			updates: [],
 			status: sessionRoute ? 200 : 404,
 			session: sessionHeaders(req),
@@ -604,7 +606,7 @@ describe("pi's CLI with this extension, against a fixture proxy", { timeout: 120
 		]);
 
 		// The command, in pi's RPC mode, asks with the header the conversation's turns carry.
-		sessionRoute = { ...FELL_BACK_CACHE_COLD, model: "claude-opus-5-5" };
+		sessionRoute = { ...FELL_BACK, model: "claude-opus-5-5" };
 		const shown = await pi([...session, "--model", CLAUDE, "--mode", "rpc"], {
 			rpc: [{ type: "prompt", message: "/provimux-route" }],
 		});
@@ -619,6 +621,7 @@ describe("pi's CLI with this extension, against a fixture proxy", { timeout: 120
 				return [];
 			}
 		});
+		expect(shown.requests[0]?.key).toBe("fixture-only");
 		expect(
 			notes.some((note: string) =>
 				note.startsWith(
@@ -627,10 +630,25 @@ describe("pi's CLI with this extension, against a fixture proxy", { timeout: 120
 			),
 		).toBe(true);
 
+		// A key given on the command line is the one the model's turns use, so the command asks with it too.
+		const keyed = await pi([...session, "--model", CLAUDE, "--api-key", "cli-given-key", "--mode", "rpc"], {
+			rpc: [{ type: "prompt", message: "/provimux-route" }],
+		});
+		expect(keyed.requests.map((r) => [r.path, r.key])).toEqual([["/v1/provimux/session-route", "cli-given-key"]]);
+
+		// A release in RPC mode: nothing is sent, and it says why.
+		const release = await pi([...session, "--model", CLAUDE, "--mode", "rpc"], {
+			rpc: [{ type: "prompt", message: "/provimux-route release" }],
+		});
+		expect(release.requests).toEqual([]);
+		expect(release.stdout).toContain(
+			"Nothing was released: /provimux-route release asks before it moves the conversation",
+		);
+
 		// A Provimux without the paths: the command says so, and nothing else is sent.
 		sessionRoute = undefined;
 		const old = await pi([...session, "--model", CLAUDE, "--mode", "rpc"], {
-			rpc: [{ type: "prompt", message: "/provimux-route release" }],
+			rpc: [{ type: "prompt", message: "/provimux-route" }],
 		});
 		expect(old.requests.map((r) => [r.path, r.status])).toEqual([["/v1/provimux/session-route", 404]]);
 		expect(old.stdout).toContain("This server has no conversation routes: /provimux-route needs Provimux");

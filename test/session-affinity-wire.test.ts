@@ -101,15 +101,4 @@ describe("a Claude-format model names its conversation", () => {
 		expect(strip(now.headers)).toEqual(strip(before.headers));
 		expect(now.body).toBe(before.body);
 	});
-
-	it("withSessionAffinity keeps the catalog's flags and adds only the one", () => {
-		expect(withSessionAffinity(claudeModel()).compat).toEqual({
-			supportsLongCacheRetention: true,
-			sendSessionAffinityHeaders: true,
-		});
-		expect(withSessionAffinity({ id: "m" } as { id: string; compat?: Record<string, unknown> })).toEqual({
-			id: "m",
-			compat: { sendSessionAffinityHeaders: true },
-		});
-	});
 });

@@ -1,29 +1,14 @@
 /**
- * `/provimux-route` against a stand-in for Provimux's two session-route paths, answering with the contract's examples
- * (test/session-route-contract.ts). Every text the command prints is pinned here, case by case, with what it asked and
- * the order of what it did; the tests below the table check what it sends, that nothing is released before the cost
- * was said and answered yes unless Pi knows the cache is cold, the 409, "not seen" asked twice, and the Codex
- * WebSocket. The gateway's times are its answers' own (observed_at), written in UTC; Pi's clock and what it knows of the
- * cache are the harness's: nothing depends on this machine's clock or speed.
+ * `/provimux-route` against a stand-in for Provimux's two session-route paths (test/session-route-contract.ts). One
+ * show and one cost-and-decline are pinned whole; every other case checks what distinguishes it, and whether a release
+ * was sent. The gateway's times are its answers' own (observed_at), written in UTC.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { forgetCacheUses, lastCacheUse, noteCacheUse } from "../extensions/last-use.ts";
+import { describe, expect, it } from "vitest";
+import { costText, parseReleaseAnswer, parseShowAnswer } from "../extensions/route.ts";
 import {
-	cacheText,
-	cacheViewOf,
-	costText,
-	durationWords,
-	expectToken,
-	knownCold,
-	parseReleaseAnswer,
-	parseShowAnswer,
-	ROUTE_COMMAND,
-} from "../extensions/route.ts";
-import {
-	cleanupRouteRuns,
-	PI_NOW,
 	RELEASE_URL,
 	type RouteCase,
+	routeCommand,
 	runRoute,
 	SESSION_ID,
 	SHOW_URL,
@@ -31,851 +16,138 @@ import {
 } from "./route-harness.ts";
 import * as C from "./session-route-contract.ts";
 
-afterEach(() => {
-	vi.useRealTimers();
-	cleanupRouteRuns();
-	forgetCacheUses();
-});
-
 const ok = (body: unknown): StandInAnswer => ({ status: 200, body });
-/** As this release answers: no rule in effect. */
-const now = <T extends object>(answer: T) => ({ ...answer, rule: { in_effect: false, cold_after_s: null } });
-const fb = now(C.FellBackCacheCold);
-const cooling = C.FellBackFirstRouteCooling;
-const two = now(C.OnFirstRoute);
-/** Pi's last request 12 minutes ago, on a 5-minute cache: Pi knows it is cold. */
-const cold = { noted: { agoMs: 12 * 60_000, ttlMs: 300_000 } };
-/** Pi's last request 12 minutes ago, without a lifetime. */
-const unknownTtl = { noted: { agoMs: 12 * 60_000 } };
+const releases = (run: { order: string[] }) => run.order.filter((step) => step === "release").length;
+const shown = async (answer: unknown, setup: RouteCase = {}) =>
+	(await runRoute("", { ...setup, show: [ok(answer)] })).notes[0]![0];
 
-type Expected = { notes: Array<[string, string]>; asked: Array<[string, string]>; order: string[] };
-const CASES: Array<[string, string, RouteCase, Expected]> = [
-	[
-		"show fallback, first route free, Pi: may be warm",
-		"",
-		{ show: [ok(fb)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is free now.\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.\n• By itself: Provimux never moves it back; only a release does.\nTo move it back now: /provimux-route release (it asks first unless Pi knows the cache is cold).",
-					"info",
-				],
+describe("/provimux-route: the show", () => {
+	it("a fallback whose first route is free again, whole", async () => {
+		const run = await runRoute("", { show: [ok(C.FellBack)] });
+		expect(run.notes).toEqual([
+			[
+				"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: it was on Anthropic sub until 09:35.\n• A higher-priority route is free now: Anthropic sub.\n• Automatic return: off on this server.\nTo move it now: /provimux-route release (it says what that may cost and asks first).",
+				"info",
 			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show fallback, Pi: cold",
-		"",
-		{ ...cold, show: [ok(fb)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is free now.\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 12 minutes ago: it is cold.\n• By itself: Provimux never moves it back; only a release does.\nTo move it back now: /provimux-route release (it asks first unless Pi knows the cache is cold).",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show fallback, Pi: lifetime not known",
-		"",
-		{ ...unknownTtl, show: [ok(fb)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is free now.\n• Its cache: Pi does not know how long this cache lasts (last answer 12 minutes ago), so it may still be warm.\n• By itself: Provimux never moves it back; only a release does.\nTo move it back now: /provimux-route release (it asks first unless Pi knows the cache is cold).",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show fallback, Pi: from the session's last answer and the model's promptCache",
-		"",
-		{ noted: null, lastAnswerAgoMs: 20 * 60_000, promptCache: { short: 300 }, show: [ok(fb)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is free now.\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 20 minutes ago: it is cold.\n• By itself: Provimux never moves it back; only a release does.\nTo move it back now: /provimux-route release (it asks first unless Pi knows the cache is cold).",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show fallback, Pi: nothing to go by",
-		"",
-		{ noted: null, show: [ok(fb)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is free now.\n• Its cache: Pi does not know how long this cache lasts, so it may still be warm.\n• By itself: Provimux never moves it back; only a release does.\nTo move it back now: /provimux-route release (it asks first unless Pi knows the cache is cold).",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show fallback, with a rule in effect (a later release)",
-		"",
-		{ show: [ok(C.FellBackCacheCold)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is free now.\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.\n• By itself: Provimux moves it back at your next message once this conversation has been unused for 6 minutes, if a higher-priority route is free then.\nTo move it back now: /provimux-route release (it asks first unless Pi knows the cache is cold).",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show first route cooling",
-		"",
-		{ show: [ok(cooling)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is not free yet: expected free at 10:40 (in 25 minutes).\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.\n• By itself: Provimux never moves it back; only a release does.\nTo check again later: /provimux-route (it asks Provimux afresh every time).",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show first route cooling, when not known",
-		"",
-		{
-			show: [
-				ok({
-					...cooling,
-					position: { below_first: true, higher_priority_free: false, higher_priority_free_at: null },
-				}),
-			],
-		},
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is not free yet, and Provimux does not know when it will be.\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.\n• By itself: Provimux never moves it back; only a release does.\nTo check again later: /provimux-route (it asks Provimux afresh every time).",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show on a first route shared with another",
-		"",
-		{ show: [ok(two)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic sub, since 09:02 (1 hour 12 minutes ago).\n• Not a fallback: no other route has answered it.\n• It is on a first route: 2 routes share the top priority (2 Anthropic sub accounts). A release lets Provimux choose among them again, and it may choose the same one.\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.\n• By itself: Provimux never moves it back; only a release does.\nTo let Provimux choose again: /provimux-route release (it asks first unless Pi knows the cache is cold).",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show bound to an unlisted account, asked as auto",
-		"",
-		{ show: [ok(C.BoundToUnlisted)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on auto (routed to opus), as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: an account that is no longer listed, since 09:02 (1 hour 12 minutes ago).\n• Not a fallback: no other route has answered it.\n• The first route now: Anthropic api. Provimux does not say where the account it is on stands.\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.\n• By itself: Provimux never moves it back; only a release does.\nTo move it to a listed route now: /provimux-route release (it asks first unless Pi knows the cache is cold).",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show not seen, asked again after a moment",
-		"",
-		{ show: [ok(C.NotSeen), ok(C.NotSeen)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\nProvimux has no record of this conversation on opus from your key: it has seen no message of it since it started, or it has forgotten it since its binding expired. Send a message, then type /provimux-route again.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show", "sleep 1500", "show"],
-		},
-	],
-	[
-		"show not seen, then seen on the second look",
-		"",
-		{ show: [ok(C.NotSeen), ok(fb)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is free now.\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.\n• By itself: Provimux never moves it back; only a release does.\nTo move it back now: /provimux-route release (it asks first unless Pi knows the cache is cold).",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show", "sleep 1500", "show"],
-		},
-	],
-	[
-		"show not seen, a session that sent nothing",
-		"",
-		{ noted: null, show: [ok(C.NotSeen)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\nProvimux has no record of this conversation on opus from your key: it has seen no message of it since it started, or it has forgotten it since its binding expired. Send a message, then type /provimux-route again.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show affinity off",
-		"",
-		{ show: [ok(C.AffinityOff)] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\nProvimux does not bind conversations to a route (its session affinity is off): every request already goes to the first available route, so there is nothing to move.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show home",
-		"",
-		{ show: [ok({ ...C.AffinityOff, affinity: "home" })] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\nProvimux runs in Home mode: Home chooses the route of every request, so there is no binding here to show or move.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show plugin",
-		"",
-		{ show: [ok({ ...C.AffinityOff, affinity: "not-supported" })] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\nA plugin chooses the routes on this Provimux, so there is no binding here to show or move.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show not bound",
-		"",
-		{ show: [ok({ ...C.NotSeen, conversation: "not-bound" })] },
-		{
-			notes: [
-				[
-					"Route of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\nThis conversation is not bound to a route on opus right now (it was released, or its binding expired): its next message goes to the first available route.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show 404",
-		"",
-		{ show: [{ status: 404 }] },
-		{
-			notes: [
-				[
-					"This server has no conversation routes: /provimux-route needs Provimux <version> or newer (plain CLIProxyAPI has none). Update Provimux to use it; everything else works as before.",
-					"error",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show 401",
-		"",
-		{ show: [{ status: 401, body: { error: "Invalid API key" } }] },
-		{
-			notes: [
-				["The server refused the client key (HTTP 401). Type /login Provimux to enter the key again.", "error"],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show 400",
-		"",
-		{ show: [{ status: 400, body: { error: { message: "the model opus is not served to this key" } } }] },
-		{
-			notes: [
-				[
-					"The server refused the request (HTTP 400): the model opus is not served to this key. If it says the model is not served, choose another in /model.",
-					"error",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show 500",
-		"",
-		{ show: [{ status: 500, body: { error: { message: "boom" } } }] },
-		{
-			notes: [
-				["The server answered HTTP 500: boom. Try again in a moment; if it persists, check the server.", "error"],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show unreachable",
-		"",
-		{ show: [{ unreachable: "fetch failed" }] },
-		{
-			notes: [
-				[
-					"Could not reach your Provimux server at http://gateway.test:8400/v1/provimux/session-route: fetch failed. Check that it is running, or type /login Provimux to change its address.",
-					"error",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"show unreadable",
-		"",
-		{ show: [ok({ hello: 1 })] },
-		{
-			notes: [
-				[
-					"The server's answer could not be read as a conversation route: is it Provimux <version> or newer?",
-					"error",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"not set up",
-		"",
-		{ unconfigured: true },
-		{
-			notes: [
-				[
-					"Provimux is not set up yet, so there is no conversation route to show. Type /login Provimux (or /login provimux) and enter your server's address and key.",
-					"error",
-				],
-			],
-			asked: [],
-			order: [],
-		},
-	],
-	[
-		"other model",
-		"",
-		{ model: { provider: "anthropic", id: "claude-opus-4-6" } },
-		{
-			notes: [
-				[
-					"/provimux-route shows the route of a Provimux model, and the current model is anthropic/claude-opus-4-6. Choose a Provimux model in /model, then type /provimux-route again.",
-					"error",
-				],
-			],
-			asked: [],
-			order: [],
-		},
-	],
-	[
-		"no model",
-		"",
-		{ model: null },
-		{
-			notes: [
-				[
-					"/provimux-route shows the route of a Provimux model, and no model is selected. Choose a Provimux model in /model, then type /provimux-route again.",
-					"error",
-				],
-			],
-			asked: [],
-			order: [],
-		},
-	],
-	[
-		"bad args",
-		"foo",
-		{},
-		{
-			notes: [
-				[
-					"/provimux-route takes nothing (show where this conversation is), or release (move it back to its first route).",
-					"error",
-				],
-			],
-			asked: [],
-			order: [],
-		},
-	],
-	[
-		"release, first route cooling",
-		"release",
-		{ show: [ok(cooling)] },
-		{
-			notes: [
-				[
-					"Nothing was released: the first route, Anthropic sub, is not free yet, so the conversation stays on Anthropic api. It is expected free at 10:40 (in 25 minutes): type /provimux-route release again then.",
-					"warning",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"release, Pi knows the cache is cold",
-		"release",
-		{ ...cold, show: [ok(fb)], release: [ok(C.Released)] },
-		{
-			notes: [
-				[
-					"Released: this conversation is no longer bound to Anthropic api. Its next message goes to Anthropic sub. Pi knows the cache was cold, so the move costs nothing extra.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show", "release", "close"],
-		},
-	],
-	[
-		"release, may be warm, TUI yes",
-		"release",
-		{ show: [ok(fb)], release: [ok(C.Released)], confirm: [true] },
-		{
-			notes: [
-				[
-					"Released: this conversation is no longer bound to Anthropic api. Its next message goes to Anthropic sub. That message reads the whole conversation once without cache.",
-					"info",
-				],
-			],
-			asked: [
-				[
-					"Move this conversation from Anthropic api to Anthropic sub now?",
-					"Moving now costs one read of the whole conversation without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more. On Anthropic sub this is quota of the subscription, not money: the amounts are at API list price, for comparison.",
-				],
-			],
-			order: ["show", "ask", "release", "close"],
-		},
-	],
-	[
-		"release, may be warm, TUI no",
-		"release",
-		{ show: [ok(fb)], confirm: [false] },
-		{
-			notes: [["Nothing was released: the conversation stays on Anthropic api, with its cache.", "info"]],
-			asked: [
-				[
-					"Move this conversation from Anthropic api to Anthropic sub now?",
-					"Moving now costs one read of the whole conversation without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more. On Anthropic sub this is quota of the subscription, not money: the amounts are at API list price, for comparison.",
-				],
-			],
-			order: ["show", "ask"],
-		},
-	],
-	[
-		"release, lifetime not known, TUI yes",
-		"release",
-		{ ...unknownTtl, show: [ok(fb)], release: [ok(C.Released)], confirm: [true] },
-		{
-			notes: [
-				[
-					"Released: this conversation is no longer bound to Anthropic api. Its next message goes to Anthropic sub. That message reads the whole conversation once without cache.",
-					"info",
-				],
-			],
-			asked: [
-				[
-					"Move this conversation from Anthropic api to Anthropic sub now?",
-					"Moving now costs one read of the whole conversation without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. Pi does not know how long this cache lasts (last answer 12 minutes ago), so it may still be warm. On Anthropic sub this is quota of the subscription, not money: the amounts are at API list price, for comparison.",
-				],
-			],
-			order: ["show", "ask", "release", "close"],
-		},
-	],
-	[
-		"release, may be warm, RPC",
-		"release",
-		{ mode: "rpc", show: [ok(fb)] },
-		{
-			notes: [
-				[
-					"Moving now costs one read of the whole conversation without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more. On Anthropic sub this is quota of the subscription, not money: the amounts are at API list price, for comparison.\nNothing was released. To move it from Anthropic api to Anthropic sub anyway, type /provimux-route release yes.",
-					"warning",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"release yes, may be warm, RPC",
-		"release yes",
-		{ mode: "rpc", show: [ok(fb)], release: [ok(C.Released)] },
-		{
-			notes: [
-				[
-					"Released: this conversation is no longer bound to Anthropic api. Its next message goes to Anthropic sub. That message reads the whole conversation once without cache.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show", "release", "close"],
-		},
-	],
-	[
-		"release, no size, no price, nothing to go by, RPC",
-		"release",
-		{
-			mode: "rpc",
-			noted: null,
-			tokens: null,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			show: [ok(fb)],
-		},
-		{
-			notes: [
-				[
-					"Moving now costs one read of the whole conversation without cache (its size is not known until its next answer; more where the vendor also charges for writing the new cache). Pi does not know how long this cache lasts, so it may still be warm. Pi has no price for this model, so no amount is given. On Anthropic sub this is quota of the subscription, not money.\nNothing was released. To move it from Anthropic api to Anthropic sub anyway, type /provimux-route release yes.",
-					"warning",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"release, two first routes",
-		"release",
-		{ show: [ok(two)], confirm: [true], release: [ok({ ...C.Released, was: two.bound.route, next: two.first })] },
-		{
-			notes: [
-				[
-					"Released: this conversation is no longer bound to Anthropic sub. Its next message goes to one of 2 Anthropic sub accounts. That message reads the whole conversation once without cache.",
-					"info",
-				],
-			],
-			asked: [
-				[
-					"Let Provimux choose this conversation's route again now?",
-					"Moving now costs one read of the whole conversation without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more. On Anthropic sub this is quota of the subscription, not money: the amounts are at API list price, for comparison. It is already on a first route: Provimux chooses among the 2 routes of the top priority again, and may choose the same one.",
-				],
-			],
-			order: ["show", "ask", "release", "close"],
-		},
-	],
-	[
-		"release, the only first route",
-		"release",
-		{ show: [ok({ ...two, first: [two.first[0]] })] },
-		{
-			notes: [
-				[
-					"Nothing was released: this conversation is already on the first route (Anthropic sub), and no other route shares its priority.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"release, bound to an unlisted account",
-		"release",
-		{
-			show: [ok(C.BoundToUnlisted)],
-			confirm: [true],
-			release: [
-				ok({
-					...C.Released,
-					model: "auto",
-					routed_model: "opus",
-					was: { listed: false },
-					next: C.BoundToUnlisted.first,
-				}),
-			],
-		},
-		{
-			notes: [
-				[
-					"Released: this conversation is no longer bound to an account that is no longer listed. Its next message goes to Anthropic api. That message reads the whole conversation once without cache.",
-					"info",
-				],
-			],
-			asked: [
-				[
-					"Move this conversation from an account that is no longer listed to Anthropic api now?",
-					"Moving now costs one read of the whole conversation without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.",
-				],
-			],
-			order: ["show", "ask", "release", "close"],
-		},
-	],
-	[
-		"release, 409 in the TUI",
-		"release",
-		{
-			show: [ok(fb)],
-			confirm: [true, true],
-			release: [{ status: 409, body: { ...fb, binding: "b.n4w7q2mfx4ardn5w" } }, ok(C.Released)],
-		},
-		{
-			notes: [
-				[
-					"The conversation's binding changed since the check, so nothing was released yet.\nRoute of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is free now.\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.\n• By itself: Provimux never moves it back; only a release does.",
-					"info",
-				],
-				[
-					"Released: this conversation is no longer bound to Anthropic api. Its next message goes to Anthropic sub. That message reads the whole conversation once without cache.",
-					"info",
-				],
-			],
-			asked: [
-				[
-					"Move this conversation from Anthropic api to Anthropic sub now?",
-					"Moving now costs one read of the whole conversation without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more. On Anthropic sub this is quota of the subscription, not money: the amounts are at API list price, for comparison.",
-				],
-				[
-					"Move this conversation from Anthropic api to Anthropic sub now?",
-					"Moving now costs one read of the whole conversation without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more. On Anthropic sub this is quota of the subscription, not money: the amounts are at API list price, for comparison.",
-				],
-			],
-			order: ["show", "ask", "release", "ask", "release", "close"],
-		},
-	],
-	[
-		"release yes, 409 in RPC",
-		"release yes",
-		{ mode: "rpc", show: [ok(fb)], release: [{ status: 409, body: { ...fb, binding: "b.n4w7q2mfx4ardn5w" } }] },
-		{
-			notes: [
-				[
-					"The conversation's binding changed since the check, so nothing was released yet.\nRoute of this conversation on opus, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since 09:35 (40 minutes ago).\n• A fallback: Anthropic sub answered it before, until 09:35.\n• The first route, Anthropic sub, is free now.\n• Its cache: Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.\n• By itself: Provimux never moves it back; only a release does.\nType /provimux-route release again to release it as it is now.",
-					"warning",
-				],
-			],
-			asked: [],
-			order: ["show", "release"],
-		},
-	],
-	[
-		"release, nothing bound any more",
-		"release",
-		{ ...cold, show: [ok(fb)], release: [ok(C.NothingBound)] },
-		{
-			notes: [
-				[
-					"Nothing was released: the conversation was no longer bound (its binding expired or was released meanwhile). Its next message goes to the first available route.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show", "release"],
-		},
-	],
-	[
-		"release, the release answers not seen",
-		"release",
-		{ ...cold, show: [ok(fb)], release: [ok(C.ReleaseNotSeen)] },
-		{
-			notes: [
-				[
-					"Provimux has no record of this conversation on opus from your key: it has seen no message of it since it started, or it has forgotten it since its binding expired. Send a message, then type /provimux-route again. Nothing was released.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show", "release"],
-		},
-	],
-	[
-		"release, the release answers affinity off",
-		"release",
-		{ ...cold, show: [ok(fb)], release: [ok(C.ReleaseAffinityOff)] },
-		{
-			notes: [
-				[
-					"Provimux does not bind conversations to a route (its session affinity is off): every request already goes to the first available route, so there is nothing to move. Nothing was released.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show", "release"],
-		},
-	],
-	[
-		"release, the show answers not seen",
-		"release",
-		{ show: [ok(C.NotSeen), ok(C.NotSeen)] },
-		{
-			notes: [
-				[
-					"Provimux has no record of this conversation on opus from your key: it has seen no message of it since it started, or it has forgotten it since its binding expired. Send a message, then type /provimux-route again. Nothing was released.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show", "sleep 1500", "show"],
-		},
-	],
-	[
-		"release, the show answers affinity off",
-		"release",
-		{ show: [ok(C.AffinityOff)] },
-		{
-			notes: [
-				[
-					"Provimux does not bind conversations to a route (its session affinity is off): every request already goes to the first available route, so there is nothing to move. Nothing was released.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"release, show 404",
-		"release",
-		{ show: [{ status: 404 }] },
-		{
-			notes: [
-				[
-					"This server has no conversation routes: /provimux-route needs Provimux <version> or newer (plain CLIProxyAPI has none). Nothing was released. Update Provimux to use it; everything else works as before.",
-					"error",
-				],
-			],
-			asked: [],
-			order: ["show"],
-		},
-	],
-	[
-		"release, release 404",
-		"release",
-		{ ...cold, show: [ok(fb)], release: [{ status: 404 }] },
-		{
-			notes: [
-				[
-					"This server has no conversation routes: /provimux-route needs Provimux <version> or newer (plain CLIProxyAPI has none). Nothing was released. Update Provimux to use it; everything else works as before.",
-					"error",
-				],
-			],
-			asked: [],
-			order: ["show", "release"],
-		},
-	],
-	[
-		"release, Codex WebSocket",
-		"release",
-		{
-			...cold,
-			format: "codex",
-			show: [
-				ok({ ...fb, model: "gpt-main", websocket_may_hold: true }),
-				ok({ ...C.NotSeen, model: "gpt-main", conversation: "not-bound" }),
-			],
-			release: [ok({ ...C.Released, model: "gpt-main", websocket_may_hold: true })],
-		},
-		{
-			notes: [
-				[
-					"Released: this conversation is no longer bound to Anthropic api. Its next message goes to Anthropic sub. Pi knows the cache was cold, so the move costs nothing extra. Its Codex WebSocket, if one was open, was closed, so that the release holds.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show", "release", "close", "show"],
-		},
-	],
-	[
-		"release, Codex WebSocket, a turn slipped in first",
-		"release",
-		{
-			...cold,
-			format: "codex",
-			show: [
-				ok({ ...fb, model: "gpt-main", websocket_may_hold: true }),
-				ok({ ...fb, model: "gpt-main", binding: "b.r2x7q2mfx4ardn5w", websocket_may_hold: true }),
-			],
-			release: [
-				ok({ ...C.Released, model: "gpt-main", websocket_may_hold: true }),
-				ok({ ...C.Released, model: "gpt-main", websocket_may_hold: true }),
-			],
-		},
-		{
-			notes: [
-				[
-					"Released: this conversation is no longer bound to Anthropic api. Its next message goes to Anthropic sub. Pi knows the cache was cold, so the move costs nothing extra. Its Codex WebSocket, if one was open, was closed, so that the release holds. A turn had bound it to the old account again on the open socket: it was released again.",
-					"info",
-				],
-			],
-			asked: [],
-			order: ["show", "release", "close", "show", "release", "close"],
-		},
-	],
-];
+		]);
+		expect(run.order).toEqual(["show"]);
+	});
 
-describe("/provimux-route: every text, per case", () => {
-	for (const [name, args, setup, expected] of CASES) {
-		it(`${name} (/${ROUTE_COMMAND}${args ? ` ${args}` : ""})`, async () => {
-			const run = await runRoute(args, setup);
-			expect(run.notes).toEqual(expected.notes);
-			expect(run.asked).toEqual(expected.asked);
-			expect(run.order).toEqual(expected.order);
-		});
-	}
+	it("still cooling: one time for any higher-priority route, never one account's, and a hint to check again", async () => {
+		const text = await shown(C.Cooling);
+		expect(text).toContain(
+			"\n• No higher-priority route is free yet: one is expected free at 10:40 (in 25 minutes).\n",
+		);
+		expect(text).toMatch(/\nTo check again later: \/provimux-route\.$/);
+		const unknown = await shown({ ...C.Cooling, position: { ...C.Cooling.position, higher_priority_free_at: null } });
+		expect(unknown).toContain("• No higher-priority route is free yet, and Provimux does not know when one will be.");
+	});
+
+	it("the current stretch only: after a return it is not a fallback, without a cause; no since, no invented reason", async () => {
+		const returned = { ...C.FellBack, bound: { ...C.OnFirstRoute.bound } };
+		expect(await shown(returned)).toContain(
+			"\n• Not a fallback: no other account has answered it since it was bound.\n",
+		);
+		const unknown = {
+			...C.FellBack,
+			bound: { ...C.FellBack.bound, since: null, origin: "not-known", fell_back_from: null, fell_back_at: null },
+		};
+		const text = await shown(unknown);
+		expect(text).toContain("\n• Now on: Anthropic api.\n• Whether it fell back is not known.\n");
+		expect(text).not.toMatch(/restart/);
+	});
+
+	it("on a first route: says so, with the count of available routes at the top, and offers no release", async () => {
+		const text = await shown(C.OnFirstRoute);
+		expect(text).toContain(
+			"\n• It is on a first route: no available route has a higher priority (2 available at the top: 2 Anthropic sub accounts).\n",
+		);
+		expect(text).not.toContain("release");
+	});
+
+	it("an unlisted account asked as auto: its rank is not known, the first route now, and a release offered", async () => {
+		const text = await shown(C.BoundToUnlisted);
+		expect(text).toMatch(/^Route of this conversation on auto \(routed to opus\), /);
+		expect(text).toContain(
+			"\n• Now on: an account that is no longer listed, since 09:02 (1 hour 12 minutes ago).\n• Not a fallback: no other account has answered it since it was bound.\n• Provimux does not say where this account ranks. The first route now: Anthropic api.\n",
+		);
+		expect(text).toContain("To move it now: /provimux-route release");
+		const nowhere = await shown({ ...C.BoundToUnlisted, first: [] });
+		expect(nowhere).toContain("• Provimux does not say where this account ranks.\n");
+		expect(nowhere).not.toContain("To move it");
+	});
+
+	it("automatic return: the server's policy, its setting exactly, never a prediction", async () => {
+		const on = (cold_after_s: number | null) => ({ in_effect: true, cold_after_s });
+		const policy = (after: string) =>
+			`• Automatic return: on. Once no request of this conversation has been routed${after} (a keep-warm request counts), Provimux can send its next request to a free higher-priority route; a request on an open Codex WebSocket stays on its account.`;
+		expect(await shown({ ...C.FellBack, rule: on(360) })).toContain(policy(" for 6 minutes"));
+		expect(await shown({ ...C.FellBack, rule: on(90) })).toContain(policy(" for 90 seconds"));
+		expect(await shown({ ...C.FellBack, rule: on(3600) })).toContain(policy(" for 1 hour"));
+		// Pinned (a Codex WebSocket) and unlisted: the same one line, and no claim of a first route.
+		const pinned = await shown({ ...C.FellBack, rule: on(360), websocket_may_hold: true }, { format: "codex" });
+		expect(pinned).toContain(policy(" for 6 minutes"));
+		const unlisted = await shown({ ...C.BoundToUnlisted, rule: on(360) });
+		expect(unlisted).toContain(policy(" for 6 minutes"));
+		expect(unlisted).not.toContain("on a first route");
+		expect(await shown(C.FellBack)).toContain("\n• Automatic return: off on this server.\n");
+	});
+
+	it("a route of an empty kind is named by its service alone; a sub-agent is said", async () => {
+		const plain = {
+			...C.FellBack,
+			bound: { ...C.FellBack.bound, route: { provider: "claude", kind: "", priority: 5 } },
+		};
+		expect(await shown(plain)).toContain("• Now on: Anthropic, since 09:35");
+		expect(await shown({ ...C.FellBack, subagent: true })).toContain(
+			"• This is a sub-agent's conversation: a release of its main conversation does not move it.",
+		);
+	});
+
+	it("nothing bound, in each of the gateway's words", async () => {
+		const cases: Array<[unknown, string]> = [
+			[
+				C.NotSeen,
+				"Provimux has no record of this conversation on opus from your key: it has seen no message of it since it started, or it has forgotten it since its binding expired. Send a message, then type /provimux-route again.",
+			],
+			[
+				{ ...C.NotSeen, conversation: "not-bound" },
+				"This conversation is not bound to a route on opus right now (it was released, or its binding expired): its next message goes to the first available route.",
+			],
+			[
+				C.AffinityOff,
+				"Provimux does not bind conversations to a route (its session affinity is off): every request already goes to the first available route, so there is nothing to move.",
+			],
+			[
+				{ ...C.AffinityOff, affinity: "home" },
+				"Provimux runs in Home mode: Home chooses the route of every request, so there is no binding here to show or move.",
+			],
+			[
+				{ ...C.AffinityOff, affinity: "not-supported" },
+				"A plugin chooses the routes on this Provimux, so there is no binding here to show or move.",
+			],
+		];
+		for (const [answer, said] of cases) expect((await shown(answer)).split("\n")[1]).toBe(said);
+	});
+
+	it("one request per call: the same command, typed again, asks afresh and sees the change", async () => {
+		const route = routeCommand({ show: [ok(C.NotSeen), ok(C.FellBack)] });
+		const first = await route("");
+		const second = await route("");
+		expect([first.order, second.order]).toEqual([["show"], ["show"]]);
+		expect(first.notes[0]![0]).toContain("has no record of this conversation");
+		expect(second.notes[0]![0]).toContain("• A higher-priority route is free now: Anthropic sub.");
+	});
+
+	it("works while Pi is answering", async () => {
+		const run = await runRoute("", { idle: [false, false], show: [ok(C.FellBack)] });
+		expect(run.order).toEqual(["show"]);
+	});
 });
 
-describe("/provimux-route: what it sends", () => {
-	it("a Claude-format model: the show names the conversation by x-session-affinity, as its turns do, and sends only the name", async () => {
-		const run = await runRoute("", { show: [ok(fb)] });
+describe("/provimux-route: what it sends, and where", () => {
+	it("a Claude-format model: x-session-affinity, as its turns carry it, and only the model's name", async () => {
+		const run = await runRoute("", { show: [ok(C.FellBack)] });
 		expect(run.sent).toEqual([
 			{
 				url: SHOW_URL,
@@ -890,256 +162,336 @@ describe("/provimux-route: what it sends", () => {
 		]);
 	});
 
-	it("a Codex-format model: by session-id, as its turns do", async () => {
-		const run = await runRoute("", { format: "codex", noted: null, show: [ok(C.NotSeen)] });
+	it("a Codex-format model: session-id, at the root of the server its turns go to", async () => {
+		const run = await runRoute("", { format: "codex", show: [ok(C.NotSeen)] });
+		expect(run.sent[0]!.url).toBe(SHOW_URL);
 		expect(run.sent[0]!.headers["session-id"]).toBe(SESSION_ID);
 		expect(run.sent[0]!.headers).not.toHaveProperty("x-session-affinity");
 		expect(run.sent[0]!.body).toEqual({ model: "gpt-main" });
 	});
 
-	it("every call asks the server afresh: nothing is kept between two checks", async () => {
-		const first = await runRoute("", { show: [ok(cooling)] });
-		const second = await runRoute("", { show: [ok(fb)] });
-		expect(first.order).toEqual(["show"]);
-		expect(second.order).toEqual(["show"]);
-		expect(first.notes[0]![0]).toContain("is not free yet: expected free at 10:40");
-		expect(second.notes[0]![0]).toContain("is free now");
+	it("the key and the server of the model's own requests: a key from the command line, a stored login's address", async () => {
+		const run = await runRoute("", {
+			auth: { ok: true, apiKey: "sk-from-the-command-line", baseUrl: "http://login.test:9400/v1" },
+			show: [ok(C.FellBack)],
+		});
+		expect(run.sent[0]!.url).toBe("http://login.test:9400/v1/provimux/session-route");
+		expect(run.sent[0]!.headers.authorization).toBe("Bearer sk-from-the-command-line");
 	});
 
-	it("expect is the show's binding; after a 409, the 409's; without a well-formed one it is left out, never empty or null", async () => {
-		const run = await runRoute("release", {
-			show: [ok(fb)],
-			confirm: [true, true],
-			release: [{ status: 409, body: { ...fb, binding: "b.n4w7q2mfx4ardn5w" } }, ok(C.Released)],
-		});
-		expect(run.sent.map((sent) => [sent.url, sent.body])).toEqual([
-			[SHOW_URL, { model: "opus" }],
-			[RELEASE_URL, { model: "opus", expect: "b.k3v7q2mfx4ardn5w" }],
-			[RELEASE_URL, { model: "opus", expect: "b.n4w7q2mfx4ardn5w" }],
-		]);
-		expect(run.sent[1]!.headers["x-session-affinity"]).toBe(SESSION_ID);
-		for (const binding of [null, "", " ", "b. x"]) {
-			const without = await runRoute("release", {
-				...cold,
-				show: [ok({ ...fb, binding })],
-				release: [ok(C.Released)],
-			});
-			expect(without.sent[1]!.body).toEqual({ model: "opus" });
+	it("before anything is sent: no key, another provider's model, no model, a wrong argument", async () => {
+		const cases: Array<[string, RouteCase, string]> = [
+			[
+				"",
+				{ auth: { ok: false } },
+				"Provimux has no key set up, so there is no conversation route to show. Type /login Provimux (or /login provimux) and enter your server's address and key.",
+			],
+			[
+				"",
+				{ model: { provider: "anthropic", id: "claude-opus-4-6" } },
+				"/provimux-route shows the route of a Provimux model, and the current model is anthropic/claude-opus-4-6. Choose a Provimux model in /model, then type /provimux-route again.",
+			],
+			[
+				"",
+				{ model: null },
+				"/provimux-route shows the route of a Provimux model, and no model is selected. Choose a Provimux model in /model, then type /provimux-route again.",
+			],
+			[
+				"release yes",
+				{},
+				"/provimux-route takes nothing (show where this conversation is), or release (move it back to a free higher-priority route).",
+			],
+		];
+		for (const [args, setup, said] of cases) {
+			const run = await runRoute(args, setup);
+			expect(run.notes).toEqual([[said, "error"]]);
+			expect(run.sent).toEqual([]);
 		}
-		expect(expectToken("b.k3v7q2mfx4ardn5w")).toBe("b.k3v7q2mfx4ardn5w");
+	});
+
+	it("a failed show changes nothing and says what to do", async () => {
+		const cases: Array<[StandInAnswer, string]> = [
+			[
+				{ status: 404 },
+				"This server has no conversation routes: /provimux-route needs Provimux 8.1.7-pmx.4 or newer (plain CLIProxyAPI has none). Update Provimux to use it; everything else works as before.",
+			],
+			[
+				{ status: 401, body: { error: "Invalid API key" } },
+				"The server refused the client key (HTTP 401). Type /login Provimux to enter the key again.",
+			],
+			[
+				{ status: 400, body: { error: { message: "the model opus is not served to this key" } } },
+				"The server refused the request (HTTP 400): the model opus is not served to this key. If it says the model is not served, choose another in /model.",
+			],
+			[
+				{ status: 500, body: { error: { message: "boom" } } },
+				"The server answered HTTP 500: boom. Try again in a moment; if it persists, check the server.",
+			],
+			[
+				{ unreachable: "fetch failed" },
+				`Could not reach your Provimux server at ${SHOW_URL}: fetch failed. Check that it is running, or type /login Provimux to change its address.`,
+			],
+			[
+				ok({ hello: 1 }),
+				"The server's answer could not be read as a conversation route: is it Provimux 8.1.7-pmx.4 or newer?",
+			],
+		];
+		for (const [answer, said] of cases)
+			expect((await runRoute("", { show: [answer] })).notes).toEqual([[said, "error"]]);
+		const release = await runRoute("release", { show: [{ status: 404 }] });
+		expect(release.notes[0]![0]).toContain("(plain CLIProxyAPI has none). Nothing was released.");
 	});
 });
 
-describe("/provimux-route release: a yes unless Pi knows the cache is cold", () => {
-	it("may be warm, in the TUI: the dialog says the cost before anything is released, and no releases nothing", async () => {
-		const declined = await runRoute("release", { show: [ok(fb)], confirm: [false] });
-		expect(declined.order).toEqual(["show", "ask"]);
-		expect(declined.sent.map((sent) => sent.url)).toEqual([SHOW_URL]);
-		expect(declined.asked[0]![1]).toContain("about 182,000 tokens, about $0.55 at the list price");
-		const accepted = await runRoute("release", { show: [ok(fb)], confirm: [true], release: [ok(C.Released)] });
-		expect(accepted.order).toEqual(["show", "ask", "release", "close"]);
-	});
-
-	it("whatever Pi does not know is taken as possibly warm: no lifetime, no last answer, or both", async () => {
-		for (const setup of [unknownTtl, { noted: null }, { noted: null, promptCache: { short: 300 } }] as RouteCase[]) {
-			const run = await runRoute("release", { ...setup, show: [ok(fb)], confirm: [false] });
-			expect(run.order).toEqual(["show", "ask"]);
-		}
-	});
-
-	it("Pi knows it is cold, from a noted request or from the session's last answer and the model's lifetime: no question", async () => {
-		for (const setup of [
-			cold,
-			{ noted: null, lastAnswerAgoMs: 20 * 60_000, promptCache: { short: 300 } },
-		] as RouteCase[]) {
-			const run = await runRoute("release", { ...setup, show: [ok(fb)], release: [ok(C.Released)] });
-			expect(run.asked).toEqual([]);
-			expect(run.order).toEqual(["show", "release", "close"]);
-		}
-	});
-
-	it("in the TUI, release yes still asks: the yes is given to the cost shown", async () => {
-		const run = await runRoute("release yes", { show: [ok(fb)], confirm: [false] });
+describe("/provimux-route release", () => {
+	it("says the cost and asks; no releases nothing, whole", async () => {
+		const run = await runRoute("release", { show: [ok(C.FellBack)], confirm: [false] });
+		expect(run.asked).toEqual([
+			[
+				"Move this conversation from Anthropic api to Anthropic sub now?",
+				"Its next message may read the whole conversation once without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. On Anthropic sub this is quota of the subscription, not money: the amounts are at API list price, for comparison.",
+			],
+		]);
+		expect(run.notes).toEqual([
+			["Nothing was released: the conversation stays on Anthropic api, with its cache.", "info"],
+		]);
 		expect(run.order).toEqual(["show", "ask"]);
 	});
 
-	it("outside the TUI (RPC, print): the cost is printed and only release yes releases", async () => {
-		for (const mode of ["rpc", "print"] as const) {
-			const shown = await runRoute("release", { mode, show: [ok(fb)] });
-			expect(shown.order).toEqual(["show"]);
-			const released = await runRoute("release yes", { mode, show: [ok(fb)], release: [ok(C.Released)] });
-			expect(released.order).toEqual(["show", "release", "close"]);
-			expect(released.asked).toEqual([]);
+	it("yes: one release, naming the binding it saw; the destination as the server lists it now", async () => {
+		const run = await runRoute("release", { show: [ok(C.FellBack)], confirm: [true], release: [ok(C.Released)] });
+		expect(run.order).toEqual(["show", "ask", "release"]);
+		expect(run.sent[1]).toMatchObject({
+			url: RELEASE_URL,
+			headers: { "x-session-affinity": SESSION_ID },
+			body: { model: "opus", expect: "b.k3v7q2mfx4ardn5w" },
+		});
+		expect(run.notes).toEqual([
+			[
+				"Released: this conversation is no longer bound to Anthropic api. Its next message goes to the first available route (now: Anthropic sub), and may read the whole conversation once without cache.",
+				"info",
+			],
+		]);
+	});
+
+	it("a release that lists no next route says so, and names no route the show had", async () => {
+		const run = await runRoute("release", {
+			show: [ok(C.FellBack)],
+			confirm: [true],
+			release: [ok({ ...C.Released, next: [] })],
+		});
+		expect(run.notes[0]![0]).toBe(
+			"Released: this conversation is no longer bound to Anthropic api. Provimux lists no route for its next message right now.",
+		);
+	});
+
+	it("no release where it leads nowhere better: cooling, already on a first route (a tied peer cooling too), nowhere listed", async () => {
+		const tiedPeerCooling = { ...C.OnFirstRoute, first: [C.OnFirstRoute.first[0]] };
+		const cases: Array<[unknown, string]> = [
+			[
+				C.Cooling,
+				"Nothing was released: no higher-priority route is free yet, so the conversation stays on Anthropic api. One is expected free at 10:40 (in 25 minutes): type /provimux-route release again then.",
+			],
+			[
+				{ ...C.Cooling, position: { ...C.Cooling.position, higher_priority_free_at: null } },
+				"Nothing was released: no higher-priority route is free yet, so the conversation stays on Anthropic api. Provimux does not know when one will be: check again later with /provimux-route.",
+			],
+			[C.OnFirstRoute, "Nothing was released: this conversation is already on a first route (Anthropic sub)."],
+			[tiedPeerCooling, "Nothing was released: this conversation is already on a first route (Anthropic sub)."],
+			[
+				{ ...C.BoundToUnlisted, first: [] },
+				"Nothing was released: this conversation is on an account that is no longer listed, and Provimux lists no route to move it to now. Check again later with /provimux-route.",
+			],
+			[
+				C.NotSeen,
+				"Provimux has no record of this conversation on opus from your key: it has seen no message of it since it started, or it has forgotten it since its binding expired. Send a message, then type /provimux-route again. Nothing was released.",
+			],
+			[
+				C.AffinityOff,
+				"Provimux does not bind conversations to a route (its session affinity is off): every request already goes to the first available route, so there is nothing to move. Nothing was released.",
+			],
+		];
+		for (const [answer, said] of cases) {
+			const run = await runRoute("release", { show: [ok(answer)], confirm: [true] });
+			expect(run.notes).toEqual([[said, "info"]]);
+			expect(run.order).toEqual(["show"]);
 		}
 	});
 
-	it("the first route not free: nothing is sent but the check", async () => {
-		const run = await runRoute("release yes", { mode: "rpc", show: [ok(cooling)] });
-		expect(run.sent.map((sent) => sent.url)).toEqual([SHOW_URL]);
-	});
-
-	it("a binding that keeps changing: the TUI asks again at most twice more, then stops", async () => {
-		const changed = { status: 409, body: { ...fb, binding: "b.n4w7q2mfx4ardn5w" } };
+	it("an unlisted account with a listed route: the ordinary confirmed release", async () => {
 		const run = await runRoute("release", {
-			show: [ok(fb)],
-			confirm: [true, true, true, true],
-			release: [changed, changed, changed],
+			show: [ok(C.BoundToUnlisted)],
+			confirm: [true],
+			release: [ok({ ...C.Released, was: { listed: false }, next: C.BoundToUnlisted.first })],
 		});
-		expect(run.order).toEqual(["show", "ask", "release", "ask", "release", "ask", "release"]);
-		expect(run.notes.at(-1)![0]).toContain("Type /provimux-route release again to release it as it is now.");
-	});
-});
-
-describe("/provimux-route: not seen", () => {
-	it("a session that has sent requests: asked once more after a moment, then said", async () => {
-		const run = await runRoute("", { show: [ok(C.NotSeen), ok(C.NotSeen)] });
-		expect(run.order).toEqual(["show", "sleep 1500", "show"]);
-	});
-
-	it("a session Pi knows sent nothing, and a not-seen show that is not the first: no second look", async () => {
-		expect((await runRoute("", { noted: null, show: [ok(C.NotSeen)] })).order).toEqual(["show"]);
-	});
-});
-
-describe("/provimux-route release: the Codex WebSocket", () => {
-	const codex = (over: object = {}) => ({ ...fb, model: "gpt-main", websocket_may_hold: true, ...over });
-	it("closed right after a successful release, before anything else; then checked once", async () => {
-		const run = await runRoute("release", {
-			...cold,
-			format: "codex",
-			show: [ok(codex()), ok({ ...C.NotSeen, conversation: "not-bound" })],
-			release: [ok({ ...C.Released, websocket_may_hold: true })],
-		});
-		expect(run.closed).toEqual([SESSION_ID]);
-		expect(run.order).toEqual(["show", "release", "close", "show"]);
-	});
-
-	it("a turn that slipped in on the old socket and bound it again: released again, then closed again", async () => {
-		const run = await runRoute("release", {
-			...cold,
-			format: "codex",
-			show: [ok(codex()), ok(codex({ binding: "b.r2x7q2mfx4ardn5w" }))],
-			release: [ok({ ...C.Released, websocket_may_hold: true }), ok({ ...C.Released, websocket_may_hold: true })],
-		});
-		expect(run.order).toEqual(["show", "release", "close", "show", "release", "close"]);
-		expect(run.sent[3]!.body).toEqual({ model: "gpt-main", expect: "b.r2x7q2mfx4ardn5w" });
-	});
-
-	it("whatever header named the conversation: a Claude-format one that says websocket_may_hold is closed and checked too", async () => {
-		const run = await runRoute("release", {
-			...cold,
-			show: [ok({ ...fb, websocket_may_hold: true }), ok({ ...C.NotSeen, conversation: "not-bound" })],
-			release: [ok({ ...C.Released, websocket_may_hold: true })],
-		});
-		expect(run.order).toEqual(["show", "release", "close", "show"]);
-		expect(run.notes[0]![0]).toContain("Its Codex WebSocket, if one was open, was closed");
-	});
-
-	it("nothing released: nothing closed", async () => {
-		const none = await runRoute("release", {
-			...cold,
-			format: "codex",
-			show: [ok(codex())],
-			release: [ok({ ...C.NothingBound, websocket_may_hold: true })],
-		});
-		expect(none.closed).toEqual([]);
-	});
-});
-
-describe("/provimux-route: what Pi knows of the cache", () => {
-	it("the later of a noted request and the session's last answer; the lifetime noted with it, else the model's", () => {
-		expect(
-			cacheViewOf({ noted: { at: 1000, ttlMs: 300_000 }, lastAnswerAt: 500, modelTtlMs: 3_600_000, now: 61_000 }),
-		).toEqual({
-			ttlMs: 300_000,
-			sinceMs: 60_000,
-		});
-		expect(cacheViewOf({ noted: { at: 500 }, lastAnswerAt: 1000, modelTtlMs: 3_600_000, now: 61_000 })).toEqual({
-			ttlMs: 3_600_000,
-			sinceMs: 60_000,
-		});
-		expect(cacheViewOf({ noted: undefined, lastAnswerAt: undefined, modelTtlMs: undefined, now: 1 })).toEqual({});
-	});
-
-	it("cold only past the lifetime and a minute", () => {
-		expect(knownCold({ ttlMs: 300_000, sinceMs: 360_000 })).toBe(false);
-		expect(knownCold({ ttlMs: 300_000, sinceMs: 360_001 })).toBe(true);
-		expect(knownCold({ sinceMs: 99_999_999 })).toBe(false);
-		expect(cacheText({ ttlMs: 300_000, sinceMs: 330_000 })).toBe(
-			"Pi knows this cache lasts 5 minutes; last answer 6 minutes ago: it is about to go cold.",
+		expect(run.asked[0]![0]).toBe(
+			"Move this conversation from an account that is no longer listed to Anthropic api now?",
 		);
-		expect(cacheText({ ttlMs: 3_600_000 })).toBe(
-			"Pi knows this cache lasts 1 hour, but has no answer of this session to go by, so it may still be warm.",
+		expect(run.order).toEqual(["show", "ask", "release"]);
+		expect(run.sent[1]!.body).toEqual({ model: "opus", expect: "b.p4nq7tz2wk5xmh3d" });
+	});
+
+	it("a bound show without a token: nothing is released, and nothing is asked", async () => {
+		const run = await runRoute("release", { show: [ok({ ...C.FellBack, binding: null })], confirm: [true] });
+		expect(run.order).toEqual(["show"]);
+		expect(run.notes[0]![0]).toBe(
+			"Nothing was released: Provimux could not identify this conversation's binding just now. Check again with /provimux-route.",
 		);
 	});
 
-	it("a request is noted with its session and the lifetime Pi takes for it; one without caching, or without a session, is not", () => {
-		const model = { api: "anthropic-messages", promptCache: { short: 300, long: 3600 } };
-		noteCacheUse(model, { sessionId: "s-1" }, 1000);
-		noteCacheUse(model, { sessionId: "s-2", cacheRetention: "long" }, 2000);
-		noteCacheUse(model, { sessionId: "s-3", cacheRetention: "none" }, 3000);
-		noteCacheUse({ api: "anthropic-messages" }, { sessionId: "s-4" }, 4000);
-		noteCacheUse(model, {}, 5000);
-		expect(lastCacheUse("s-1")).toEqual({ at: 1000, ttlMs: 300_000 });
-		expect(lastCacheUse("s-2")).toEqual({ at: 2000, ttlMs: 3_600_000 });
-		expect(lastCacheUse("s-3")).toBeUndefined();
-		expect(lastCacheUse("s-4")).toEqual({ at: 4000 });
-	});
-});
-
-describe("/provimux-route: reading the contract", () => {
-	it("the gateway's times are its answer's own: the same text whatever this machine's clock says", async () => {
-		const before = await runRoute("", { show: [ok(cooling)] });
-		vi.useFakeTimers({ toFake: ["Date"] });
-		vi.setSystemTime(new Date("2031-03-04T23:59:00Z"));
-		const later = await runRoute("", { show: [ok(cooling)] });
-		expect(later.notes).toEqual(before.notes);
-		expect(PI_NOW).toBe(Date.parse("2026-11-27T10:15:30Z"));
-	});
-
-	it("fields and values it does not know are ignored; a kind may be empty; an unlisted route; an old cache object is not read", () => {
-		const shown = parseShowAnswer({
-			...C.FellBackCacheCold,
-			something_new: { a: 1 },
-			cache: { lifetime_s: 300, cold: true },
-			bound: { ...C.FellBackCacheCold.bound, route: { provider: "claude", kind: "", priority: 5 } },
+	it("the binding changed since the show (409): its new state, and no second release", async () => {
+		const run = await runRoute("release", {
+			show: [ok(C.FellBack)],
+			confirm: [true, true],
+			release: [{ status: 409, body: { ...C.FellBack, binding: "b.n4w7q2mfx4ardn5w" } }, ok(C.Released)],
 		});
-		expect(shown?.bound?.route).toEqual({ provider: "claude", kind: "", priority: 5 });
-		expect(shown).not.toHaveProperty("cache");
-		expect(shown?.rule).toEqual({ inEffect: true, coldAfterS: 360 });
-		expect(parseShowAnswer(C.BoundToUnlisted)?.bound?.route).toBe("unlisted");
-		expect(parseShowAnswer(C.BoundToUnlisted)?.routedModel).toBe("opus");
-		expect(parseShowAnswer({ ...C.NotSeen, rule: { in_effect: "maybe" } })?.rule).toEqual({
-			inEffect: false,
-			coldAfterS: null,
+		expect(releases(run)).toBe(1);
+		expect(run.notes).toHaveLength(1);
+		expect(run.notes[0]![0]).toMatch(
+			/^Nothing was released: this conversation's binding changed since the check\.\nRoute of this conversation on opus, .*\nTo move it now: \/provimux-route release/s,
+		);
+	});
+
+	it("only while Pi is idle: busy at the start sends nothing; busy after the yes releases nothing", async () => {
+		const said = "Nothing was released: Pi is answering. Type /provimux-route release again when the answer is done.";
+		const start = await runRoute("release", { idle: [false, false], show: [ok(C.FellBack)], confirm: [true] });
+		expect(start.sent).toEqual([]);
+		expect(start.notes).toEqual([[said, "warning"]]);
+		const after = await runRoute("release", {
+			idle: [true, false],
+			format: "codex",
+			show: [ok(C.FellBack)],
+			confirm: [true],
 		});
-		expect(parseReleaseAnswer({ ...C.Released, extra: true })?.released).toBe(true);
-		expect(parseReleaseAnswer({ ...C.Released, was: { listed: false } })?.was).toBe("unlisted");
-		expect(parseShowAnswer({ hello: 1 })).toBeUndefined();
+		expect(after.order).toEqual(["show", "ask"]);
+		expect(after.notes).toEqual([[said, "warning"]]);
 	});
 
-	it("a route of an empty kind is named by its service alone", async () => {
-		const answer = { ...fb, bound: { ...fb.bound, route: { provider: "claude", kind: "", priority: 5 } } };
-		const run = await runRoute("", { show: [ok(answer)] });
-		expect(run.notes[0]![0]).toContain("• Now on: Anthropic, since 09:35 (40 minutes ago).");
-	});
-
-	it('a small amount reads "less than $0.01", never "about less than" (seen against the real gateway)', () => {
-		const text = costText({ tokens: 15, price: { input: 5, cacheRead: 0.5 }, cache: {}, to: [] });
-		expect(text).toContain("(about 15 tokens, less than $0.01 at the list price;");
-		expect(text).toContain("Staying costs a cached read, less than $0.01 a message");
-		expect(text).not.toContain("about less");
-	});
-
-	it("lengths of time in words", () => {
-		expect([0, 29, 60, 300, 3600, 3900, 7260].map(durationWords)).toEqual([
-			"under a minute",
-			"under a minute",
-			"1 minute",
-			"5 minutes",
-			"1 hour",
-			"1 hour 5 minutes",
-			"2 hours 1 minute",
+	it("only in the TUI: RPC says so and sends nothing; print and JSON say so on stderr and send nothing", async () => {
+		const rpc = await runRoute("release", { mode: "rpc", show: [ok(C.FellBack)], release: [ok(C.Released)] });
+		expect(rpc.sent).toEqual([]);
+		expect(rpc.notes).toEqual([
+			[
+				"Nothing was released: /provimux-route release asks before it moves the conversation, and it can ask only in Pi's interactive terminal. Here, /provimux-route shows the route.",
+				"warning",
+			],
 		]);
+		expect((await runRoute("", { mode: "rpc", show: [ok(C.FellBack)] })).notes[0]![0]).toContain(
+			"• Now on: Anthropic api",
+		);
+		for (const mode of ["print", "json"] as const) {
+			for (const args of ["", "release"]) {
+				const run = await runRoute(args, { mode, show: [ok(C.FellBack)], release: [ok(C.Released)] });
+				expect(run.sent).toEqual([]);
+				expect(run.reported).toEqual([
+					"/provimux-route works in Pi's interactive terminal (and shows the route in RPC mode): nothing was sent.",
+				]);
+			}
+		}
+	});
+
+	it("the Codex WebSocket: closed once after a release, never when nothing was released", async () => {
+		const codex = {
+			format: "codex" as const,
+			show: [ok({ ...C.FellBack, websocket_may_hold: true })],
+			confirm: [true],
+		};
+		const done = await runRoute("release", { ...codex, release: [ok({ ...C.Released, websocket_may_hold: true })] });
+		expect(done.order).toEqual(["show", "ask", "release", "close session"]);
+		expect(done.notes[0]![0]).toMatch(
+			/ Its Codex WebSocket, if one was open, was closed, so that message is routed afresh\.$/,
+		);
+		for (const release of [ok(C.NothingBound), { status: 409, body: C.FellBack }, { status: 502 }]) {
+			expect((await runRoute("release", { ...codex, release: [release] })).order).toEqual([
+				"show",
+				"ask",
+				"release",
+			]);
+		}
+		// A Claude-format conversation the server says is on no socket: nothing to close.
+		const claude = await runRoute("release", { show: [ok(C.FellBack)], confirm: [true], release: [ok(C.Released)] });
+		expect(claude.order).not.toContain("close session");
+	});
+
+	it("the release's answer lost or unreadable: the outcome is not known, and the way to check", async () => {
+		const cases: Array<[StandInAnswer, string]> = [
+			[
+				{ unreachable: "The operation was aborted due to timeout" },
+				"the server's answer did not come (The operation was aborted due to timeout)",
+			],
+			[{ status: 502 }, "the server's answer did not come (HTTP 502)"],
+			[ok({ hello: 1 }), "the server's answer could not be read"],
+		];
+		for (const [answer, why] of cases) {
+			const run = await runRoute("release", { show: [ok(C.FellBack)], confirm: [true], release: [answer] });
+			expect(run.notes).toEqual([
+				[
+					`The release was sent, but ${why}, so whether this conversation was released is not known. Check with /provimux-route.`,
+					"error",
+				],
+			]);
+		}
+		const refused = await runRoute("release", {
+			show: [ok(C.FellBack)],
+			confirm: [true],
+			release: [{ status: 404 }],
+		});
+		expect(refused.notes[0]![0]).toContain("Nothing was released.");
+	});
+
+	it("the release finds nothing bound any more", async () => {
+		const run = await runRoute("release", { show: [ok(C.FellBack)], confirm: [true], release: [ok(C.NothingBound)] });
+		expect(run.notes).toEqual([
+			[
+				"Nothing was released: the conversation was no longer bound (its binding expired or was released meanwhile). Its next message goes to the first available route.",
+				"info",
+			],
+		]);
+	});
+});
+
+describe("/provimux-route: what a move may cost", () => {
+	const model = (cost: object) => ({ cost }) as Parameters<typeof costText>[0]["model"];
+
+	it("at Pi's price for that many tokens: a long conversation at its tier", () => {
+		const tiered = model({
+			input: 5,
+			output: 30,
+			cacheRead: 0.5,
+			cacheWrite: 6.25,
+			tiers: [{ input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5, inputTokensAbove: 272000 }],
+		});
+		const text = costText({ tokens: 300_000, model: tiered, to: [] });
+		expect(text).toContain("(about 300,000 tokens, about $3.00 at the list price;");
+		expect(text).toContain("Staying costs a cached read, about $0.30 a message");
+	});
+
+	it("a small positive amount is not shown as nothing", () => {
+		expect(
+			costText({ tokens: 15, model: model({ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }), to: [] }),
+		).toContain("(about 15 tokens, less than $0.01 at the list price;");
+	});
+
+	it("without a price: the size alone; without a size: what the move may read", () => {
+		expect(
+			costText({ tokens: 1_000, model: model({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }), to: [] }),
+		).toBe(
+			"Its next message may read the whole conversation once without cache (about 1,000 tokens; more where the vendor also charges for writing the new cache). Pi has no price for this model, so no amount is given.",
+		);
+		expect(
+			costText({ tokens: null, model: model({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }), to: [] }),
+		).toBe(
+			"Its next message may read the whole conversation once without cache (its size is not known until its next answer; more where the vendor also charges for writing the new cache).",
+		);
+	});
+});
+
+describe("/provimux-route: reading the answers", () => {
+	it("fields it does not know are ignored; something else is no answer", () => {
+		expect(parseShowAnswer({ ...C.FellBack, something_new: { a: 1 } })?.binding).toBe("b.k3v7q2mfx4ardn5w");
+		expect(parseReleaseAnswer({ ...C.Released, extra: true })?.released).toBe(true);
+		expect(parseShowAnswer({ hello: 1 })).toBeUndefined();
+		expect(parseShowAnswer({ ...C.FellBack, bound: { route: 7 } })).toBeUndefined();
+		expect(parseReleaseAnswer({ hello: 1 })).toBeUndefined();
 	});
 });

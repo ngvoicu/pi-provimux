@@ -43,7 +43,6 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { decodeWireValue, type GatewayList, handOnFigures, type ListedSources } from "./figures.ts";
-import { noteCacheUse } from "./last-use.ts";
 import { resolveEndpoints } from "./lib.ts";
 import { type Account, likelyAccounts, own, parseAccounts } from "./sources.ts";
 
@@ -474,7 +473,6 @@ export function answeredStream<M, C, O extends AnswerCallbacks<never> | undefine
 	stream: (model: M, context: C, options: O) => R,
 ): (model: M, context: C, options: O) => R {
 	return (model, context, options) => {
-		noteCacheUse(model, options);
 		const kept = keptOptions(options);
 		const result = stream(model, context, kept.options);
 		keepWithMessage(result, kept.said);
@@ -547,7 +545,6 @@ export function answeredClaudeMessages(
 			(original: ApiImplementation[Method]): ApiImplementation[Method] =>
 			(model, context, options) => {
 				if (!scope.providers.has(model.provider)) return original(model, context, options);
-				noteCacheUse(model, options);
 				const kept = keptOptions(options);
 				const result = original(model, context, kept.options);
 				keepWithMessage(result, kept.said);

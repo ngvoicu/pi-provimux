@@ -1301,7 +1301,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// Where this conversation is bound on the server, and moving it back to its first route (Provimux only).
 	registerRouteCommand({
 		pi,
-		agentDir,
 		providerId: identity.providerId,
 		providerName: identity.providerName,
 		closeWebSocketSessions: (sessionId) => closeCodexWebSockets?.(sessionId),
