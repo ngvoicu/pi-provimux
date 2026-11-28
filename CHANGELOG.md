@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+**`/provimux-route`: where this conversation is on your server, and back to its first route.** Needs Provimux
+<version> or newer with session affinity on.
+
+- **`/provimux-route`** asks the server which account this conversation is bound to (in the words of the model
+  names), since when, whether that is a fallback and from what, and whether the first route is free now or when it is
+  expected free; an account no longer listed, and a name routed to another model (`auto`), are said as such. It adds
+  what Pi knows of the conversation's cache (when the session last sent a request, and the model's `promptCache`
+  lifetime, which pi-cache-keeper writes), and that Provimux does not move a conversation back by itself. Every call
+  asks afresh; the check sends nothing to a model and costs nothing. A "not seen" right after an answer is asked
+  again once, a moment later, before it is said.
+- **`/provimux-route release`** removes the binding, so the next message goes to the first route. It releases
+  nothing while the first route is still cooling (and says when to try again), releases at once only when Pi knows
+  the cache is cold, and otherwise first says the cost (one read of the whole conversation without cache, in tokens
+  and at list price; quota on a subscription) and asks; outside the TUI, `release yes` confirms. It names the binding
+  it saw (`expect`) and, when that changed meanwhile (409), shows the new state and asks again. Right after a release
+  it closes the conversation's Codex WebSocket, before any further turn, and releases again a binding that a turn on
+  the old socket made. A server without the paths gets a message that names the version needed.
+- **Claude-format models name their conversation:** each request now carries the Pi session's id in
+  `x-session-affinity` (pi-ai's `sendSessionAffinityHeaders`), as Codex-format requests carry `session-id`, so
+  Provimux binds the conversation by that id rather than by the start of its content. A conversation running at the
+  update is bound afresh once, at its next message, which can then go to another account and read the conversation
+  once without cache. The id stays the same on a resume and a compaction (the conversation keeps its binding) and is
+  new on a fork or `/clone`.
+- **`model-upstreams:answered`:** an upstream named by what the proxy said, because its credential leads to a service
+  not known, carries `unmapped: true`: its `provider` is the proxy's name for it, not a Pi or providers.dev id.
+
 ## 105.0.8
 
 **Every command says what it does, and a pause shows in the footer.** Wording only, besides the footer: no command,

@@ -110,12 +110,14 @@ describe("pi 0.82.0 compatibility", () => {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
 				expect(fetchMock).not.toHaveBeenCalled();
 
-				expect(commands.size).toBe(5);
+				expect(commands.size).toBe(6);
 				expect(commands.has("fast")).toBe(true);
 				expect(commands.has("ultrafast")).toBe(true);
 				expect(commands.has("pause")).toBe(true);
 				expect(commands.has("continue")).toBe(true);
 				expect(commands.has("provimux-refresh")).toBe(true);
+
+				expect(commands.has("provimux-route")).toBe(true);
 				expect(pi.unregisterProvider).toHaveBeenCalledWith("provimux");
 				expect(pi.registerProvider).toHaveBeenCalledWith(
 					"provimux",
@@ -294,12 +296,14 @@ describe("pi 0.82.0 compatibility", () => {
 			try {
 				await expect(providerExtension(pi)).resolves.toBeUndefined();
 				expect(fetchMock).toHaveBeenCalled();
-				expect(commands.size).toBe(5);
+				expect(commands.size).toBe(6);
 				expect(commands.has("fast")).toBe(true);
 				expect(commands.has("ultrafast")).toBe(true);
 				expect(commands.has("pause")).toBe(true);
 				expect(commands.has("continue")).toBe(true);
 				expect(commands.has("provimux-refresh")).toBe(true);
+
+				expect(commands.has("provimux-route")).toBe(true);
 				expect(pi.registerProvider).toHaveBeenCalledWith(
 					"provimux",
 					expect.objectContaining({

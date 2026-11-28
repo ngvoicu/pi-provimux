@@ -210,12 +210,17 @@ describe("where a credential leads", () => {
 			expect(statedUpstream("m", { provider: "openai-compatible-lab", kind: "apikey", host })).toEqual({
 				provider: host,
 				subscription: false,
+				unmapped: true,
 			});
 			expect(upstreamOf(at(host), "m")).toBeUndefined();
 			expect(sourceLabel([at(host)])).toBe(`${host} api`);
 		}
 		for (const provider of ["constructor", "__proto__", "valueOf"]) {
-			expect(statedUpstream("m", { provider, kind: "oauth" })).toEqual({ provider, subscription: true });
+			expect(statedUpstream("m", { provider, kind: "oauth" })).toEqual({
+				provider,
+				subscription: true,
+				unmapped: true,
+			});
 			expect(sourceLabel([{ provider, kind: "oauth", priority: 0 }])).toBe(`${provider} sub`);
 		}
 		expect(routeOf("constructor", listed({}, {}))).toEqual({ upstreams: [] });
@@ -353,28 +358,52 @@ describe("a model's route", () => {
 		});
 	});
 
-	it("a named credential that leads to a service not known is still named: by its host, else its provider", () => {
+	it("a named credential that leads to a service not known is still named: by its host, else its provider, marked unmapped", () => {
 		expect(
 			statedUpstream("claude-opus-5-5", {
 				provider: "openai-compatible-lab",
 				kind: "apikey",
 				host: "api.example.test",
 			}),
-		).toEqual({ provider: "api.example.test", subscription: false });
+		).toEqual({ provider: "api.example.test", subscription: false, unmapped: true });
 		expect(
 			statedUpstream("claude-opus-5-5", { provider: "claude", kind: "apikey", host: "LLM.Example.com" }),
 		).toEqual({
 			provider: "llm.example.com",
 			subscription: false,
+			unmapped: true,
 		});
 		expect(statedUpstream("claude-opus-5-5", { provider: "openai-compatible-mine", kind: "apikey" })).toEqual({
 			provider: "openai-compatible-mine",
 			subscription: false,
+			unmapped: true,
 		});
 		expect(statedUpstream("muse-ember-1.0", { provider: "SomeLab", kind: "oauth" })).toEqual({
 			provider: "SomeLab",
 			subscription: true,
+			unmapped: true,
 		});
+		// A known service carries no mark: its provider is a pi or providers.dev id.
+		expect(statedUpstream("claude-opus-5-5", { provider: "claude", kind: "oauth" })).not.toHaveProperty("unmapped");
+		expect(statedUpstream("claude-opus-5-5", { provider: "devin", kind: "oauth" })).not.toHaveProperty("unmapped");
+		expect(
+			statedUpstream("claude-opus-5-5", { provider: "claude", kind: "apikey", host: "openrouter.ai" }),
+		).not.toHaveProperty("unmapped");
+	});
+
+	it("a reader that copies only provider, model and subscription (an older pi-cache-keeper) reads an unmapped upstream as before", () => {
+		// pi-cache-keeper's parseUpstream, as it stands: it keeps the three fields it knows and drops the rest.
+		const olderReader = (value: Record<string, unknown>) => ({
+			provider: value.provider,
+			...(typeof value.model === "string" && value.model ? { model: value.model } : {}),
+			...(typeof value.subscription === "boolean" ? { subscription: value.subscription } : {}),
+		});
+		const stated = statedUpstream("claude-opus-5-5", {
+			provider: "openai-compatible-lab",
+			kind: "apikey",
+			host: "api.example.test",
+		});
+		expect(olderReader({ ...stated })).toEqual({ provider: "api.example.test", subscription: false });
 	});
 });
 
@@ -990,7 +1019,7 @@ describe("the events", () => {
 		respond({ "X-Cpa-Auth-Kind": "oauth", "X-Cpa-Auth-Provider": "DeViN" });
 		streamEvent({ type: "response.created", cpa_auth_kind: "oauth", cpa_auth_provider: "DeViN" });
 		const claude = answered([{ provider: "anthropic", subscription: true }]);
-		const gateway = answered([{ provider: "api.example.test", subscription: false }]);
+		const gateway = answered([{ provider: "api.example.test", subscription: false, unmapped: true }]);
 		const devin = answered([{ provider: "devin", subscription: true }]);
 		expect(emitted).toEqual([claude, gateway, claude, gateway, devin, devin]);
 	});

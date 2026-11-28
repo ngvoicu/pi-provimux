@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync, zstdDecompressSync } from "node:zlib";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { FellBackCacheCold as FELL_BACK_CACHE_COLD } from "./session-route-contract.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const EXTENSION = join(ROOT, "extensions", "index.ts");
@@ -129,7 +130,19 @@ interface SentRequest {
 	effort?: string;
 	updates: string[];
 	status: number;
+	/** The headers that name a conversation, as sent (pi's Claude format: x-session-affinity; its Codex format: session-id). */
+	session?: Record<string, string>;
+	/** A session-route request's body. */
+	body?: unknown;
 }
+
+const SESSION_HEADERS = ["x-session-affinity", "session-id", "x-session-id", "x-client-request-id"];
+const sessionHeaders = (req: IncomingMessage): Record<string, string> =>
+	Object.fromEntries(
+		SESSION_HEADERS.flatMap((name) => (typeof req.headers[name] === "string" ? [[name, req.headers[name]]] : [])),
+	);
+/** What the session-route paths answer (a contract example), when a case sets it; else they are not there (404). */
+let sessionRoute: unknown;
 
 let models: FixtureModel[] = [];
 let requests: SentRequest[] = [];
@@ -282,6 +295,21 @@ async function serve(req: IncomingMessage, res: ServerResponse) {
 		res.end(JSON.stringify(modelsBody(url)));
 		return;
 	}
+	if (url.pathname.startsWith("/v1/provimux/session-route")) {
+		const chunks: Buffer[] = [];
+		for await (const chunk of req) chunks.push(chunk as Buffer);
+		requests.push({
+			path: url.pathname,
+			model: "",
+			updates: [],
+			status: sessionRoute ? 200 : 404,
+			session: sessionHeaders(req),
+			body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+		});
+		res.writeHead(sessionRoute ? 200 : 404, { "content-type": "application/json" });
+		res.end(sessionRoute ? JSON.stringify(sessionRoute) : "");
+		return;
+	}
 	const claude = url.pathname.endsWith("/messages");
 	if (url.pathname.startsWith("/other/")) {
 		// The other provider's endpoint: recorded, never answered.
@@ -323,6 +351,7 @@ async function serve(req: IncomingMessage, res: ServerResponse) {
 		effort,
 		updates,
 		status: unsupported ? 400 : 200,
+		session: sessionHeaders(req),
 	});
 	if (unsupported) {
 		res.writeHead(400, { "content-type": "application/json" });
@@ -402,6 +431,7 @@ beforeEach(() => {
 	models = MODELS.map((m) => ({ ...m, levels: [...m.levels] }));
 	requests = [];
 	holdAccounts = undefined;
+	sessionRoute = undefined;
 });
 
 afterEach(() => {
@@ -554,6 +584,83 @@ describe("pi's CLI with this extension, against a fixture proxy", { timeout: 120
 		const allowed = await pi(["-p", "--no-session", "--models", `${NEMOTRON}:high`, "ok"]);
 		expect(allowed.code, said(allowed)).toBe(0);
 		expect(allowed.requests.map((r) => r.effort)).toEqual(["high"]);
+	});
+
+	it("a Claude-format model names its conversation by the session's id, a Codex one as before; /provimux-route names it the same way", async () => {
+		const session = ["--session-id", "route-fixture-1"];
+		const claude = await pi([...session, "--model", CLAUDE, "-p", "say hi"]);
+		expect(claude.code, said(claude)).toBe(0);
+		expect(claude.requests.map((r) => [r.path, r.session])).toEqual([
+			["/v1/messages", { "x-session-affinity": "route-fixture-1" }],
+		]);
+		// The Codex format already named it; nothing is added there.
+		const codex = await pi([...session, "--model", CODEX, "-p", "say hi"]);
+		expect(codex.code, said(codex)).toBe(0);
+		expect(codex.requests.map((r) => [r.path, r.session])).toEqual([
+			[
+				"/backend-api/codex/responses",
+				{ "session-id": "route-fixture-1", "x-client-request-id": "route-fixture-1" },
+			],
+		]);
+
+		// The command, in pi's RPC mode, asks with the header the conversation's turns carry.
+		sessionRoute = { ...FELL_BACK_CACHE_COLD, model: "claude-opus-5-5" };
+		const shown = await pi([...session, "--model", CLAUDE, "--mode", "rpc"], {
+			rpc: [{ type: "prompt", message: "/provimux-route" }],
+		});
+		expect(shown.requests.map((r) => [r.path, r.session, r.body])).toEqual([
+			["/v1/provimux/session-route", { "x-session-affinity": "route-fixture-1" }, { model: "claude-opus-5-5" }],
+		]);
+		const notes = shown.stdout.split("\n").flatMap((line) => {
+			try {
+				const message = JSON.parse(line);
+				return message?.type === "extension_ui_request" && message.method === "notify" ? [message.message] : [];
+			} catch {
+				return [];
+			}
+		});
+		expect(
+			notes.some((note: string) =>
+				note.startsWith(
+					"Route of this conversation on claude-opus-5-5, as Provimux says now (this check sends nothing to a model and costs nothing):\n• Now on: Anthropic api, since ",
+				),
+			),
+		).toBe(true);
+
+		// A Provimux without the paths: the command says so, and nothing else is sent.
+		sessionRoute = undefined;
+		const old = await pi([...session, "--model", CLAUDE, "--mode", "rpc"], {
+			rpc: [{ type: "prompt", message: "/provimux-route release" }],
+		});
+		expect(old.requests.map((r) => [r.path, r.status])).toEqual([["/v1/provimux/session-route", 404]]);
+		expect(old.stdout).toContain("This server has no conversation routes: /provimux-route needs Provimux");
+	});
+
+	it("the session's id, and so what names the conversation, on a resume, a compaction and a fork", async () => {
+		const session = ["--session-id", "route-life-1"];
+		const turn = async (args: string[], text: string) => {
+			const sent = await pi([...args, "--model", CLAUDE, "-p", text]);
+			expect(sent.code, said(sent)).toBe(0);
+			return sent.requests.map((r) => r.session?.["x-session-affinity"]);
+		};
+		expect(await turn(session, "one")).toEqual(["route-life-1"]);
+		// A resume: the same session, the same id.
+		expect(await turn(session, "two")).toEqual(["route-life-1"]);
+
+		// A compaction: pi's summary request carries no session id (pi sends it without cache and under a routing id of
+		// its own, which the Claude format does not send); the conversation's next turn has the same id as before.
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { keepRecentTokens: 0 } }));
+		const compacted = await pi([...session, "--model", CLAUDE, "--mode", "rpc"], { rpc: [{ type: "compact" }] });
+		expect(compacted.responses.c0?.success, said(compacted)).toBe(true);
+		expect(compacted.requests.length).toBeGreaterThan(0);
+		for (const request of compacted.requests) expect([request.path, request.session]).toEqual(["/v1/messages", {}]);
+		expect(await turn(session, "three")).toEqual(["route-life-1"]);
+
+		// A fork: a new session, with a new id.
+		const forked = await turn(["--fork", "route-life-1"], "four");
+		expect(forked).toHaveLength(1);
+		expect(forked[0]).toMatch(/^[0-9a-f-]{36}$/);
+		expect(forked[0]).not.toBe("route-life-1");
 	});
 
 	it("a Codex conversation resumed after a refresh took its first level away: no level it lacks is sent", async () => {

@@ -25,6 +25,15 @@ export interface PiProviderModelCompat {
 /** pi API id used for Claude models when the Claude Messages format is enabled. */
 export const ANTHROPIC_MESSAGES_API = "anthropic-messages";
 
+/**
+ * A Claude-format model as registered: pi sends the session's id with each of its turns (`x-session-affinity`), so
+ * the proxy binds the conversation by that id and `/provimux-route` can name it. Codex-format models already send
+ * theirs (`session-id`). Applied where models are registered, so a model list read from the cache gets it too.
+ */
+export function withSessionAffinity<T extends { compat?: PiProviderModelCompat }>(model: T): T {
+	return { ...model, compat: { ...model.compat, sendSessionAffinityHeaders: true } };
+}
+
 export const DEFAULT_PROVIDER_ID = "provimux";
 export const DEFAULT_PROVIDER_NAME = "Provimux";
 export const DEFAULT_BASE_URL = "http://127.0.0.1:8317";

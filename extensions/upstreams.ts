@@ -43,6 +43,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { decodeWireValue, type GatewayList, handOnFigures, type ListedSources } from "./figures.ts";
+import { noteCacheUse } from "./last-use.ts";
 import { resolveEndpoints } from "./lib.ts";
 import { type Account, likelyAccounts, own, parseAccounts } from "./sources.ts";
 
@@ -78,6 +79,12 @@ export interface Upstream {
 	provider: string;
 	model?: string;
 	subscription?: boolean;
+	/**
+	 * `true`: `provider` is not a pi or providers.dev provider id but what the proxy named the credential by (its host for
+	 * an API key, else the proxy's provider name), because it leads to a service not known. No providers.dev entry exists
+	 * under it. Absent on every other upstream. A reader that does not know the field reads the rest as before.
+	 */
+	unmapped?: true;
 }
 
 export interface Route {
@@ -236,7 +243,7 @@ export interface StatedCredential {
  * What answered a request to a model, when CLIProxyAPI names the credential: from the response alone, the credential
  * list is not consulted (it may be older than the proxy). The provider is matched without regard to letter case. A
  * credential that leads to a service not known is still named, so a change of route is seen: by its host for an API
- * key that has one, else by its provider as the response gives it.
+ * key that has one, else by its provider as the response gives it, and marked `unmapped` (no providers.dev id).
  */
 export function statedUpstream(modelId: string, stated: StatedCredential, catalog?: Catalog): Upstream {
 	const account: Account = {
@@ -248,7 +255,7 @@ export function statedUpstream(modelId: string, stated: StatedCredential, catalo
 	const known = upstreamOf(account, modelId, catalog);
 	if (known) return known;
 	const provider = stated.kind === "apikey" && account.host ? account.host : stated.provider;
-	return { provider, subscription: stated.kind !== "apikey" };
+	return { provider, subscription: stated.kind !== "apikey", unmapped: true };
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -467,6 +474,7 @@ export function answeredStream<M, C, O extends AnswerCallbacks<never> | undefine
 	stream: (model: M, context: C, options: O) => R,
 ): (model: M, context: C, options: O) => R {
 	return (model, context, options) => {
+		noteCacheUse(model, options);
 		const kept = keptOptions(options);
 		const result = stream(model, context, kept.options);
 		keepWithMessage(result, kept.said);
@@ -539,6 +547,7 @@ export function answeredClaudeMessages(
 			(original: ApiImplementation[Method]): ApiImplementation[Method] =>
 			(model, context, options) => {
 				if (!scope.providers.has(model.provider)) return original(model, context, options);
+				noteCacheUse(model, options);
 				const kept = keptOptions(options);
 				const result = original(model, context, kept.options);
 				keepWithMessage(result, kept.said);

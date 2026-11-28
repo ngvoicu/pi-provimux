@@ -65,11 +65,13 @@ import {
 	resolvePauseDefault,
 	resolveTpsDefault,
 	saveConfigFile,
+	withSessionAffinity,
 } from "./lib.ts";
 import type { PauseController } from "./pause.ts";
 import { pauseController, readPauseSetting, waitForPauseToEnd } from "./pause.ts";
 import { registerPauseFooter } from "./pause-footer.ts";
 import { registerTransientNetworkErrorRetry } from "./retry.ts";
+import { registerRouteCommand } from "./route.ts";
 import { registerThinkingLevelGuard } from "./thinking-levels.ts";
 import registerTpsStatus from "./tps.ts";
 import {
@@ -561,7 +563,9 @@ function registerProvider(
 		...(models && models.length > 0
 			? {
 					models: models.map((model) =>
-						model.api === ANTHROPIC_MESSAGES_API ? { ...model, baseUrl: endpoints.messagesBaseUrl } : model,
+						model.api === ANTHROPIC_MESSAGES_API
+							? { ...withSessionAffinity(model), baseUrl: endpoints.messagesBaseUrl }
+							: model,
 					),
 				}
 			: {}),
@@ -924,6 +928,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const fastMode = new FastModeController(fastPreference);
 	const modelRefreshCoordinator = new ModelRefreshCoordinator();
 
+	/** The patched Codex module's socket closer, once it loaded: /provimux-route closes a released conversation's socket. */
+	let closeCodexWebSockets: ((sessionId?: string) => void) | undefined;
 	let streamLoadError: string | undefined;
 	let streamSimple: ProvimuxCodexStreamSimple = () => {
 		const suffix = streamLoadError ? `: ${streamLoadError}` : "";
@@ -938,6 +944,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				model.provider === identity.providerId ? fastMode.getServiceTierFor(model.id) : undefined,
 		});
 		proactiveCompaction.setCloseWebSocketSessions(streams.closeOpenAICodexWebSocketSessions);
+		closeCodexWebSockets = streams.closeOpenAICodexWebSocketSessions;
 		// Each request keeps what its answer says (which credential answered) to itself: requests overlap.
 		streamSimple = answeredStream(proactiveCompaction.wrapStreamSimple(streams.streamSimple));
 
@@ -1289,6 +1296,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			void upstreams.refreshed();
 			return result;
 		},
+	});
+
+	// Where this conversation is bound on the server, and moving it back to its first route (Provimux only).
+	registerRouteCommand({
+		pi,
+		agentDir,
+		providerId: identity.providerId,
+		providerName: identity.providerName,
+		closeWebSocketSessions: (sessionId) => closeCodexWebSockets?.(sessionId),
 	});
 
 	if (!connection) {

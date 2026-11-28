@@ -34,6 +34,7 @@ see [Credits](#credits).
 | `/ultrafast` | Turns Ultra Fast mode on or off, saved for later starts: asks the server for its Ultra Fast service tier on Provimux models whose entry lists a service tier. | You want the fastest tier the server offers for the model. |
 | `/pause` | Holds each new model request Pi sends, in every Pi window with pi-provimux that shares your `~/.pi/agent`, until you type `/continue`. | You need Pi to stop sending for a while, for example while you change something on the server. |
 | `/continue` | Lets the held requests go out again. | After `/pause`. |
+| `/provimux-route` | Shows which of your accounts this conversation is on, whether that is a fallback, and whether its first route is free; `/provimux-route release` moves it back there, saying the cost first. | A conversation fell back to another account (a shorter cache, a paid key) and you want it on the first one again. |
 
 Not to confuse with [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper)'s refresh: `/provimux-refresh`
 reloads your server's model list and, where the server lists them, the accounts behind each model; `/cache-keeper-refresh` fetches providers.dev's
@@ -158,6 +159,116 @@ waits, and the footer says why. Pi puts every extension's status on one line, in
 it at the right edge, so in a narrow terminal the statuses of other extensions before it can push `paused` out of
 view. More: [Pausing provider requests](#pausing-provider-requests).
 
+### /provimux-route
+
+**What it does.** One model can be served by several of your accounts, tried by priority. When the first is cooling
+down, Provimux sends the conversation to the next, and with session affinity on (`routing.session-affinity: true`)
+the conversation stays there, even after the first is free again. `/provimux-route` asks your server where this
+conversation is now: which account, in the words of the model names (`Anthropic sub`, `Devin sub`,
+`OpenRouter api`), and since when; whether that is a fallback, and from what; whether the first route is free now, or
+when it is expected free. It adds what Pi itself knows of the conversation's cache, and says that Provimux does not
+move a conversation back by itself. Every call asks the server afresh, so typing it again is how you check whether the
+first route has become free. The check sends nothing to a model and costs nothing.
+
+`/provimux-route release` moves the conversation back to its first route: Provimux forgets which account it was bound
+to, and its next message goes to the first available route by priority.
+
+- If the first route is not free yet, it releases nothing and says when to try again.
+- If Pi knows the conversation's cache is cold, it releases at once: the move costs nothing extra.
+- Otherwise it first says what the move costs, one read of the whole conversation without cache, in tokens and, where
+  Pi has the model's price, in dollars at list price (on a subscription that is quota, not money), and asks. Without
+  a yes nothing is released. Outside the TUI (RPC or print mode) it prints the cost, and
+  `/provimux-route release yes` goes ahead.
+- Right after a release it closes the conversation's Codex WebSocket, before any further turn: a turn on a socket
+  left open would bind the conversation to the old account again. If such a turn slipped in first, it releases that
+  binding too.
+- If the binding changed between the check and the release (another release, or the conversation bound again), it
+  shows the conversation as it is now and, in the TUI, asks again.
+
+**What Pi knows of the cache.** Provimux does not say how long a cache lives, so Pi goes by what it knows itself: when
+this session last sent a request (its turns, and the keep-warm requests of Pi's cache warmer or of
+[pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper)), and how long the model's cache lives, from the model's
+`promptCache` values. pi-cache-keeper writes these into Pi's `models.json` from providers.dev, for where the model comes
+from; without it, Pi usually does not know. The cache counts as cold only when Pi knows the lifetime and the last request is older than
+that lifetime plus a minute (`Pi knows this cache lasts 5 minutes; last answer 12 minutes ago: it is cold.`).
+Otherwise it may still be warm (`Pi does not know how long this cache lasts (last answer 12 minutes ago), so it may still be warm.`),
+and the release asks first.
+
+**Needs Provimux <version> or newer**, with session affinity on. With an older Provimux, or plain CLIProxyAPI, it
+prints `This server has no conversation routes: /provimux-route needs Provimux <version> or newer (plain CLIProxyAPI has none). Update Provimux to use it; everything else works as before.`
+and changes nothing. A model whose name contains `::` cannot be shown: Provimux answers that it has not seen the
+conversation.
+
+**Example.** Your conversation on `claude-opus-5-5` fell back from your subscription to an API key. You type
+`/provimux-route`. Pi shows:
+
+```text
+Route of this conversation on claude-opus-5-5, as Provimux says now (this check sends nothing to a model and costs nothing):
+• Now on: Anthropic api, since 09:35 (40 minutes ago).
+• A fallback: Anthropic sub answered it before, until 09:35.
+• The first route, Anthropic sub, is not free yet: expected free at 10:40 (in 25 minutes).
+• Its cache: Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more.
+• By itself: Provimux never moves it back; only a release does.
+To check again later: /provimux-route (it asks Provimux afresh every time).
+```
+
+After 10:40 it says `The first route, Anthropic sub, is free now.` and `To move it back now: /provimux-route release (it asks first unless Pi knows the cache is cold).`
+You type `/provimux-route release`. With the cache possibly still warm, Pi asks:
+
+```text
+Move this conversation from Anthropic api to Anthropic sub now?
+Moving now costs one read of the whole conversation without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. Pi knows this cache lasts 5 minutes; last answer 2 minutes ago: it may be warm for about 3 minutes more. On Anthropic sub this is quota of the subscription, not money: the amounts are at API list price, for comparison.
+```
+
+On yes: `Released: this conversation is no longer bound to Anthropic api. Its next message goes to Anthropic sub. That message reads the whole conversation once without cache.`
+On no: `Nothing was released: the conversation stays on Anthropic api, with its cache.`
+
+Other answers:
+
+- The first route still cooling: `Nothing was released: the first route, Anthropic sub, is not free yet, so the conversation stays on Anthropic api. It is expected free at 10:40 (in 25 minutes): type /provimux-route release again then.`
+- The cache known to be cold: `Released: … Pi knows the cache was cold, so the move costs nothing extra.`
+- A conversation the server has no record of from your key (none of its messages since the server started, or its
+  binding expired and was forgotten; a check right after an answer is made twice before this is said):
+  `Provimux has no record of this conversation on claude-opus-5-5 from your key: it has seen no message of it since it started, or it has forgotten it since its binding expired. Send a message, then type /provimux-route again.`
+- Nothing bound: `This conversation is not bound to a route on claude-opus-5-5 right now (it was released, or its binding expired): its next message goes to the first available route.`
+- Bound to an account the server no longer lists: `• Now on: an account that is no longer listed, since 09:02 (1 hour 12 minutes ago).`, with the
+  first route now; the release moves it there. A name the server routes to another model (`auto`) is shown as
+  `auto (routed to claude-opus-5-5)`.
+- Session affinity off: `Provimux does not bind conversations to a route (its session affinity is off): every request already goes to the first available route, so there is nothing to move.`
+  Home mode and a plugin scheduler say that Home, or the plugin, chooses the route of every request.
+- Already on the only first route: `Nothing was released: this conversation is already on the first route (Anthropic sub), and no other route shares its priority.`
+  With several accounts of the top priority it offers the release, and says Provimux may choose the same account.
+- The binding changed between the check and the release: `The conversation's binding changed since the check, so nothing was released yet.`, with where it is now.
+
+**What it changes, and for how long.** Only your server's binding of this conversation for the current model, once:
+the next message goes to the first route, and from then on the conversation is bound there as usual (if that account
+cools down again, Provimux moves it again). The check changes nothing. Nothing is saved in Pi.
+
+**What it does not do.** It does not send a message, end a cooldown or choose an account: Provimux chooses, by
+priority, and with several accounts of the top priority its routing strategy picks one, possibly the same. It moves
+only this conversation, for the current model, and not its sub-agents. It sees only conversations your key has used
+since the server last started. Provimux does not move a conversation back by itself in this version: only a release
+does.
+
+**When you update pi-provimux to this version.** Pi now names each conversation on a Claude-format model by its session
+id (`x-session-affinity`, see [Claude Messages format](#claude-messages-format)), where before Provimux recognised it
+by the start of its content. So each conversation already running is bound afresh once, at its next message: that
+message goes to the first route that is free, which may be another account than the one it was on, and may then read
+the whole conversation once without cache. After that one message it is bound as before. Conversations started after
+the update are not affected.
+
+**Resume, compaction, fork.** What names the conversation is Pi's session id, and Pi keeps it or makes a new one:
+
+- **Resume** (`--continue`, `--resume`, `/resume`, `--session`) and moving in `/tree`: the same session, the same
+  id. Provimux finds the same binding while it lasts (by default an hour without a request, and not across a restart
+  of Provimux), and the account answers with its cache as before.
+- **Compaction** (`/compact`, or automatic): the same id, so the conversation stays bound where it was. The summary
+  request Pi sends to make the compaction carries no session id; Provimux routes it on its own, as any request without
+  one.
+- **Fork** (`/fork`, `/clone`, `--fork`): a new session with a new id, so a new conversation for Provimux, bound at the
+  first route that is free. `/provimux-route` in the fork says it has not seen it until its first message.
+- **`/new`**: a new id, a new conversation.
+
 ## What it does
 
 From the original extension:
@@ -183,6 +294,8 @@ Added in pi-provimux:
 - **[Where each model comes from, for other extensions](#where-each-model-comes-from-for-other-extensions).** Over
   Pi's event bus, which accounts may serve each model and, with Provimux, which one answered each response, also over
   the Codex WebSocket. [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) uses it.
+- **[`/provimux-route`](#provimux-route).** Where this conversation is bound on Provimux, and back to its first
+  route, with the cost said first.
 - **One package in Pi's list.** The footer helper loads from the provider, so `pi list` shows a single extension.
 
 ## Install
@@ -446,6 +559,12 @@ instead of the Codex Responses format every other model uses. This happens autom
   and `/ultrafast`) and the Codex WebSocket transport. Thinking, tools, images and auto-compaction work as before.
 - Changing the setting refreshes the model list (the cache records it). The first request of an ongoing session after
   a model switches formats is a cache miss.
+- **The conversation is named:** every request carries the Pi session's id in `x-session-affinity`, as the Codex
+  format carries it in `session-id`, so Provimux binds the conversation by that id (and
+  [`/provimux-route`](#provimux-route) can find it) instead of by the start of its content. The header goes to your
+  server only: Provimux itself does not pass it on to the vendor. A conversation already running when you update to a version that sends it
+  is bound afresh once, at its next message: that message goes to the first free route, and can read the conversation
+  once without cache.
 
 ## Where each model comes from, in its name
 
@@ -560,10 +679,13 @@ from providers.dev.
 
   [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) reads `upstreams: []` as "route not known".
 
-An upstream is `{ provider, model?, subscription? }`: the Pi provider the model would come from if used directly
-(`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider Pi has none for
-(`devin`, `antigravity`); the model's id there when it differs; `true` for a subscription login, `false` for an API
-key, absent when not known.
+An upstream is `{ provider, model?, subscription?, unmapped? }`: the Pi provider the model would come from if used
+directly (`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider Pi has none
+for (`devin`, `antigravity`); the model's id there when it differs; `true` for a subscription login, `false` for an API
+key, absent when not known. `unmapped: true` (only in `model-upstreams:answered`) marks an answer from a credential
+that leads to a service not known: `provider` is then not a Pi or providers.dev id but the name the proxy gave (an API
+key's host, else its provider name), and no providers.dev entry exists under it. A reader that does not know the field
+can ignore it.
 
 How the routes are made:
 
