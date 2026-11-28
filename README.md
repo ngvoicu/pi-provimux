@@ -29,7 +29,7 @@ see [Credits](#credits).
 | Command | What it does | When you would use it |
 | ------- | ------------ | --------------------- |
 | `/login Provimux` | Connects Pi to your server: asks for its address and key, checks that the server answers its model list with them, and loads its models. | The first time, or when the server's address or key changes. |
-| `/provimux-refresh` | Reloads the model list from your server, with the accounts behind each model where the server lists them. | You added or removed a model, an account or a priority on the server, and Pi is still running. |
+| `/provimux-refresh` | Reloads the model list from your server, with the accounts behind each model where the server lists them, and the prices and cache lifetimes it gives for what they answered as. | You added or removed a model, an account or a priority on the server, and Pi is still running. |
 | `/fast` | Turns Fast mode on or off, saved for later starts: asks the server for its priority service tier on Provimux models whose entry lists a service tier, which can cost more. | You want quicker answers and accept that they may cost more. |
 | `/ultrafast` | Turns Ultra Fast mode on or off, saved for later starts: asks the server for its Ultra Fast service tier on Provimux models whose entry lists a service tier. | You want the fastest tier the server offers for the model. |
 | `/pause` | Holds each new model request Pi sends, in every Pi window with pi-provimux that shares your `~/.pi/agent`, until you type `/continue`. | You need Pi to stop sending for a while, for example while you change something on the server. |
@@ -75,8 +75,10 @@ it for Provimux, so it says `Provider is not configured: provimux` (see
 **What it does.** It asks your server for its model list again, now, and updates `/model`: models added on the server
 appear, and models it no longer lists are removed at once. Where the server lists its accounts (Provimux does), it
 also reads again which accounts serve each model, so the names in `/model` (`Claude Opus 5.5 · Anthropic sub,
-fallback api`) and what other extensions are told follow the server. Where the server lists no accounts, or that
-lookup fails, the names in `/model` come without them.
+fallback api`) and what other extensions are told follow the server. From a Provimux that gives them, it also reads the
+prices and cache lifetimes again. A change of priorities on the server reaches the routes other extensions are told
+only here (or in a new session). Where the server lists no accounts, or that lookup fails, the names in `/model` come
+without them.
 
 **Example.** You type `/provimux-refresh`. Pi shows:
 
@@ -621,6 +623,49 @@ It only ever shows the route that produced the answer you see.
 Set `"answered": false` in `~/.pi/agent/provimux.json` to turn it off (takes effect on the next start or
 `/reload`).
 
+## What really answered, for pi-cache-keeper
+
+With [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper), after a fallback the footer names the cache
+lifetime and the price of what really answered, instead of "unknown". Say your Claude login is overloaded and your
+server sends the request on to an OpenRouter key: the footer shows OpenRouter's lifetime and price. A name you set
+yourself (`opus`) gets them too, once it has answered.
+
+**What this release does not do.**
+
+- It shows no countdown for what answered yet; pi-cache-keeper's countdown is the same as before.
+- It does not change when the cache is kept warm.
+- Pi's own total for a turn still uses the model's listed price.
+
+**How it works.** From Provimux 8.1.7-pmx.5 on, each answer from Provimux names its
+[providers.dev](https://providers.dev) entry (except through an account it reaches over an upstream WebSocket; see
+Limitations). That is the model it really sent, at the provider it really sent it to
+(`X-Provimux-Entry`; on the Codex WebSocket, `provimux_entry` in the turn's `response.created`). Behind your name
+`claude-fable-5-2` it can be `claude-subscription/claude-fable-5-2` (your Claude login) or
+`openrouter/anthropic/claude-fable-5.2` (an OpenRouter key). Provimux's model list gives each entry's price, cache
+lifetimes, input window and output limit.
+
+pi-provimux reads that list at the start and on `/provimux-refresh`, as before. When an answer names an entry it does
+not hold yet, it reads the list once more, for the values only: the routes stay as they were until `/provimux-refresh`.
+It never reads the list once per answer. It hands each answer's entry, and the list's values, on to other extensions
+([for other extensions](#where-each-model-comes-from-for-other-extensions)).
+
+**When nothing changes.**
+
+- With a server that names no entries (Provimux before 8.1.7-pmx.5, or CLIProxyAPI), the requests, the names, the
+  prices and what other extensions are told are as before, except for this version's other changes (see the
+  CHANGELOG): Claude-format requests carry the session id, and after a Codex WebSocket replay other extensions are
+  told the attempt that answered.
+- pi-provimux prices nothing new and registers no new model: the models in `/model` and their prices are as before.
+- An answer that names its account but no entry has no values. Nothing is taken from the model's name or the kind of
+  account.
+
+**Limitations.**
+
+- An account that Provimux reaches over an upstream WebSocket (a Codex or xAI account with `websockets: true`) names no
+  entry, so its answers carry no values.
+- When the list could not be read at Pi's start, no values are handed on until `/provimux-refresh` or a new session,
+  as with the routes.
+
 ## Where each model comes from (for other extensions)
 
 Through CLIProxyAPI Pi sees one provider, but each model is served by a subscription login or an API key of some lab,
@@ -668,6 +713,19 @@ from providers.dev.
     model.
 
   [pi-cache-keeper](https://github.com/ngvoicu/pi-cache-keeper) reads `upstreams: []` as "route not known".
+- **From a Provimux that names each answer's providers.dev entry** (Provimux 8.1.7-pmx.5), and only
+  from one:
+  - **`model-upstreams:answered-entry`**: `{ provider, model, entry, account? }`, told just before an answer's
+    `model-upstreams:answered`. `entry` is the entry the answer named (`null` where it named its account but no entry);
+    `account` is Provimux's marker of the account that answered. `model-upstreams:answered` itself carries no entry.
+  - **`model-upstreams`** also carries `figures`: Provimux's object as it gave it (`state`, `dataset_version`,
+    `generated_at`, `fetched_at`, and `entries`: entry → `price`, `cache`, `input_window`, `max_output`; contract 1,
+    US dollars per million tokens, seconds, tokens). When a list read brought by an answer finds other values, the
+    event is told again with the same routes as last told and the new `figures`. The routes are as before.
+  - Readers that know none of this (pi-cache-keeper 0.10.8) read every event as before.
+- **An attempt tried again** (a Codex WebSocket replay after the gateway lost the previous response, an HTTP retry):
+  `model-upstreams:answered` is told for each attempt that names its route, so the last one told is the attempt that
+  answered, as the footer shows.
 
 An upstream is `{ provider, model?, subscription?, unmapped? }`: the Pi provider the model would come from if used
 directly (`anthropic`, `openai-codex`, `openai`, `meta`, `openrouter`, `google`) or a providers.dev provider Pi has none

@@ -1,10 +1,27 @@
 # Changelog
 
-## Unreleased
+## 105.0.9
 
-**`/provimux-route`: which account this conversation is on, and back to a free higher-priority one.** Needs Provimux
-8.1.7-pmx.4 or newer with session affinity on.
+**See what really answered, and move a conversation back to your first account.** With pi-cache-keeper 0.10.9, the
+footer and `/cache-keeper` show the cache lifetimes and price of the account that really answered, also after a
+fallback, where they said "unknown": this needs Provimux 8.1.7-pmx.5. `/provimux-route` shows which of your accounts a
+conversation is on, and `/provimux-route release` moves it back to a free higher-priority one after saying what that
+may cost and asking (Provimux 8.1.7-pmx.4 or newer, with session affinity on). Conversations on Claude-format models
+are now named by their session id, so with session affinity on each running conversation is routed once as a new one,
+at its first message on each model after the update.
 
+- **What really answered, handed on.** After a fallback, pi-cache-keeper's footer can name the cache lifetime and price
+  of what really answered, instead of "unknown". With Provimux 8.1.7-pmx.5, pi-provimux reads the providers.dev entry
+  each answer names (`X-Provimux-Entry`; `provimux_entry` on the Codex WebSocket; an answer through an account
+  Provimux reaches over an upstream WebSocket names none) and Provimux's prices and cache lifetimes, and hands them on
+  (`model-upstreams:answered-entry`; `figures` on `model-upstreams`). The list is read at the start and on
+  `/provimux-refresh`, as before. An answer that names an entry not held yet brings one more read, for the values
+  only: the routes stay as they were until `/provimux-refresh`. It does not change when the cache is kept warm, and
+  Pi's own total still uses the model's listed price. `/provimux-refresh`'s description says it reloads the prices and
+  cache lifetimes too. With an older Provimux or CLIProxyAPI, none of this applies; the replay fix below does.
+- **The attempt that answered.** After a Codex WebSocket replay (the gateway lost the previous response and Pi sent the
+  conversation again), other extensions are told the attempt that answered last. pi-cache-keeper then names the account
+  that answered, not the attempt that failed.
 - **`/provimux-route`** shows which account this conversation is bound to (in the words of the model names) and since
   when, whether that is a fallback and from which account, whether a higher-priority route is free now or when the
   first of them is expected free, and whether the server's automatic return is on (Provimux 8.1.7-pmx.5's
