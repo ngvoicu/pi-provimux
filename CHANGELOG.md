@@ -2,29 +2,29 @@
 
 ## Unreleased
 
-**`/provimux-route`: where this conversation is on your server, and back to its first route.** Needs Provimux
-<version> or newer with session affinity on.
+**`/provimux-route`: which account this conversation is on, and back to a free higher-priority one.** Needs Provimux
+8.1.7-pmx.4 or newer with session affinity on.
 
-- **`/provimux-route`** asks the server which account this conversation is bound to (in the words of the model
-  names), since when, whether that is a fallback and from what, and whether the first route is free now or when it is
-  expected free; an account no longer listed, and a name routed to another model (`auto`), are said as such. It adds
-  what Pi knows of the conversation's cache (when the session last sent a request, and the model's `promptCache`
-  lifetime, which pi-cache-keeper writes), and that Provimux does not move a conversation back by itself. Every call
-  asks afresh; the check sends nothing to a model and costs nothing. A "not seen" right after an answer is asked
-  again once, a moment later, before it is said.
-- **`/provimux-route release`** removes the binding, so the next message goes to the first route. It releases
-  nothing while the first route is still cooling (and says when to try again), releases at once only when Pi knows
-  the cache is cold, and otherwise first says the cost (one read of the whole conversation without cache, in tokens
-  and at list price; quota on a subscription) and asks; outside the TUI, `release yes` confirms. It names the binding
-  it saw (`expect`) and, when that changed meanwhile (409), shows the new state and asks again. Right after a release
-  it closes the conversation's Codex WebSocket, before any further turn, and releases again a binding that a turn on
-  the old socket made. A server without the paths gets a message that names the version needed.
-- **Claude-format models name their conversation:** each request now carries the Pi session's id in
+- **`/provimux-route`** shows which account this conversation is bound to (in the words of the model names) and since
+  when, whether that is a fallback and from which account, whether a higher-priority route is free now or when the
+  first of them is expected free, and whether the server's automatic return is on (Provimux 8.1.7-pmx.5's
+  `cold-after`, as its policy). An account no longer listed, and a name routed to another model (`auto`), are said as
+  such. Every call asks afresh; the check sends nothing to a model and costs nothing. It works while Pi is answering,
+  and in RPC mode.
+- **`/provimux-route release`**, in Pi's interactive terminal while Pi is not answering, says what the move may cost
+  (the next message may read the whole conversation once without cache: tokens, and dollars at Pi's list price for
+  that size; quota on a subscription) and asks. With a yes it removes the binding the check saw (`expect`), so the
+  next message goes to the first available route, and closes the conversation's Codex WebSocket where there may be
+  one. It releases nothing when no higher-priority route is free, when the conversation is already on a first route,
+  or when the binding changed since the check (it shows the new state). In RPC, print and JSON mode it releases
+  nothing and says so. A release whose answer was lost is said to have an unknown outcome. It asks the server with the
+  key and address the model's own turns use. A server without the paths gets a message that names the version needed.
+- **Claude-format models name their conversation:** each turn now carries the Pi session's id in
   `x-session-affinity` (pi-ai's `sendSessionAffinityHeaders`), as Codex-format requests carry `session-id`, so
-  Provimux binds the conversation by that id rather than by the start of its content. A conversation running at the
-  update is bound afresh once, at its next message, which can then go to another account and read the conversation
-  once without cache. The id stays the same on a resume and a compaction (the conversation keeps its binding) and is
-  new on a fork or `/clone`.
+  Provimux binds the conversation by that id rather than by the start of its content. With session affinity on, a
+  conversation running at the update is bound afresh once per model, at its next message on it, which may then go to
+  another account and read the conversation once without cache. The id stays the same on a resume and a compaction
+  and is new on a fork or `/clone`.
 - **`model-upstreams:answered`:** an upstream named by what the proxy said, because its credential leads to a service
   not known, carries `unmapped: true`: its `provider` is the proxy's name for it, not a Pi or providers.dev id.
 
