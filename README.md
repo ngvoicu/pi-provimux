@@ -175,7 +175,7 @@ every call, and shows:
 - whether your server's automatic return is on (below).
 
 The check sends nothing to a model and costs nothing. It works at any time, also while Pi is answering, and in Pi's
-RPC mode.
+RPC mode. It offers the release only where the release would go ahead: in the TUI, with a higher-priority route free.
 
 `/provimux-route release` moves the conversation back, in Pi's interactive terminal and while Pi is not answering:
 
@@ -185,18 +185,22 @@ RPC mode.
 - With a yes, Provimux removes the binding the check saw, and the next message goes to the first available route by
   priority. Where the conversation may be on a Codex WebSocket, that socket is closed, so the next message is routed
   afresh.
-- It releases nothing when no higher-priority route is free (it says when one is expected), when the conversation is
-  already on a first route, while Pi is answering (type it again when the answer is done), or when the binding
+- When the current account is listed, it releases nothing unless a higher-priority route is free (it says when one
+  is expected). It releases nothing when the conversation is already on a first route, while Pi is answering (type it again when the answer is done), or when the binding
   changed since the check (it shows the conversation as it is now).
 - If the release was sent but its answer was lost or could not be read, it says whether it was released is not
   known; `/provimux-route` shows where the conversation is.
 - In RPC mode it releases nothing and says so. In print and JSON mode the command sends nothing and says so on
   stderr.
+- Known limit: a turn that starts between the last idle check and the closing of the socket can overlap the release;
+  `/provimux-route` shows where the conversation ended up.
 
-**Automatic return.** A Provimux whose operator has set `routing.session-affinity-return.cold-after` (from Provimux
-8.1.7-pmx.5) can move a conversation back by itself. The show then says:
-`Automatic return: on. Once no request of this conversation has been routed for 6 minutes (a keep-warm request counts), Provimux can send its next request to a free higher-priority route; a request on an open Codex WebSocket stays on its account.`
-Otherwise it says `Automatic return: off on this server.`
+**Automatic return.** From Provimux 8.1.7-pmx.5 the operator can set `routing.session-affinity-return.cold-after`
+so that the server moves a conversation back by itself. While that rule is in effect the show says, for example with
+`cold-after: 6m`:
+`Automatic return: on. Once no request of this conversation has been routed for 6 minutes (a keep-warm request counts), Provimux can send its next request to a free higher-priority route; a pinned Codex follow-up stays on its account.`
+Otherwise, including where the server leaves the rule off (a `cold-after` at or above the binding's lifetime, or
+`rebind-on: never`), it says `Automatic return: off on this server.`
 
 **Needs Provimux 8.1.7-pmx.4 or newer**, with session affinity on. With an older Provimux, or plain CLIProxyAPI, it
 prints `This server has no conversation routes: /provimux-route needs Provimux 8.1.7-pmx.4 or newer (plain CLIProxyAPI has none). Update Provimux to use it; everything else works as before.`
@@ -225,11 +229,11 @@ Its next message may read the whole conversation once without cache (about 182,0
 ```
 
 On yes: `Released: this conversation is no longer bound to Anthropic api. Its next message goes to the first available route (now: Anthropic sub), and may read the whole conversation once without cache.`
-On no: `Nothing was released: the conversation stays on Anthropic api, with its cache.`
+On no: `Nothing was released.`
 
 **What it changes, and for how long.** Only your server's binding of this conversation for the current model, once:
-the next message goes to the first available route, and from then on the conversation is bound there as usual (if
-that account cools down again, Provimux moves it again). The check changes nothing. Nothing is saved in Pi.
+the next message goes to the first available route, and from then on the conversation is routed as usual. The check
+changes nothing. Nothing is saved in Pi.
 
 **What it does not do.** It does not send a message, end a cooldown or choose an account: Provimux chooses, by
 priority. It moves only this conversation, for the current model, and not its sub-agents. It sees a conversation only
@@ -238,9 +242,9 @@ once your key has used it since the server last started.
 **When you update pi-provimux to this version.** Pi now names each conversation on a Claude-format model by its session
 id (`x-session-affinity`, see [Claude Messages format](#claude-messages-format)), where before Provimux recognised it
 by the start of its content. So, with session affinity on, a conversation already running is bound afresh once for
-each model it uses, at its first message on that model after the update: that message goes to the first free route.
-That may be the account it was on, with its cache, or another one, where it may read the whole conversation once
-without cache. Until that message, `/provimux-route` says Provimux has no record of the conversation. Conversations
+each model it uses, at its first message on that model after the update: that message is routed as a new
+conversation's. It may go to the account it was on, with its cache, or to another one, where it may read the whole
+conversation once without cache. Until that message, `/provimux-route` says Provimux has no record of the conversation. Conversations
 started after the update are not affected.
 
 **Resume, compaction, fork.** What names the conversation is Pi's session id, and Pi keeps it or makes a new one:
@@ -248,9 +252,8 @@ started after the update are not affected.
 - **Resume** (`--continue`, `--resume`, `/resume`, `--session`) and moving in `/tree`: the same session, the same
   id. Provimux finds the same binding while it lasts (by default an hour without a request). With automatic return
   on, its next request can go to a higher-priority route, as any request of the conversation can.
-- **Compaction** (`/compact`, or automatic): the same id, so the conversation stays bound where it was. The summary
-  request Pi sends to make the compaction carries no session id; Provimux routes it on its own, as any request without
-  one.
+- **Compaction** (`/compact`, or automatic): the conversation keeps its id. The summary request Pi sends to make
+  the compaction carries no session id and is routed apart; the next turn is routed as usual.
 - **Fork** (`/fork`, `/clone`, `--fork`): a new session with a new id, so a new conversation for Provimux, bound at the
   first route that is free. `/provimux-route` in the fork says it has no record of it until its first message.
 - **`/new`**: a new id, a new conversation.
@@ -550,7 +553,8 @@ instead of the Codex Responses format every other model uses. This happens autom
   [`/provimux-route`](#provimux-route) can find it) instead of by the start of its content. The summary request of a
   compaction carries none. The header goes to your server only: Provimux itself does not pass it on to the vendor. A
   conversation already running when you update to a version that sends it is bound afresh once for each model, at its
-  next message on it: that message goes to the first free route, and may read the conversation once without cache.
+  next message on it: that message is routed as a new conversation's, and may read the conversation once without
+  cache.
 
 ## Where each model comes from, in its name
 

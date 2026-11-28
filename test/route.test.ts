@@ -43,17 +43,15 @@ describe("/provimux-route: the show", () => {
 		expect(unknown).toContain("• No higher-priority route is free yet, and Provimux does not know when one will be.");
 	});
 
-	it("the current stretch only: after a return it is not a fallback, without a cause; no since, no invented reason", async () => {
+	it("the current binding only: no fallback recorded after a return; no history, without a guessed cause", async () => {
 		const returned = { ...C.FellBack, bound: { ...C.OnFirstRoute.bound } };
-		expect(await shown(returned)).toContain(
-			"\n• Not a fallback: no other account has answered it since it was bound.\n",
-		);
+		expect(await shown(returned)).toContain("\n• No fallback recorded for this binding.\n");
 		const unknown = {
 			...C.FellBack,
 			bound: { ...C.FellBack.bound, since: null, origin: "not-known", fell_back_from: null, fell_back_at: null },
 		};
 		const text = await shown(unknown);
-		expect(text).toContain("\n• Now on: Anthropic api.\n• Whether it fell back is not known.\n");
+		expect(text).toContain("\n• Now on: Anthropic api.\n• No history recorded for this binding.\n");
 		expect(text).not.toMatch(/restart/);
 	});
 
@@ -69,7 +67,7 @@ describe("/provimux-route: the show", () => {
 		const text = await shown(C.BoundToUnlisted);
 		expect(text).toMatch(/^Route of this conversation on auto \(routed to opus\), /);
 		expect(text).toContain(
-			"\n• Now on: an account that is no longer listed, since 09:02 (1 hour 12 minutes ago).\n• Not a fallback: no other account has answered it since it was bound.\n• Provimux does not say where this account ranks. The first route now: Anthropic api.\n",
+			"\n• Now on: an account that is no longer listed, since 09:02 (1 hour 12 minutes ago).\n• No fallback recorded for this binding.\n• Provimux does not say where this account ranks. The first route now: Anthropic api.\n",
 		);
 		expect(text).toContain("To move it now: /provimux-route release");
 		const nowhere = await shown({ ...C.BoundToUnlisted, first: [] });
@@ -80,7 +78,7 @@ describe("/provimux-route: the show", () => {
 	it("automatic return: the server's policy, its setting exactly, never a prediction", async () => {
 		const on = (cold_after_s: number | null) => ({ in_effect: true, cold_after_s });
 		const policy = (after: string) =>
-			`• Automatic return: on. Once no request of this conversation has been routed${after} (a keep-warm request counts), Provimux can send its next request to a free higher-priority route; a request on an open Codex WebSocket stays on its account.`;
+			`• Automatic return: on. Once no request of this conversation has been routed${after} (a keep-warm request counts), Provimux can send its next request to a free higher-priority route; a pinned Codex follow-up stays on its account.`;
 		expect(await shown({ ...C.FellBack, rule: on(360) })).toContain(policy(" for 6 minutes"));
 		expect(await shown({ ...C.FellBack, rule: on(90) })).toContain(policy(" for 90 seconds"));
 		expect(await shown({ ...C.FellBack, rule: on(3600) })).toContain(policy(" for 1 hour"));
@@ -108,11 +106,11 @@ describe("/provimux-route: the show", () => {
 		const cases: Array<[unknown, string]> = [
 			[
 				C.NotSeen,
-				"Provimux has no record of this conversation on opus from your key: it has seen no message of it since it started, or it has forgotten it since its binding expired. Send a message, then type /provimux-route again.",
+				"Provimux has no record of this conversation on opus from your key. Send a message, then type /provimux-route again.",
 			],
 			[
 				{ ...C.NotSeen, conversation: "not-bound" },
-				"This conversation is not bound to a route on opus right now (it was released, or its binding expired): its next message goes to the first available route.",
+				"This conversation is not bound to a route on opus right now: its next message goes to the first available route.",
 			],
 			[
 				C.AffinityOff,
@@ -137,6 +135,14 @@ describe("/provimux-route: the show", () => {
 		expect([first.order, second.order]).toEqual([["show"], ["show"]]);
 		expect(first.notes[0]![0]).toContain("has no record of this conversation");
 		expect(second.notes[0]![0]).toContain("• A higher-priority route is free now: Anthropic sub.");
+	});
+
+	it("offers the release only where it would go ahead: the TUI, a binding with a token, a free higher route", async () => {
+		const hint = "To move it now: /provimux-route release (it says what that may cost and asks first).";
+		expect(await shown(C.FellBack)).toMatch(new RegExp(`\\n${hint.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}$`));
+		expect(await shown(C.FellBack, { mode: "rpc" })).not.toContain("To move it");
+		expect(await shown({ ...C.FellBack, binding: null })).not.toContain("To move it");
+		expect(await shown(C.Cooling)).not.toContain("To move it");
 	});
 
 	it("works while Pi is answering", async () => {
@@ -252,9 +258,7 @@ describe("/provimux-route release", () => {
 				"Its next message may read the whole conversation once without cache (about 182,000 tokens, about $0.55 at the list price; more where the vendor also charges for writing the new cache). Staying costs a cached read, about $0.05 a message, while the cache is warm. On Anthropic sub this is quota of the subscription, not money: the amounts are at API list price, for comparison.",
 			],
 		]);
-		expect(run.notes).toEqual([
-			["Nothing was released: the conversation stays on Anthropic api, with its cache.", "info"],
-		]);
+		expect(run.notes).toEqual([["Nothing was released.", "info"]]);
 		expect(run.order).toEqual(["show", "ask"]);
 	});
 
@@ -304,7 +308,7 @@ describe("/provimux-route release", () => {
 			],
 			[
 				C.NotSeen,
-				"Provimux has no record of this conversation on opus from your key: it has seen no message of it since it started, or it has forgotten it since its binding expired. Send a message, then type /provimux-route again. Nothing was released.",
+				"Provimux has no record of this conversation on opus from your key. Send a message, then type /provimux-route again. Nothing was released.",
 			],
 			[
 				C.AffinityOff,
@@ -419,7 +423,7 @@ describe("/provimux-route release", () => {
 				{ unreachable: "The operation was aborted due to timeout" },
 				"the server's answer did not come (The operation was aborted due to timeout)",
 			],
-			[{ status: 502 }, "the server's answer did not come (HTTP 502)"],
+			[{ status: 503 }, "the server could not confirm the release (HTTP 503)"],
 			[ok({ hello: 1 }), "the server's answer could not be read"],
 		];
 		for (const [answer, why] of cases) {

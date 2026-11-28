@@ -126,7 +126,7 @@ export function registerRouteCommand(options: RouteCommandOptions): void {
 			return;
 		}
 		if (!release) {
-			ctx.ui.notify(showText(shown, model.id, clockOf(shown)), "info");
+			ctx.ui.notify(showText(shown, model.id, clockOf(shown), ctx.mode === "tui"), "info");
 			return;
 		}
 
@@ -157,7 +157,7 @@ export function registerRouteCommand(options: RouteCommandOptions): void {
 			costText({ tokens: ctx.getContextUsage()?.tokens, model, to: shown.first }),
 		);
 		if (!ok) {
-			ctx.ui.notify(`Nothing was released: the conversation stays on ${here}, with its cache.`, "info");
+			ctx.ui.notify("Nothing was released.", "info");
 			return;
 		}
 		if (busy()) return;
@@ -168,15 +168,18 @@ export function registerRouteCommand(options: RouteCommandOptions): void {
 			const moved = "Nothing was released: this conversation's binding changed since the check.";
 			ctx.ui.notify(
 				changed
-					? `${moved}\n${showText(changed, model.id, clockOf(changed))}`
+					? `${moved}\n${showText(changed, model.id, clockOf(changed), true)}`
 					: `${moved} Check again with /${ROUTE_COMMAND}.`,
 				"warning",
 			);
 			return;
 		}
 		if (answer.kind === "unreachable" || answer.status >= 500) {
-			const what = answer.kind === "unreachable" ? answer.message : `HTTP ${answer.status}`;
-			ctx.ui.notify(unknownOutcome(`the server's answer did not come (${what})`), "error");
+			const why =
+				answer.kind === "unreachable"
+					? `the server's answer did not come (${answer.message})`
+					: `the server could not confirm the release (HTTP ${answer.status})`;
+			ctx.ui.notify(unknownOutcome(why), "error");
 			return;
 		}
 		if (answer.status !== 200) {
@@ -288,7 +291,6 @@ function errorMessage(body: unknown): string {
 export interface RouteRow {
 	provider: string;
 	kind: string;
-	priority: number;
 	host?: string;
 }
 
@@ -338,7 +340,6 @@ function parseRow(value: unknown): RouteRow | null {
 	return {
 		provider: value.provider,
 		kind: typeof value.kind === "string" ? value.kind : "",
-		priority: typeof value.priority === "number" ? value.priority : 0,
 		...(typeof value.host === "string" && value.host ? { host: value.host } : {}),
 	};
 }
@@ -529,16 +530,19 @@ function unboundText(answer: { affinity: string; conversation: string }, model: 
 			return `Provimux says its session affinity is "${answer.affinity}", which this version of pi-provimux does not know: nothing to show.`;
 	}
 	if (answer.conversation === "not-seen")
-		return `Provimux has no record of this conversation on ${model} from your key: it has seen no message of it since it started, or it has forgotten it since its binding expired. Send a message, then type /${ROUTE_COMMAND} again.`;
+		return `Provimux has no record of this conversation on ${model} from your key. Send a message, then type /${ROUTE_COMMAND} again.`;
 	if (answer.conversation === "not-bound")
-		return `This conversation is not bound to a route on ${model} right now (it was released, or its binding expired): its next message goes to the first available route.`;
+		return `This conversation is not bound to a route on ${model} right now: its next message goes to the first available route.`;
 	if (answer.conversation !== "bound")
 		return `Provimux says the conversation is "${answer.conversation}", which this version of pi-provimux does not know: nothing to show.`;
 	return undefined;
 }
 
-/** A show in full: the header line, then what it found, then what to type. */
-export function showText(answer: ShowAnswer, model: string, clock: Clock): string {
+/**
+ * A show in full: the header line, then what it found, then what to type. The release is offered only where the
+ * release would go ahead: in the TUI, for a binding with a token, where the release's own eligibility allows it.
+ */
+export function showText(answer: ShowAnswer, model: string, clock: Clock, tui: boolean): string {
 	const name = nameOf(answer, model);
 	const head = `Route of this conversation on ${name}, as Provimux says now (this check sends nothing to a model and costs nothing):`;
 	const unbound = unboundText(answer, name);
@@ -556,9 +560,9 @@ export function showText(answer: ShowAnswer, model: string, clock: Clock): strin
 		const until = bound.fellBackFrom && bound.fellBackAt ? ` until ${clockTime(bound.fellBackAt, clock)}` : "";
 		lines.push(`• A fallback${from}${until}.`);
 	} else if (bound.origin === "first") {
-		lines.push("• Not a fallback: no other account has answered it since it was bound.");
+		lines.push("• No fallback recorded for this binding.");
 	} else {
-		lines.push("• Whether it fell back is not known.");
+		lines.push("• No history recorded for this binding.");
 	}
 
 	if (!position) {
@@ -588,7 +592,7 @@ export function showText(answer: ShowAnswer, model: string, clock: Clock): strin
 		lines.push("• This is a sub-agent's conversation: a release of its main conversation does not move it.");
 
 	const eligibility = releaseEligibility(answer);
-	if (eligibility === "release")
+	if (tui && answer.binding && eligibility === "release")
 		lines.push(`To move it now: /${ROUTE_COMMAND} release (it says what that may cost and asks first).`);
 	if (eligibility === "cooling") lines.push(`To check again later: /${ROUTE_COMMAND}.`);
 	return lines.join("\n");
@@ -598,7 +602,7 @@ export function showText(answer: ShowAnswer, model: string, clock: Clock): strin
 function ruleText(rule: ShowAnswer["rule"]): string {
 	if (!rule.inEffect) return "Automatic return: off on this server.";
 	const after = rule.coldAfterS ? ` for ${exactDuration(rule.coldAfterS)}` : "";
-	return `Automatic return: on. Once no request of this conversation has been routed${after} (a keep-warm request counts), Provimux can send its next request to a free higher-priority route; a request on an open Codex WebSocket stays on its account.`;
+	return `Automatic return: on. Once no request of this conversation has been routed${after} (a keep-warm request counts), Provimux can send its next request to a free higher-priority route; a pinned Codex follow-up stays on its account.`;
 }
 
 // --- What a move may cost. --------------------------------------------------------------------------------------------
